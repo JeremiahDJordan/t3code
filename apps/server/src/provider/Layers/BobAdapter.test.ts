@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeSqlite from "node:sqlite";
 import * as NodeURL from "node:url";
@@ -10,6 +11,8 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -18,12 +21,16 @@ import {
   BOB_DEFAULT_MODEL,
   type BobAuthMethod,
   BobSettings,
+  type ProviderApprovalDecision,
+  type ProviderRuntimeEvent,
   ThreadId,
 } from "@t3tools/contracts";
 
+import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
-import { BOB_API_KEY_REQUIRED_MESSAGE } from "../acp/BobAcpSupport.ts";
+import { BOB_API_KEY_REQUIRED_MESSAGE, BOB_SSO_SIGN_IN_MESSAGE } from "../acp/BobAcpSupport.ts";
+import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import { makeBobAdapter } from "./BobAdapter.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
@@ -59,10 +66,45 @@ async function readRequestLog(filePath: string) {
     .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
+type BobAdapter = Effect.Success<ReturnType<typeof makeBobAdapter>>;
+
+/** The params of each request T3 sent Bob with `method`, in order. */
+function paramsOf(requests: ReadonlyArray<Record<string, unknown>>, method: string) {
+  return requests
+    .filter((entry) => entry.method === method)
+    .map((entry) => entry.params as Record<string, unknown>);
+}
+
+/** T3's answers to Bob's permission requests, in order. */
+function permissionOutcomes(requests: ReadonlyArray<Record<string, unknown>>) {
+  return requests
+    .filter((entry) => !("method" in entry) && "result" in entry)
+    .map((entry) => (entry.result as { readonly outcome: unknown }).outcome);
+}
+
+/** Listens from now on; the returned effect waits for the first matching event. */
+const nextEvent = (adapter: BobAdapter, predicate: (event: ProviderRuntimeEvent) => boolean) =>
+  adapter.streamEvents.pipe(
+    Stream.filter(predicate),
+    Stream.runHead,
+    Effect.map(Option.getOrThrow),
+    Effect.forkChild({ startImmediately: true }),
+    Effect.map(Fiber.join),
+  );
+
+/** Listens from now on; the returned effect waits for every event up to the first matching one. */
+const eventsUntil = (adapter: BobAdapter, predicate: (event: ProviderRuntimeEvent) => boolean) =>
+  adapter.streamEvents.pipe(
+    Stream.takeUntil(predicate),
+    Stream.runCollect,
+    Effect.forkChild({ startImmediately: true }),
+    Effect.map(Fiber.join),
+  );
+
 const withMockBob = <A, E, R>(
   extraEnv: Record<string, string> | undefined,
   body: (input: {
-    readonly adapter: Effect.Success<ReturnType<typeof makeBobAdapter>>;
+    readonly adapter: BobAdapter;
     readonly requestLogPath: string;
     readonly taskDatabasePath: string;
   }) => Effect.Effect<A, E, R>,
@@ -141,41 +183,427 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
-  it.effect("answers permission prompts with Bob's own option ids", () =>
+  it.effect("answers Bob's permission prompts with its own option ids", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-permissions");
+        const decisions: Array<ProviderApprovalDecision> = ["accept", "decline", "cancel"];
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.type === "request.opened"
+            ? adapter.respondToRequest(
+                threadId,
+                ApprovalRequestId.make(String(event.requestId)),
+                decisions.shift() ?? "cancel",
+              )
+            : Effect.void,
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkChild({ startImmediately: true }),
+        );
+
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        });
+        for (const input of ["list files", "list them again", "and once more"]) {
+          yield* adapter.sendTurn({ threadId, input });
+        }
+
+        assert.deepStrictEqual(
+          Array.from(yield* Fiber.join(completed), (event) =>
+            event.type === "turn.completed" ? event.payload.state : undefined,
+          ),
+          ["completed", "completed", "cancelled"],
+        );
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(permissionOutcomes(requests), [
+          { outcome: "selected", optionId: "allow" },
+          { outcome: "selected", optionId: "reject" },
+          { outcome: "cancelled" },
+        ]);
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("approves Bob's tools itself in full access and maps their progress", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-full-access-tools");
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const turn = yield* adapter.sendTurn({ threadId, input: "list files" });
+
+        const collected = Array.from(yield* events);
+        assert.isFalse(collected.some((event) => event.type === "request.opened"));
+        const toolEvents = collected.filter(
+          (event) =>
+            (event.type === "item.updated" || event.type === "item.completed") &&
+            event.itemId === "bob-tool-1",
+        );
+        // Bob names the command only when the call starts; its output updates keep showing it.
+        assert.isNotEmpty(toolEvents);
+        for (const event of toolEvents) {
+          assert.equal(event.turnId, turn.turnId);
+          assert.deepStrictEqual(
+            (event.type === "item.updated" || event.type === "item.completed") && [
+              event.payload.itemType,
+              event.payload.title,
+              event.payload.detail,
+            ],
+            ["command_execution", "Ran command", "ls -la"],
+          );
+        }
+        const finished = toolEvents.at(-1);
+        assert.equal(finished?.type === "item.completed" && finished.payload.status, "completed");
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(permissionOutcomes(requests), [
+          { outcome: "selected", optionId: "allow_always" },
+        ]);
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("streams Bob's thoughts, plan, and reply on the running turn", () =>
+    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-stream");
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const turn = yield* adapter.sendTurn({ threadId, input: "hello" });
+
+        const onTurn = Array.from(yield* events).filter((event) => event.turnId === turn.turnId);
+        assert.deepStrictEqual(
+          onTurn.flatMap((event) =>
+            event.type === "content.delta"
+              ? [[event.payload.streamKind, event.payload.delta]]
+              : event.type === "turn.plan.updated"
+                ? [["plan", event.payload.plan.map((step) => step.status).join(",")]]
+                : [],
+          ),
+          [
+            ["reasoning_text", "Checking the workspace."],
+            ["plan", "completed,inProgress"],
+            ["assistant_text", "hello from mock"],
+          ],
+        );
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("sends a slash command to Bob without T3's runtime instructions", () =>
+    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-slash-command");
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId, input: "hello" });
+        yield* adapter.sendTurn({ threadId, input: "/create-skill foo" });
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(
+          paramsOf(requests, "session/prompt").map((params) => params.prompt),
+          [
+            [
+              { type: "text", text: "hello" },
+              { type: "text", text: buildRuntimeInstructions({ harness: "Bob" }) },
+            ],
+            [{ type: "text", text: "/create-skill foo" }],
+          ],
+        );
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("sends image attachments to Bob as ACP image blocks", () =>
+    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-image");
+        const { attachmentsDir } = yield* ServerConfig;
+        const attachment = {
+          type: "image" as const,
+          id: "bob-image-12345678-1234-1234-1234-123456789abc",
+          name: "screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 4,
+        };
+        const attachmentPath = NodePath.join(attachmentsDir, attachmentRelativePath(attachment)!);
+        NodeFS.mkdirSync(NodePath.dirname(attachmentPath), { recursive: true });
+        NodeFS.writeFileSync(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
+
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId, input: "what is this?", attachments: [attachment] });
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(paramsOf(requests, "session/prompt")[0]?.prompt, [
+          { type: "text", text: "what is this?" },
+          { type: "image", data: "AQIDBA==", mimeType: "image/png" },
+          { type: "text", text: buildRuntimeInstructions({ harness: "Bob" }) },
+        ]);
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("resumes the stored Bob task instead of opening a new one", () =>
+    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-resume");
+        const session = yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "bob-task-7" },
+        });
+        assert.deepStrictEqual(session.resumeCursor, { schemaVersion: 1, sessionId: "bob-task-7" });
+        yield* adapter.sendTurn({ threadId, input: "carry on" });
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(
+          paramsOf(requests, "session/resume").map((params) => params.sessionId),
+          ["bob-task-7"],
+        );
+        assert.deepStrictEqual(paramsOf(requests, "session/new"), []);
+        assert.deepStrictEqual(
+          paramsOf(requests, "session/prompt").map((params) => params.sessionId),
+          ["bob-task-7"],
+        );
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("continues in a new Bob task, with a warning, when the stored one is gone", () =>
     withMockBob(
-      { T3_ACP_EMIT_TOOL_CALLS: "1", T3_ACP_ALLOW_ONCE_OPTION_ID: "proceed_once" },
+      { T3_ACP_BOB: "1", T3_ACP_BOB_RESUME_NOT_FOUND: "1" },
       ({ adapter, requestLogPath }) =>
         Effect.gen(function* () {
-          const threadId = ThreadId.make("bob-permission-option-id");
-          const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
-            event.type === "request.opened"
-              ? adapter.respondToRequest(
-                  threadId,
-                  ApprovalRequestId.make(String(event.requestId)),
-                  "accept",
-                )
-              : Effect.void,
-          ).pipe(Effect.forkChild);
+          const threadId = ThreadId.make("bob-resume-gone");
+          const warning = yield* nextEvent(adapter, (event) => event.type === "runtime.warning");
 
-          yield* adapter.startSession({
+          const session = yield* adapter.startSession({
             threadId,
             cwd: process.cwd(),
-            runtimeMode: "approval-required",
+            runtimeMode: "full-access",
+            resumeCursor: { schemaVersion: 1, sessionId: "deleted-task" },
           });
-          yield* adapter.sendTurn({ threadId, input: "run a tool", attachments: [] });
+          assert.deepStrictEqual(session.resumeCursor, {
+            schemaVersion: 1,
+            sessionId: "mock-session-1",
+          });
+          const warned = yield* warning;
+          assert.equal(
+            warned.type === "runtime.warning" && warned.payload.detail,
+            "Resource not found: deleted-task",
+          );
+          assert.isTrue(yield* adapter.hasSession(threadId));
 
           const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
-          assert.isTrue(
-            requests.some(
-              (entry) =>
-                !("method" in entry) &&
-                JSON.stringify(entry.result).includes('"optionId":"proceed_once"'),
-            ),
+          assert.deepStrictEqual(
+            requests
+              .map((entry) => entry.method)
+              .filter((method) => method === "session/resume" || method === "session/new"),
+            ["session/resume", "session/new"],
           );
 
-          yield* Fiber.interrupt(eventsFiber);
           yield* adapter.stopSession(threadId);
         }),
+    ),
+  );
+
+  it.effect("keeps Bob's sign-in error rather than replacing the stored task", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_SIGNED_OUT: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const error = yield* adapter
+          .startSession({
+            threadId: ThreadId.make("bob-resume-signed-out"),
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+            resumeCursor: { schemaVersion: 1, sessionId: "bob-task-7" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(
+          error._tag === "ProviderAdapterRequestError" && error.detail,
+          BOB_SSO_SIGN_IN_MESSAGE,
+        );
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(paramsOf(requests, "session/new"), []);
+      }),
+    ),
+  );
+
+  it.effect("cancels Bob's running prompt when the turn is interrupted", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-interrupt");
+          yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+          const working = yield* nextEvent(adapter, (event) => event.type === "item.updated");
+          const completed = yield* nextEvent(adapter, (event) => event.type === "turn.completed");
+
+          const turnFiber = yield* adapter
+            .sendTurn({ threadId, input: "run the long command" })
+            .pipe(Effect.forkChild);
+          yield* working;
+          yield* adapter.interruptTurn(threadId);
+
+          const turn = yield* Fiber.join(turnFiber);
+          const settled = yield* completed;
+          assert.deepStrictEqual(
+            settled.type === "turn.completed" && [settled.turnId, settled.payload.state],
+            [turn.turnId, "cancelled"],
+          );
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          assert.lengthOf(paramsOf(requests, "session/cancel"), 1);
+
+          yield* adapter.stopSession(threadId);
+        }),
+    ),
+  );
+
+  it.effect("drops a follow-up still waiting behind the prompt that Stop cancels", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-interrupt-queued");
+          yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+          const events = yield* eventsUntil(adapter, (event) => event.type === "session.exited");
+          const working = yield* nextEvent(adapter, (event) => event.type === "item.updated");
+
+          const first = yield* adapter
+            .sendTurn({ threadId, input: "run the long command" })
+            .pipe(Effect.forkChild);
+          yield* working;
+          const followUp = yield* adapter
+            .sendTurn({ threadId, input: "then run another" })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* adapter.interruptTurn(threadId);
+
+          const turn = yield* Fiber.join(first);
+          assert.equal((yield* Fiber.join(followUp)).turnId, turn.turnId);
+          yield* adapter.stopSession(threadId);
+
+          assert.deepStrictEqual(
+            Array.from(yield* events).flatMap((event) =>
+              event.type === "turn.completed" ? [[event.turnId, event.payload.state]] : [],
+            ),
+            [[turn.turnId, "cancelled"]],
+          );
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          assert.lengthOf(paramsOf(requests, "session/prompt"), 1);
+        }),
+    ),
+  );
+
+  it.effect("sends a follow-up after Bob's running prompt and continues the same turn", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-steer");
+        const opened = yield* Queue.unbounded<ApprovalRequestId>();
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.type === "request.opened"
+            ? Queue.offer(opened, ApprovalRequestId.make(String(event.requestId)))
+            : Effect.void,
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        });
+        const events = yield* eventsUntil(adapter, (event) => event.type === "session.exited");
+
+        // Bob holds the first prompt open until its tool is approved.
+        const first = yield* adapter
+          .sendTurn({ threadId, input: "list files" })
+          .pipe(Effect.forkChild);
+        const firstRequest = yield* Queue.take(opened);
+        const followUp = yield* adapter
+          .sendTurn({ threadId, input: "then summarize them" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* adapter.respondToRequest(threadId, firstRequest, "accept");
+        yield* adapter.respondToRequest(threadId, yield* Queue.take(opened), "accept");
+
+        const turn = yield* Fiber.join(first);
+        assert.equal((yield* Fiber.join(followUp)).turnId, turn.turnId);
+        yield* adapter.stopSession(threadId);
+
+        assert.deepStrictEqual(
+          Array.from(yield* events).flatMap((event) =>
+            event.type === "turn.started" || event.type === "turn.completed"
+              ? [[event.type, event.turnId]]
+              : [],
+          ),
+          [
+            ["turn.started", turn.turnId],
+            ["turn.completed", turn.turnId],
+          ],
+        );
+        // The follow-up reaches Bob only after the first prompt's tool was answered.
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        const followUpIndex = requests.findIndex(
+          (entry) =>
+            entry.method === "session/prompt" &&
+            JSON.stringify(entry.params).includes("then summarize them"),
+        );
+        const firstAnswerIndex = requests.findIndex((entry) => "result" in entry);
+        assert.isAbove(followUpIndex, firstAnswerIndex);
+      }),
+    ),
+  );
+
+  it.effect("reports Bob's reason for a failed turn and settles it", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_FAIL_PROMPT: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-prompt-error");
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const completed = yield* nextEvent(adapter, (event) => event.type === "turn.completed");
+
+        const error = yield* adapter.sendTurn({ threadId, input: "hello" }).pipe(Effect.flip);
+        assert.deepStrictEqual(
+          error._tag === "ProviderAdapterRequestError" && [error.method, error.detail],
+          ["session/prompt", "Mock prompt failure"],
+        );
+        const settled = yield* completed;
+        assert.equal(settled.type === "turn.completed" && settled.payload.state, "failed");
+        assert.isTrue(yield* adapter.hasSession(threadId));
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("ends the session with an error when Bob exits mid-turn", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_EXIT_ON_PROMPT: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-exit");
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const events = yield* eventsUntil(adapter, (event) => event.type === "session.exited");
+
+        yield* adapter.sendTurn({ threadId, input: "hello" }).pipe(Effect.flip);
+
+        const collected = Array.from(yield* events);
+        const settled = collected.find((event) => event.type === "turn.completed");
+        assert.equal(settled?.type === "turn.completed" && settled.payload.state, "failed");
+        const exited = collected.at(-1);
+        assert.equal(exited?.type === "session.exited" && exited.payload.exitKind, "error");
+        assert.isFalse(yield* adapter.hasSession(threadId));
+      }),
     ),
   );
 

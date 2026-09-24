@@ -2,6 +2,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 
@@ -16,7 +17,12 @@ const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
 const exitLogPath = process.env.T3_ACP_EXIT_LOG_PATH;
 const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
 // Bob Shell advertises session modes only: no config options, and modes switch via session/set_mode.
+// It runs one prompt at a time, resolves a cancelled prompt as `cancelled`, and resumes without replay.
 const bobProfile = process.env.T3_ACP_BOB === "1";
+const bobResumeNotFound = process.env.T3_ACP_BOB_RESUME_NOT_FOUND === "1";
+const bobSignedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
+const bobLicenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
+const bobExitOnPrompt = process.env.T3_ACP_BOB_EXIT_ON_PROMPT === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
@@ -62,9 +68,10 @@ const initialGrokReasoningEffort =
   process.env.T3_ACP_INITIAL_GROK_REASONING_EFFORT?.trim() || undefined;
 const promptDelayMs = Number(process.env.T3_ACP_PROMPT_DELAY_MS ?? "0");
 const permissionOptionIds = {
-  allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? "allow-once",
-  allowAlways: process.env.T3_ACP_ALLOW_ALWAYS_OPTION_ID ?? "allow-always",
-  rejectOnce: process.env.T3_ACP_REJECT_ONCE_OPTION_ID ?? "reject-once",
+  allowOnce: process.env.T3_ACP_ALLOW_ONCE_OPTION_ID ?? (bobProfile ? "allow" : "allow-once"),
+  allowAlways:
+    process.env.T3_ACP_ALLOW_ALWAYS_OPTION_ID ?? (bobProfile ? "allow_always" : "allow-always"),
+  rejectOnce: process.env.T3_ACP_REJECT_ONCE_OPTION_ID ?? (bobProfile ? "reject" : "reject-once"),
 };
 const omitAllowAlways = process.env.T3_ACP_OMIT_ALLOW_ALWAYS === "1";
 const permissionRequestCount = Math.max(
@@ -82,6 +89,8 @@ let currentFast = false;
 let promptCount = 0;
 let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
+let bobRunningPrompt: Deferred.Deferred<void> | undefined;
+let bobTitled = false;
 
 function promptIdFromRequestMeta(
   request: Pick<AcpSchema.PromptRequest, "_meta">,
@@ -402,6 +411,25 @@ const program = Effect.gen(function* () {
         ],
       },
     });
+  // Bob checks its sign-in and license before it opens or resumes a session.
+  const bobSessionSetupError: Effect.Effect<void, AcpError.AcpRequestError> = bobSignedOut
+    ? AcpError.AcpRequestError.authRequired()
+    : bobLicenseRequired
+      ? AcpError.AcpRequestError.invalidRequest(
+          "Invalid request: A license agreement is required. Review it with --show-license and accept it with --accept-license.",
+        )
+      : Effect.void;
+  const publishBobCommands = (targetSessionId: string) =>
+    agent.client.sessionUpdate({
+      sessionId: targetSessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [
+          { name: "create-skill", description: "Create a skill", input: { hint: "name" } },
+          { name: "init", description: "Analyze the project" },
+        ],
+      },
+    });
 
   yield* agent.handleInitialize((request) =>
     Effect.gen(function* () {
@@ -426,6 +454,15 @@ const program = Effect.gen(function* () {
             promptCapabilities: { image: true, embeddedContext: true },
           },
           authMethods: [{ id: "oauth-personal", name: "Sign in with Google" }],
+        };
+      }
+      if (bobProfile) {
+        return {
+          protocolVersion: 1,
+          agentCapabilities: {
+            loadSession: true,
+            sessionCapabilities: { list: {}, resume: {}, close: {} },
+          },
         };
       }
       return {
@@ -460,6 +497,11 @@ const program = Effect.gen(function* () {
       if (antigravityProfile) {
         yield* publishAntigravityCommands(sessionId);
       }
+      if (bobProfile) {
+        yield* bobSessionSetupError;
+        yield* publishBobCommands(sessionId);
+        return { sessionId, modes: modeState() };
+      }
       return {
         sessionId,
         modes: modeState(),
@@ -471,6 +513,17 @@ const program = Effect.gen(function* () {
 
   yield* agent.handleResumeSession((request) =>
     Effect.gen(function* () {
+      if (bobProfile) {
+        yield* bobSessionSetupError;
+        // Bob answers every other failed resume (unknown task, other cwd) with the same error.
+        if (bobResumeNotFound) {
+          return yield* AcpError.AcpRequestError.resourceNotFound(
+            `Resource not found: ${request.sessionId}`,
+            { uri: request.sessionId },
+          );
+        }
+        return { modes: modeState() };
+      }
       yield* agent.client.sessionUpdate({
         sessionId: request.sessionId,
         update: {
@@ -612,6 +665,9 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
+      if (bobRunningPrompt) {
+        yield* Deferred.succeed(bobRunningPrompt, undefined);
+      }
       if (completeFirstPromptOnCancel) {
         yield* Deferred.succeed(nativeCancelRequested, undefined);
         yield* agent.client.sessionUpdate({
@@ -637,10 +693,26 @@ const program = Effect.gen(function* () {
     }),
   );
 
-  yield* agent.handlePrompt((request) =>
+  const runPrompt = (
+    request: AcpSchema.PromptRequest,
+  ): Effect.Effect<AcpSchema.PromptResponse, AcpError.AcpError> =>
     Effect.gen(function* () {
       const requestedSessionId = String(request.sessionId ?? sessionId);
       promptCount += 1;
+
+      if (bobExitOnPrompt) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "partial before crash" },
+          },
+        });
+        return yield* Effect.sync(() => {
+          process.stderr.write("bob: fatal error\n");
+          process.exit(1);
+        });
+      }
 
       if (completeFirstPromptOnCancel && promptCount === 1) {
         yield* agent.client.sessionUpdate({
@@ -679,7 +751,12 @@ const program = Effect.gen(function* () {
       }
 
       if (failPrompt) {
-        return yield* AcpError.AcpRequestError.internalError("Mock prompt failure");
+        // Bob reports a failed turn as a generic internal error with the reason in `details`.
+        return yield* bobProfile
+          ? AcpError.AcpRequestError.internalError("Internal error", {
+              details: "Mock prompt failure",
+            })
+          : AcpError.AcpRequestError.internalError("Mock prompt failure");
       }
 
       if (emitStaleXAiPromptCompleteBeforeSecondHang && promptCount === 1) {
@@ -1054,6 +1131,59 @@ const program = Effect.gen(function* () {
         return { stopReason: "end_turn" };
       }
 
+      if (emitToolCalls && bobProfile) {
+        // Bob asks before a pending tool runs, then streams its output and repeats it on completion.
+        const toolCallId = "bob-tool-1";
+        const toolCall = {
+          toolCallId,
+          title: "ls -la",
+          kind: "execute",
+          status: "pending",
+        } satisfies AcpSchema.ToolCallUpdate;
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: { sessionUpdate: "tool_call", ...toolCall },
+        });
+        const permission = yield* agent.client.requestPermission({
+          sessionId: requestedSessionId,
+          toolCall,
+          options: [
+            { optionId: permissionOptionIds.allowOnce, name: "Allow", kind: "allow_once" },
+            {
+              optionId: permissionOptionIds.allowAlways,
+              name: "Always allow",
+              kind: "allow_always",
+            },
+            { optionId: permissionOptionIds.rejectOnce, name: "Reject", kind: "reject_once" },
+            { optionId: "reject_always", name: "Always reject", kind: "reject_always" },
+          ],
+        });
+        if (permission.outcome.outcome === "cancelled") {
+          return { stopReason: "cancelled" };
+        }
+        if (permission.outcome.optionId.startsWith("reject")) {
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: { sessionUpdate: "tool_call_update", toolCallId, status: "failed" },
+          });
+          return { stopReason: "end_turn" };
+        }
+        const output = [
+          { type: "content", content: { type: "text", text: "README.md\n" } },
+        ] satisfies AcpSchema.ToolCallUpdate["content"];
+        for (const update of [
+          { status: "in_progress" },
+          { content: output },
+          { status: "completed", content: output },
+        ] as const) {
+          yield* agent.client.sessionUpdate({
+            sessionId: requestedSessionId,
+            update: { sessionUpdate: "tool_call_update", toolCallId, ...update },
+          });
+        }
+        return { stopReason: "end_turn" };
+      }
+
       if (emitToolCalls) {
         const toolCallId = "tool-call-1";
 
@@ -1369,6 +1499,16 @@ const program = Effect.gen(function* () {
         return { stopReason: "end_turn" };
       }
 
+      if (bobProfile) {
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: "Checking the workspace." },
+          },
+        });
+      }
+
       yield* agent.client.sessionUpdate({
         sessionId: requestedSessionId,
         update: {
@@ -1397,8 +1537,46 @@ const program = Effect.gen(function* () {
       });
 
       return { stopReason: "end_turn" };
-    }),
-  );
+    });
+
+  // Bob rejects a second prompt while one runs and answers `session/cancel` by resolving the
+  // running prompt as cancelled. After a prompt that was not cancelled it updates the task's
+  // title (first prompt only) and time.
+  const runBobPrompt = (request: AcpSchema.PromptRequest) =>
+    Effect.gen(function* () {
+      const cancelled = yield* Deferred.make<void>();
+      if (bobRunningPrompt) {
+        return yield* AcpError.AcpRequestError.invalidRequest(
+          "Session is already running a prompt",
+        );
+      }
+      bobRunningPrompt = cancelled;
+      const result = yield* Effect.raceFirst(
+        runPrompt(request),
+        Deferred.await(cancelled).pipe(Effect.as({ stopReason: "cancelled" } as const)),
+      ).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            bobRunningPrompt = undefined;
+          }),
+        ),
+      );
+      if (result.stopReason !== "cancelled") {
+        const firstText = request.prompt.find((block) => block.type === "text");
+        yield* agent.client.sessionUpdate({
+          sessionId: request.sessionId,
+          update: {
+            sessionUpdate: "session_info_update",
+            ...(!bobTitled && firstText?.type === "text" ? { title: firstText.text } : {}),
+            updatedAt: DateTime.formatIso(yield* DateTime.now),
+          },
+        });
+        bobTitled = true;
+      }
+      return result;
+    });
+
+  yield* agent.handlePrompt((request) => (bobProfile ? runBobPrompt(request) : runPrompt(request)));
 
   yield* agent.handleUnknownExtRequest((method, params) => {
     if (method === "_test/environment") {
@@ -1495,7 +1673,10 @@ const program = Effect.gen(function* () {
             currentModeId,
           },
         })
-        .pipe(Effect.as({}));
+        .pipe(
+          Effect.andThen(bobProfile ? publishBobCommands(requestedSessionId) : Effect.void),
+          Effect.as({}),
+        );
     }
 
     return Effect.succeed({});
