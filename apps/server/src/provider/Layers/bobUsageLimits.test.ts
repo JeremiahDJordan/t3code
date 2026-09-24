@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - fixtures write the raw JSON files and output Bob produces.
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -85,17 +85,23 @@ describe("bobProfileToUsage", () => {
 });
 
 it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
-  const makeBobHome = (secrets: string) =>
+  /** A home directory holding the files Bob keeps in `~/.bob/settings`, by name. */
+  const makeBobHome = (files: Record<string, string>) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-bob-home-" });
       yield* fs.makeDirectory(NodePath.join(home, ".bob", "settings"), { recursive: true });
-      yield* fs.writeFileString(
-        NodePath.join(home, ".bob", "settings", "auth-secrets.json"),
-        secrets,
-      );
+      for (const [name, contents] of Object.entries(files)) {
+        yield* fs.writeFileString(NodePath.join(home, ".bob", "settings", name), contents);
+      }
       return home;
     });
+  const login = (token: string) => ({
+    token,
+    refreshToken: "refresh",
+    userId: "user-1",
+    expiresAt: unexpired,
+  });
   const profileResponse = (
     assertRequest: (url: string, authorization: string | undefined) => void,
   ) =>
@@ -105,34 +111,26 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
     });
   const noRequests = HttpClient.make(() => Effect.die("must not call the gateway"));
 
-  it.effect("sends the stored SSO token for the configured gateway as a bearer", () =>
+  it.effect("sends the stored SSO token for BOB_GATEWAY_URL, normalized, as a bearer", () =>
     Effect.gen(function* () {
-      const home = yield* makeBobHome(
-        bobAuthSecrets({
-          "bob.auth.tokens-https://api.us-east.bob.ibm.com": {
-            token: "wrong-gateway",
-            refreshToken: "refresh",
-            userId: "user-1",
-            expiresAt: unexpired,
-          },
-          "bob.auth.tokens-https://gateway.example": {
-            token: "session-jwt",
+      const home = yield* makeBobHome({
+        "auth-secrets.json": bobAuthSecrets({
+          "bob.auth.tokens-https://api.us-east.bob.ibm.com": login("wrong-gateway"),
+          "bob.auth.tokens-https://gateway.example/bob": {
+            ...login("session-jwt"),
             accessToken: "idp-token",
-            refreshToken: "refresh",
-            userId: "user-1",
-            expiresAt: unexpired,
           },
           "bob.profile.active": "instance-1:team-2",
         }),
-      );
+      });
       const usage = yield* readBobUsageLimits("sso", {
         HOME: home,
-        BOB_GATEWAY_URL: "https://gateway.example//",
+        BOB_GATEWAY_URL: "https://gateway.example//bob/",
       }).pipe(
         Effect.provideService(
           HttpClient.HttpClient,
           profileResponse((url, authorization) => {
-            expect(url).toBe("https://gateway.example/admin/v1/profile");
+            expect(url).toBe("https://gateway.example/bob/admin/v1/profile");
             expect(authorization).toBe("Bearer session-jwt");
           }),
         ),
@@ -142,37 +140,106 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("sends the API key without reading the stored login", () =>
+  // Bob applies its `gatewayUrl` setting over the environment when it starts, keying the
+  // login by the setting as written and normalizing it only for requests.
+  it.effect("prefers the gateway in Bob's settings over BOB_GATEWAY_URL", () =>
+    Effect.gen(function* () {
+      const home = yield* makeBobHome({
+        "settings.json": JSON.stringify({ gatewayUrl: "https://settings.example/" }),
+        "auth-secrets.json": bobAuthSecrets({
+          "bob.auth.tokens-https://env.example": login("env-jwt"),
+          "bob.auth.tokens-https://settings.example": login("normalized-jwt"),
+          "bob.auth.tokens-https://settings.example/": login("settings-jwt"),
+        }),
+      });
+      const usage = yield* readBobUsageLimits("sso", {
+        HOME: home,
+        BOB_GATEWAY_URL: "https://env.example",
+      }).pipe(
+        Effect.provideService(
+          HttpClient.HttpClient,
+          profileResponse((url, authorization) => {
+            expect(url).toBe("https://settings.example/admin/v1/profile");
+            expect(authorization).toBe("Bearer settings-jwt");
+          }),
+        ),
+      );
+      expect(usage.usageLimits.windows).toHaveLength(1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("falls back to IBM's gateway when Bob's settings name none", () =>
+    Effect.gen(function* () {
+      for (const settings of [
+        undefined,
+        "not json",
+        "[]",
+        JSON.stringify({ gatewayUrl: "" }),
+        JSON.stringify({ gatewayUrl: 42 }),
+      ]) {
+        const home = yield* makeBobHome({
+          ...(settings === undefined ? {} : { "settings.json": settings }),
+          "auth-secrets.json": bobAuthSecrets({
+            "bob.auth.tokens-https://api.us-east.bob.ibm.com": login("default-jwt"),
+          }),
+        });
+        const usage = yield* readBobUsageLimits("sso", { HOME: home }).pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            profileResponse((url, authorization) => {
+              expect(url).toBe("https://api.us-east.bob.ibm.com/admin/v1/profile");
+              expect(authorization).toBe("Bearer default-jwt");
+            }),
+          ),
+        );
+        expect(usage.usageLimits.windows).toHaveLength(1);
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("sends the API key to Bob's gateway without reading the stored login", () =>
     readBobUsageLimits("apiKey", { HOME: "/nonexistent", BOBSHELL_API_KEY: "key-1" }).pipe(
       Effect.provideService(
         HttpClient.HttpClient,
         profileResponse((url, authorization) => {
-          expect(url).toBe("https://api.us-east.bob.ibm.com/admin/v1/profile");
+          expect(url).toBe("https://settings.example/admin/v1/profile");
           expect(authorization).toBe("apikey key-1");
         }),
       ),
       Effect.provideService(
         FileSystem.FileSystem,
-        FileSystem.makeNoop({ readFileString: () => Effect.die("must not read the login") }),
+        FileSystem.makeNoop({
+          readFileString: (path) =>
+            path.endsWith("settings.json")
+              ? Effect.succeed(JSON.stringify({ gatewayUrl: "https://settings.example//" }))
+              : Effect.die("must not read the login"),
+        }),
       ),
       Effect.tap((usage) => Effect.sync(() => expect(usage.usageLimits.windows).toHaveLength(1))),
     ),
   );
 
-  it.effect("leaves a missing or expired SSO login to Bob without calling the gateway", () =>
+  it.effect("leaves a missing, unreadable or expired SSO login to Bob without a request", () =>
     Effect.gen(function* () {
-      for (const secrets of [
-        "{}",
-        bobAuthSecrets({
-          "bob.auth.tokens-https://api.us-east.bob.ibm.com": {
-            token: "expired-jwt",
-            refreshToken: "refresh",
-            userId: "user-1",
-            expiresAt: 1,
-          },
-        }),
+      for (const files of [
+        {},
+        { "auth-secrets.json": "{}" },
+        { "auth-secrets.json": "not json" },
+        {
+          "auth-secrets.json": bobAuthSecrets({
+            "bob.auth.tokens-https://api.us-east.bob.ibm.com": { accessToken: "jwt" },
+          }),
+        },
+        {
+          "auth-secrets.json": bobAuthSecrets({
+            "bob.auth.tokens-https://api.us-east.bob.ibm.com": {
+              ...login("expired-jwt"),
+              expiresAt: 1,
+            },
+          }),
+        },
       ]) {
-        const home = yield* makeBobHome(secrets);
+        const home = yield* makeBobHome(files);
         const usage = yield* readBobUsageLimits("sso", { HOME: home }).pipe(
           Effect.provideService(HttpClient.HttpClient, noRequests),
         );
