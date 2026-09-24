@@ -260,6 +260,16 @@ const ThreadMetadataUpdatedPayload = Schema.Struct({
 });
 export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.Type;
 
+/**
+ * Spend in the provider's own billing unit, such as Bob Shell's Bobcoins.
+ * Dollars belong in `turn.completed.totalCostUsd`, not here.
+ */
+export const ThreadUsageCost = Schema.Struct({
+  amount: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  unit: TrimmedNonEmptyStringSchema,
+});
+export type ThreadUsageCost = typeof ThreadUsageCost.Type;
+
 export const ThreadTokenUsageSnapshot = Schema.Struct({
   usedTokens: NonNegativeInt,
   totalProcessedTokens: Schema.optional(NonNegativeInt),
@@ -277,6 +287,8 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
   autoCompactThreshold: Schema.optional(PositiveInt),
+  /** Cumulative spend for the thread, for providers that bill in their own unit. */
+  cost: Schema.optional(ThreadUsageCost),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 

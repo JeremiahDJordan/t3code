@@ -210,7 +210,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
-  it.effect("reports Bob's token totals after a turn", () =>
+  it.effect("reports Bob's token and Bobcoin totals after a turn", () =>
     withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, taskDatabasePath }) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("bob-usage");
@@ -260,6 +260,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
             lastInputTokens: 15_000,
             lastCachedInputTokens: 12_000,
             lastOutputTokens: 700,
+            cost: { amount: 0.118, unit: "Bobcoins" },
           },
         );
         assert.deepStrictEqual(
