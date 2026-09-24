@@ -142,6 +142,7 @@ export function bobThreadTokenUsage(
     lastInputTokens: last.input,
     lastCachedInputTokens: Math.min(last.input, last.cacheRead),
     lastOutputTokens: last.output,
+    cost: { amount: current.cost, unit: "Bobcoins" },
   };
 }
 
