@@ -24,8 +24,8 @@ Providers enforce permissions differently. Some read-only actions can proceed in
 **Auto** uses automatic review on Codex, Claude, and Cursor; providers without an equivalent,
 including OpenCode, Bob Shell, and Antigravity, fall back to asking.
 
-For Grok, **Always allow this session** remembers the matching command or tool input. Other
-actions still require approval.
+For Grok, **Always allow this session** remembers the matching command or tool input; for Bob
+Shell, it allows that tool for the rest of the session. Other actions still require approval.
 
 Antigravity can still send native approval requests in **Full access**. It only offers remembered
 approvals for actions that support them.
