@@ -97,6 +97,11 @@ const PERMISSION_OPTION_KINDS = {
   acceptAlways: "allow_always",
   decline: "reject_once",
 } as const;
+/**
+ * How long stopping a session waits for Bob to cancel its running turn. It outlasts the
+ * runtime's own cancel timeout, which stops a Bob that never finishes cancelling.
+ */
+const BOB_STOP_CANCEL_TIMEOUT = "20 seconds";
 
 function encodeJsonStringForDiagnostics(input: unknown): string | undefined {
   const result = encodeUnknownJsonStringExit(input);
@@ -144,6 +149,8 @@ interface BobSessionContext {
         interrupted: boolean;
         readonly plan: boolean;
         reply?: { readonly itemId: string | undefined; text: string };
+        /** Completes once the turn's `turn.completed` is out. */
+        readonly settled: Deferred.Deferred<void>;
       }
     | undefined;
   /** Number of sendTurn prompts currently in flight or waiting to be sent.
@@ -192,13 +199,17 @@ function resolveBobModeId(
 
 /**
  * Whether a resume failed only because Bob cannot reopen that task. Bob answers every such
- * `session/resume` (task deleted, other cwd) with -32002; an agent without resume support, or
- * one that never answers, fails the same step.
+ * `session/resume` (task deleted, other cwd) with -32002, and the runtime refuses to resume
+ * with an agent that does not advertise it, the only `session/resume` error it raises without
+ * an `operation`. A resume that times out or breaks off may still have a task behind it, so it
+ * fails the start rather than replacing the task.
  */
 function isBobResumeUnavailable(error: EffectAcpErrors.AcpError): boolean {
   return (
     (error._tag === "AcpRequestError" && error.code === -32002) ||
-    (error._tag === "AcpTransportError" && error.method === "session/resume")
+    (error._tag === "AcpTransportError" &&
+      error.method === "session/resume" &&
+      error.operation === undefined)
   );
 }
 
@@ -384,18 +395,51 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
       return Effect.succeed(ctx);
     };
 
-    /** Emits the open turn's `turn.completed` once, whichever of its prompt or Bob's exit ends it. */
+    /**
+     * Emits the open turn's `turn.completed` once, whichever of its prompt or Bob's exit ends it,
+     * and returns the session to ready unless a new turn has already claimed it.
+     */
     const settleTurn = (ctx: BobSessionContext, payload: TurnCompletedPayload) =>
       Effect.gen(function* () {
         const turn = ctx.openTurn;
         if (!turn) return;
         ctx.openTurn = undefined;
+        if (ctx.activeTurnId === turn.id) ctx.activeTurnId = undefined;
+        if (ctx.session.activeTurnId === turn.id) {
+          const { activeTurnId: _settledTurnId, ...session } = ctx.session;
+          ctx.session = { ...session, status: "ready", updatedAt: yield* nowIso };
+        }
         yield* offerRuntimeEvent({
           type: "turn.completed",
           ...(yield* makeEventStamp()),
           provider: PROVIDER,
           threadId: ctx.threadId,
           turnId: turn.id,
+          payload,
+        });
+        yield* Deferred.succeed(turn.settled, undefined);
+      });
+
+    /**
+     * Stop for the running turn: Bob is asked to cancel, open approvals are answered as
+     * cancelled, and a prompt still waiting to be sent is dropped.
+     */
+    const cancelRunningTurn = (ctx: BobSessionContext) =>
+      Effect.gen(function* () {
+        ctx.interrupts += 1;
+        if (ctx.openTurn) ctx.openTurn.interrupted = true;
+        yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
+        yield* Effect.ignore(ctx.acp.cancel);
+      });
+
+    /** Publishes the session's single `session.exited`. */
+    const publishSessionExited = (ctx: BobSessionContext, payload: SessionExitedPayload) =>
+      Effect.gen(function* () {
+        yield* offerRuntimeEvent({
+          type: "session.exited",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
           payload,
         });
       });
@@ -434,6 +478,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
     /**
      * Ends a session. `exitError` means Bob's process or connection died on its own, including
      * the runtime stopping a Bob that did not finish a cancel, so the next turn starts a new one.
+     * Otherwise a running turn is cancelled and settles before Bob is closed, so Bob can finish
+     * writing its task.
      */
     const stopSessionInternal = (ctx: BobSessionContext, exitError?: EffectAcpErrors.AcpError) =>
       Effect.gen(function* () {
@@ -441,29 +487,35 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         ctx.stopped = true;
         if (sessions.get(ctx.threadId) === ctx) sessions.delete(ctx.threadId);
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        let payload: SessionExitedPayload = { exitKind: "graceful" };
         if (exitError) {
           const reason = `Bob stopped: ${(exitError._tag === "AcpTransportError" && exitError.detail) || exitError.message}`;
-          payload = { exitKind: "error", reason };
-          yield* settleTurn(ctx, failedTurnPayload(ctx, reason));
-          // Bob's exit reaches the event consumer, which the session scope owns.
-          yield* Scope.close(ctx.scope, Exit.void).pipe(Effect.forkIn(adapterScope));
-        } else {
-          // The session exit ends a turn that is still running.
-          ctx.openTurn = undefined;
-          if (ctx.notificationFiber) {
-            yield* Fiber.interrupt(ctx.notificationFiber);
-          }
-          yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
+          yield* Effect.gen(function* () {
+            yield* settleTurn(ctx, failedTurnPayload(ctx, reason));
+            yield* publishSessionExited(ctx, { exitKind: "error", reason });
+          }).pipe(
+            // Bob's exit reaches the event consumer, which the session scope owns and its close
+            // interrupts, so the close runs last and outside the consumer.
+            Effect.ensuring(
+              Scope.close(ctx.scope, Exit.void).pipe(Effect.forkIn(adapterScope), Effect.asVoid),
+            ),
+          );
+          return;
         }
-        yield* offerRuntimeEvent({
-          type: "session.exited",
-          ...(yield* makeEventStamp()),
-          provider: PROVIDER,
-          threadId: ctx.threadId,
-          payload,
-        });
-      });
+        const turn = ctx.openTurn;
+        if (turn && ctx.promptsInFlight > 0) {
+          yield* cancelRunningTurn(ctx).pipe(
+            Effect.andThen(Deferred.await(turn.settled)),
+            Effect.timeoutOption(BOB_STOP_CANCEL_TIMEOUT),
+          );
+        }
+        // The session exit ends a turn that is still running.
+        ctx.openTurn = undefined;
+        if (ctx.notificationFiber) {
+          yield* Fiber.interrupt(ctx.notificationFiber);
+        }
+        yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
+        yield* publishSessionExited(ctx, { exitKind: "graceful" });
+      }).pipe(Effect.uninterruptible);
 
     /** Opens Bob for a thread, resuming its stored task when there is one. */
     const startSession: BobAdapterShape["startSession"] = (input) =>
@@ -494,12 +546,15 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
           let ctx!: BobSessionContext;
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-          /** Answers what the runtime mode allows without asking, and asks the user the rest. */
+          /**
+           * Answers what the runtime mode allows without asking, and asks the user the rest. A
+           * stopped session asks no one: Bob is being cancelled or closed, so it is refused.
+           */
           const handlePermission = (params: EffectAcpSchema.RequestPermissionRequest) =>
             Effect.gen(function* () {
               yield* logNative(input.threadId, "session/request_permission", params);
               const autoApproval = bobAutoApproval(input.runtimeMode, params.toolCall.kind);
-              if (autoApproval !== undefined) {
+              if (autoApproval !== undefined && !ctx?.stopped) {
                 const optionId = selectPermissionOptionId(params, autoApproval);
                 if (optionId !== undefined) {
                   return { outcome: { outcome: "selected" as const, optionId } };
@@ -509,6 +564,9 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
               const runtimeRequestId = RuntimeRequestId.make(requestId);
               const decision = yield* Deferred.make<ProviderApprovalDecision>();
+              // Nothing yields between this check and the set, so a stop that cancels the
+              // pending approvals either sees this one or has already refused it here.
+              if (ctx?.stopped) return { outcome: { outcome: "cancelled" as const } };
               pendingApprovals.set(requestId, { decision });
               yield* offerRuntimeEvent(
                 makeAcpRequestOpenedEvent({
@@ -624,7 +682,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
           // Bob cannot resume a task it deleted or that belongs to another folder. The thread
           // then continues in a new Bob conversation rather than failing; sign-in, license and
-          // trust errors still fail, since a new conversation would hit them too.
+          // trust errors still fail, since a new conversation would hit them too, and so does a
+          // resume that times out, since its task may still be there.
           const resumeSessionId = parseBobResume(input.resumeCursor)?.sessionId;
           let lostResume: EffectAcpErrors.AcpError | undefined;
           const { scope, acp, started } = yield* openBob(resumeSessionId).pipe(
@@ -873,6 +932,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               id: turnId,
               interrupted: false,
               plan: input.interactionMode === "plan",
+              settled: yield* Deferred.make<void>(),
             };
             ctx.turnStartTaskCosts = ctx.taskCosts;
             yield* offerRuntimeEvent({
@@ -886,6 +946,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           }
           ctx.session = {
             ...ctx.session,
+            status: "running",
             activeTurnId: turnId,
             updatedAt: yield* nowIso,
           };
@@ -969,11 +1030,6 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
             }
           }
-          ctx.session = {
-            ...ctx.session,
-            activeTurnId: turnId,
-            updatedAt: yield* nowIso,
-          };
 
           // Bob records spend before it answers the prompt, so the row is current here.
           const previousTaskCosts = ctx.taskCosts;
@@ -1032,14 +1088,15 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         return yield* ctx.promptLock.withPermit(run).pipe(Effect.ensuring(uncount));
       });
 
-    const interruptTurn: BobAdapterShape["interruptTurn"] = (threadId) =>
+    /**
+     * Stops the running turn, and a steer waiting behind it, which was sent before Stop. A Stop
+     * for a turn that is no longer running arrived late and does nothing.
+     */
+    const interruptTurn: BobAdapterShape["interruptTurn"] = (threadId, turnId) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(threadId);
-        // A steer waiting behind the running prompt was sent before Stop, so it is dropped too.
-        ctx.interrupts += 1;
-        if (ctx.openTurn) ctx.openTurn.interrupted = true;
-        yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
-        yield* Effect.ignore(ctx.acp.cancel);
+        if (turnId !== undefined && turnId !== ctx.activeTurnId) return;
+        yield* cancelRunningTurn(ctx);
       });
 
     const respondToRequest: BobAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>

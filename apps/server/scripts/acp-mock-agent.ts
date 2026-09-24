@@ -23,6 +23,10 @@ const bobResumeNotFound = process.env.T3_ACP_BOB_RESUME_NOT_FOUND === "1";
 const bobSignedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
 const bobLicenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
 const bobExitOnPrompt = process.env.T3_ACP_BOB_EXIT_ON_PROMPT === "1";
+// An older Bob that does not advertise `session/resume`.
+const bobNoResume = process.env.T3_ACP_BOB_NO_RESUME === "1";
+// Bob reaches its next tool's permission prompt before it acts on a cancel.
+const bobAskOnCancel = process.env.T3_ACP_BOB_ASK_ON_CANCEL === "1";
 // With T3_ACP_EMIT_TOOL_CALLS, Bob's tool edits a file instead of running a command.
 const bobToolEdits = process.env.T3_ACP_BOB_TOOL_EDITS === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
@@ -463,7 +467,7 @@ const program = Effect.gen(function* () {
           protocolVersion: 1,
           agentCapabilities: {
             loadSession: true,
-            sessionCapabilities: { list: {}, resume: {}, close: {} },
+            sessionCapabilities: { list: {}, ...(bobNoResume ? {} : { resume: {} }), close: {} },
           },
         };
       }
@@ -523,6 +527,9 @@ const program = Effect.gen(function* () {
             `Resource not found: ${request.sessionId}`,
             { uri: request.sessionId },
           );
+        }
+        if (waitForResumeRelease) {
+          yield* Deferred.await(resumeRelease);
         }
         yield* publishBobCommands(request.sessionId);
         return { modes: modeState() };
@@ -1543,9 +1550,11 @@ const program = Effect.gen(function* () {
       return { stopReason: "end_turn" };
     });
 
-  // Bob rejects a second prompt while one runs and answers `session/cancel` by resolving the
-  // running prompt as cancelled. After a prompt that was not cancelled it updates the task's
-  // title (first prompt only) and time.
+  /**
+   * Bob rejects a second prompt while one runs and answers `session/cancel` by resolving the
+   * running prompt as cancelled. After a prompt that was not cancelled it updates the task's
+   * title (first prompt only) and time.
+   */
   const runBobPrompt = (request: AcpSchema.PromptRequest) =>
     Effect.gen(function* () {
       const cancelled = yield* Deferred.make<void>();
@@ -1555,9 +1564,27 @@ const program = Effect.gen(function* () {
         );
       }
       bobRunningPrompt = cancelled;
+      const beforeStopping = bobAskOnCancel
+        ? agent.client.requestPermission({
+            sessionId: request.sessionId,
+            toolCall: {
+              toolCallId: "bob-tool-after-cancel",
+              title: "ls -la",
+              kind: "execute",
+              status: "pending",
+            },
+            options: [
+              { optionId: permissionOptionIds.allowOnce, name: "Allow", kind: "allow_once" },
+              { optionId: permissionOptionIds.rejectOnce, name: "Reject", kind: "reject_once" },
+            ],
+          })
+        : Effect.void;
       const result = yield* Effect.raceFirst(
         runPrompt(request),
-        Deferred.await(cancelled).pipe(Effect.as({ stopReason: "cancelled" } as const)),
+        Deferred.await(cancelled).pipe(
+          Effect.andThen(beforeStopping),
+          Effect.as({ stopReason: "cancelled" } as const),
+        ),
       ).pipe(
         Effect.ensuring(
           Effect.sync(() => {
