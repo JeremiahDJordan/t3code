@@ -128,8 +128,8 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
             .map((entry) => (entry.params as { readonly modeId: string }).modeId),
           ["plan", "agent"],
         );
-        // Bob implements neither config options nor models.
-        for (const method of ["session/set_config_option", "session/set_model"]) {
+        // Bob opens a browser for `authenticate` and implements neither config options nor models.
+        for (const method of ["authenticate", "session/set_config_option", "session/set_model"]) {
           assert.notInclude(
             requests.map((entry) => entry.method),
             method,
