@@ -40,7 +40,8 @@ const BobTextGenerationTestLayer = ServerConfig.ServerConfig.layerTest(process.c
 
 /**
  * Runs `effectFn` against a Bob instance whose `bob` is the mock agent in its Bob profile,
- * logging the requests T3 sends to `requestLogPath`.
+ * logging the requests T3 sends to `requestLogPath` and each launch's arguments to
+ * `argvLogPath`.
  */
 function withFakeAcpBob<A, E, R>(
   input: {
@@ -51,6 +52,7 @@ function withFakeAcpBob<A, E, R>(
   effectFn: (
     textGeneration: TextGeneration.TextGeneration["Service"],
     requestLogPath: string,
+    argvLogPath: string,
   ) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
@@ -61,18 +63,30 @@ function withFakeAcpBob<A, E, R>(
       }),
     );
     const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+    const argvLogPath = NodePath.join(tempDir, "argv.log");
     const binaryPath = writeFakeCli({
       directory: NodePath.join(tempDir, "bin"),
       name: "bob",
       env: { T3_ACP_BOB: "1", T3_ACP_REQUEST_LOG_PATH: requestLogPath, ...input.mockEnv },
-      source: execScriptSource({ scriptPath: mockAgentPath, expectedArgs: ["acp", "--trust"] }),
+      source: execScriptSource({
+        scriptPath: mockAgentPath,
+        expectedArgs: ["acp", "--trust"],
+        argvLogPath,
+      }),
     });
     const textGeneration = yield* makeBobTextGeneration(
       decodeBobSettings({ binaryPath, authMethod: input.authMethod ?? "sso" }),
       input.environment ?? process.env,
     );
-    return yield* effectFn(textGeneration, requestLogPath);
+    return yield* effectFn(textGeneration, requestLogPath, argvLogPath);
   }).pipe(Effect.scoped);
+}
+
+/** The `session/delete` requests T3 sent, by their params. */
+function sessionDeleteRequests(requestLogPath: string) {
+  return readJsonRpcRequests(requestLogPath)
+    .filter((request) => request.method === "session/delete")
+    .map((request) => request.params);
 }
 
 function readJsonRpcRequests(
@@ -86,6 +100,30 @@ function readJsonRpcRequests(
 }
 
 it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
+  it.effect("starts Bob without the user's MCP servers or subagents", () =>
+    withFakeAcpBob(
+      {
+        mockEnv: {
+          T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({ branch: "fix-bob-sign-in" }),
+        },
+      },
+      (textGeneration, _requestLogPath, argvLogPath) =>
+        Effect.gen(function* () {
+          yield* textGeneration.generateBranchName({
+            cwd: process.cwd(),
+            message: "bob says I'm signed out",
+            modelSelection,
+          });
+          expect(NodeFS.readFileSync(argvLogPath, "utf8").trim().split("\t")).toEqual([
+            "acp",
+            "--trust",
+            "--disable-mcp",
+            "--disable-subagents",
+          ]);
+        }),
+    ),
+  );
+
   it.effect("generates in Bob's read-only ask mode without signing in or picking a model", () =>
     Effect.gen(function* () {
       for (const instance of [
@@ -129,6 +167,11 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
                 (request) => request.method === "session/prompt",
               );
               expect(setModeIndex).toBeLessThan(promptIndex);
+              // The mock rejects `session/delete`; generation still succeeds.
+              expect(sessionDeleteRequests(requestLogPath)).toEqual([
+                { sessionId: "mock-session-1" },
+              ]);
+              expect(requests.at(-1)?.method).toBe("session/delete");
               for (const method of [
                 "authenticate",
                 "session/set_model",
@@ -184,7 +227,7 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
   );
 
   it.effect("says how to sign in when Bob refuses the session", () =>
-    withFakeAcpBob({ mockEnv: { T3_ACP_BOB_SIGNED_OUT: "1" } }, (textGeneration) =>
+    withFakeAcpBob({ mockEnv: { T3_ACP_BOB_SIGNED_OUT: "1" } }, (textGeneration, requestLogPath) =>
       Effect.gen(function* () {
         const error = yield* Effect.flip(
           textGeneration.generateThreadTitle({
@@ -195,12 +238,14 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
         );
         expect(error._tag).toBe("TextGenerationError");
         expect(error.detail).toBe(BOB_SSO_SIGN_IN_MESSAGE);
+        // No session was created, so there is nothing to delete.
+        expect(sessionDeleteRequests(requestLogPath)).toEqual([]);
       }),
     ),
   );
 
-  it.effect("reports other Bob failures without sign-in guidance", () =>
-    withFakeAcpBob({ mockEnv: { T3_ACP_FAIL_PROMPT: "1" } }, (textGeneration) =>
+  it.effect("reports other Bob failures without sign-in guidance and deletes the session", () =>
+    withFakeAcpBob({ mockEnv: { T3_ACP_FAIL_PROMPT: "1" } }, (textGeneration, requestLogPath) =>
       Effect.gen(function* () {
         const error = yield* Effect.flip(
           textGeneration.generateThreadTitle({
@@ -211,6 +256,7 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
         );
         expect(error._tag).toBe("TextGenerationError");
         expect(error.detail).toBe("Bob ACP request failed.");
+        expect(sessionDeleteRequests(requestLogPath)).toEqual([{ sessionId: "mock-session-1" }]);
       }),
     ),
   );

@@ -24,6 +24,20 @@ describe("bobAcpSpawnArgs", () => {
   it("auto-approves tool calls in Full access", () => {
     expect(bobAcpSpawnArgs("full-access")).toEqual(["acp", "--trust", "--auto-approve"]);
   });
+
+  it("starts without MCP servers or subagents only when asked", () => {
+    expect(bobAcpSpawnArgs(undefined, { disableMcpAndSubagents: true })).toEqual([
+      "acp",
+      "--trust",
+      "--disable-mcp",
+      "--disable-subagents",
+    ]);
+    expect(bobAcpSpawnArgs("full-access", { disableMcpAndSubagents: false })).toEqual([
+      "acp",
+      "--trust",
+      "--auto-approve",
+    ]);
+  });
 });
 
 describe("buildBobAcpSpawnInput", () => {
