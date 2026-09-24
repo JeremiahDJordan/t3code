@@ -2,7 +2,7 @@
  * BobAdapterLive — IBM Bob Shell (`bob acp`) via ACP.
  *
  * Bob picks its own model, so sessions always report {@link BOB_DEFAULT_MODEL}.
- * ACP carries no usage, so token totals come from Bob's task database.
+ * ACP carries no usage, so token and Bobcoin totals come from Bob's task database.
  *
  * @module BobAdapterLive
  */
