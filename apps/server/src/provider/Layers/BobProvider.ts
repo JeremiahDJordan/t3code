@@ -92,9 +92,14 @@ export const buildInitialBobProviderSnapshot = (
       : DISABLED_PROBE,
   );
 
+export const BOB_SSO_UNCONFIRMED_MESSAGE =
+  "Couldn't confirm Bob's IBM SSO sign-in. If sessions fail, run `bob` in a terminal to sign in.";
+
 /**
  * Sign-in from the login Bob stored. An expired login still counts when Bob can renew it,
- * which it does when the next session starts.
+ * which it does when the next session starts. Bob's token file is undocumented, so any
+ * other finding leaves sign-in unknown instead of hiding a working Bob; a real sign-in
+ * failure is reported by Bob when a session starts.
  */
 const readBobSsoAuth = (environment: NodeJS.ProcessEnv) =>
   Effect.gen(function* () {
@@ -102,8 +107,8 @@ const readBobSsoAuth = (environment: NodeJS.ProcessEnv) =>
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     return login && (login.refreshable || !isBobSsoLoginExpired(login, nowMs))
       ? ({ status: "authenticated", type: "sso", label: "IBM SSO" } as const)
-      : ({ status: "unauthenticated" } as const);
-  }).pipe(Effect.orElseSucceed(() => ({ status: "unknown" }) as const));
+      : ({ status: "unknown" } as const);
+  });
 
 /**
  * Runs `bob --version` and reads the sign-in the instance's auth method uses: the SSO login
@@ -201,7 +206,7 @@ export const checkBobProviderStatus = Effect.fn("checkBobProviderStatus")(functi
     ...(auth.status === "unauthenticated"
       ? { message: bobSignInMessage(settings.authMethod) }
       : auth.status === "unknown"
-        ? { message: "Could not read Bob's IBM sign-in. It is checked when a session starts." }
+        ? { message: BOB_SSO_UNCONFIRMED_MESSAGE }
         : {}),
   });
 });
