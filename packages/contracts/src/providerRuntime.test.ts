@@ -227,6 +227,24 @@ describe("ProviderRuntimeEvent", () => {
     expect(parsed.payload.usage.maxTokens).toBe(200000);
     expect(parsed.payload.usage.usedTokens).toBe(31251);
   });
+
+  it("keeps spend in the provider's own unit and rejects negative amounts", () => {
+    const event = (amount: number) => ({
+      type: "thread.token-usage.updated",
+      eventId: "event-token-usage-cost",
+      provider: "bob",
+      createdAt: "2026-09-24T00:00:00.000Z",
+      threadId: "thread-1",
+      payload: { usage: { usedTokens: 15700, cost: { amount, unit: "Bobcoins" } } },
+    });
+
+    const parsed = decodeRuntimeEvent(event(0.118));
+    expect(parsed.type === "thread.token-usage.updated" && parsed.payload.usage.cost).toEqual({
+      amount: 0.118,
+      unit: "Bobcoins",
+    });
+    expect(() => decodeRuntimeEvent(event(-1))).toThrow();
+  });
 });
 
 describe("classifyTaskAgentKind", () => {
