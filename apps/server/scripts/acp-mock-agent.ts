@@ -23,6 +23,8 @@ const bobResumeNotFound = process.env.T3_ACP_BOB_RESUME_NOT_FOUND === "1";
 const bobSignedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
 const bobLicenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
 const bobExitOnPrompt = process.env.T3_ACP_BOB_EXIT_ON_PROMPT === "1";
+// With T3_ACP_EMIT_TOOL_CALLS, Bob's tool edits a file instead of running a command.
+const bobToolEdits = process.env.T3_ACP_BOB_TOOL_EDITS === "1";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
@@ -522,6 +524,7 @@ const program = Effect.gen(function* () {
             { uri: request.sessionId },
           );
         }
+        yield* publishBobCommands(request.sessionId);
         return { modes: modeState() };
       }
       yield* agent.client.sessionUpdate({
@@ -1136,8 +1139,9 @@ const program = Effect.gen(function* () {
         const toolCallId = "bob-tool-1";
         const toolCall = {
           toolCallId,
-          title: "ls -la",
-          kind: "execute",
+          ...(bobToolEdits
+            ? { title: "Edit README.md", kind: "edit" }
+            : { title: "ls -la", kind: "execute" }),
           status: "pending",
         } satisfies AcpSchema.ToolCallUpdate;
         yield* agent.client.sessionUpdate({
