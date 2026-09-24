@@ -32,7 +32,11 @@ const BOB_SESSION_DELETE_TIMEOUT = "5 seconds";
 type BobAcpRuntimeBobSettings = Pick<BobSettings, "binaryPath" | "authMethod">;
 
 interface BobAcpSpawnOptions {
-  /** Skips the user's MCP servers and subagents, for one-shot sessions that only return text. */
+  /**
+   * Skips the user's MCP servers and subagents, for one-shot sessions that only return text.
+   * `--disable-mcp` and `--disable-subagents` are options of `bob acp` (its `--help` in Bob
+   * 2.0.4 and 2.0.5), verified live on both; `BobAdapterCliProbe.test.ts` rechecks them.
+   */
   readonly disableMcpAndSubagents?: boolean;
 }
 
@@ -150,6 +154,8 @@ export const setBobSessionMode = (
 /**
  * Deletes a session and its task from Bob's history with ACP `session/delete`, for
  * sessions the user never sees. Best effort: a failed or slow delete leaves the task.
+ * Bob 2.0.4 and 2.0.5 advertise `sessionCapabilities.delete`, and live on both the request
+ * removed the task's row from `~/.bob/db/bob.db`; `BobAdapterCliProbe.test.ts` rechecks it.
  */
 export const deleteBobSession = (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
