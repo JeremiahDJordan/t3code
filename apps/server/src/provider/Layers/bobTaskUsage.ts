@@ -21,6 +21,11 @@ export interface BobTaskCosts {
   readonly cacheWrite: number;
   readonly cost: number;
   readonly contextTokens: number;
+  /**
+   * Whether Bob kept the token counts. From Bob 2.0.5 its release builds store only `cost`
+   * and `contextTokens`, so the counts read as 0 without being real.
+   */
+  readonly tokensRecorded: boolean;
 }
 
 const OptionalNumber = Schema.optional(Schema.NullOr(Schema.Finite));
@@ -74,6 +79,7 @@ export const readBobTaskCosts = Effect.fn("readBobTaskCosts")(function* (
       cacheWrite: tokens(costs.cacheWrite),
       cost: Math.max(0, costs.cost ?? 0),
       contextTokens: tokens(costs.contextTokens),
+      tokensRecorded: costs.input != null || costs.output != null,
     })),
   );
 });
@@ -98,6 +104,7 @@ function bobTaskCostsSince(
     cacheWrite: Math.max(0, current.cacheWrite - previous.cacheWrite),
     cost: current.cost - previous.cost,
     contextTokens: current.contextTokens,
+    tokensRecorded: current.tokensRecorded,
   };
 }
 
@@ -108,6 +115,7 @@ const NO_TASK_COSTS: BobTaskCosts = {
   cacheWrite: 0,
   cost: 0,
   contextTokens: 0,
+  tokensRecorded: false,
 };
 
 /** Whether a reading changed anything since `previous`; no previous reading is no spend. */
@@ -126,11 +134,16 @@ export function sameBobTaskCosts(
   );
 }
 
-/** Thread usage from a reading; `last*` is what was spent since `previous`. */
+/**
+ * Thread usage from a reading; `last*` is what was spent since `previous`. Without Bob's
+ * token counts it is the context size and Bobcoins alone.
+ */
 export function bobThreadTokenUsage(
   current: BobTaskCosts,
   previous: BobTaskCosts | undefined,
 ): ThreadTokenUsageSnapshot {
+  const cost = { amount: current.cost, unit: "Bobcoins" };
+  if (!current.tokensRecorded) return { usedTokens: current.contextTokens, cost };
   const last = bobTaskCostsSince(current, previous);
   const totalProcessedTokens = current.input + current.output;
   return {
@@ -142,16 +155,19 @@ export function bobThreadTokenUsage(
     lastInputTokens: last.input,
     lastCachedInputTokens: Math.min(last.input, last.cacheRead),
     lastOutputTokens: last.output,
-    cost: { amount: current.cost, unit: "Bobcoins" },
+    cost,
   };
 }
 
-/** Usage of the turn that started at `turnStart`. */
+/** Usage of the turn that started at `turnStart`, unavailable when Bob kept no token counts. */
 export function bobTurnTokenUsage(
   current: BobTaskCosts,
   turnStart: BobTaskCosts | undefined,
   completed: boolean,
 ): TurnTokenUsage {
+  if (!current.tokensRecorded) {
+    return { usageStatus: "unavailable", usageScope: "main_agent", hasSubagents: false };
+  }
   const turn = bobTaskCostsSince(current, turnStart);
   return {
     usageStatus: completed ? "complete" : "partial",

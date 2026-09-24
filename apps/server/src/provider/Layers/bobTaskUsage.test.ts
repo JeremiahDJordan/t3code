@@ -36,6 +36,7 @@ const firstTurn: BobTaskCosts = {
   cacheWrite: 1_000,
   cost: 0.05,
   contextTokens: 12_800,
+  tokensRecorded: true,
 };
 const secondTurn: BobTaskCosts = {
   input: 30_000,
@@ -44,6 +45,17 @@ const secondTurn: BobTaskCosts = {
   cacheWrite: 1_500,
   cost: 0.118,
   contextTokens: 18_500,
+  tokensRecorded: true,
+};
+/** A reading from Bob 2.0.5 or later, which stores only Bobcoins and the context size. */
+const costOnlyTurn: BobTaskCosts = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  cost: 0.044,
+  contextTokens: 11_000,
+  tokensRecorded: false,
 };
 
 describe("bobThreadTokenUsage", () => {
@@ -64,6 +76,13 @@ describe("bobThreadTokenUsage", () => {
   it("counts a whole reading as new when Bob's totals went down", () => {
     expect(bobThreadTokenUsage(firstTurn, secondTurn).lastInputTokens).toBe(12_000);
   });
+
+  it("reports only the context size and Bobcoins when Bob kept no token counts", () => {
+    expect(bobThreadTokenUsage(costOnlyTurn, firstTurn)).toEqual({
+      usedTokens: 11_000,
+      cost: { amount: 0.044, unit: "Bobcoins" },
+    });
+  });
 });
 
 describe("bobTurnTokenUsage", () => {
@@ -81,6 +100,14 @@ describe("bobTurnTokenUsage", () => {
       usageStatus: "partial",
       inputTokens: 12_000,
       outputTokens: 800,
+    });
+  });
+
+  it("reports the turn's tokens as unavailable, not zero, when Bob kept no counts", () => {
+    expect(bobTurnTokenUsage(costOnlyTurn, undefined, true)).toEqual({
+      usageStatus: "unavailable",
+      usageScope: "main_agent",
+      hasSubagents: false,
     });
   });
 });
@@ -110,9 +137,12 @@ it.layer(NodeServices.layer)("Bob task database", (it) => {
             '{"input":12000,"output":800,"cacheRead":9000,"cacheWrite":1000,"cost":0.05,"contextTokens":12800}',
         },
         { id: "session-2", costs: null },
+        { id: "session-3", costs: '{"cost":0.044,"contextTokens":11000}' },
       ]);
       expect(yield* readBobTaskCosts(databasePath, "session-1")).toEqual(firstTurn);
       expect(yield* readBobTaskCosts(databasePath, "session-2")).toBeUndefined();
+      // Bob 2.0.5 and later store no token counts.
+      expect(yield* readBobTaskCosts(databasePath, "session-3")).toEqual(costOnlyTurn);
       expect(yield* readBobTaskCosts(databasePath, "unknown")).toBeUndefined();
     }).pipe(Effect.scoped),
   );
