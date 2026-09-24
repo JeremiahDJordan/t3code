@@ -1,5 +1,5 @@
 import { Image } from "expo-image";
-import { Path, Svg } from "react-native-svg";
+import { Circle, Defs, G, LinearGradient, Mask, Path, Stop, Svg } from "react-native-svg";
 import { View } from "react-native";
 import { providerInstanceInitials } from "@t3tools/client-runtime/state/provider-instance-display";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
@@ -49,6 +49,54 @@ export function ProviderIcon(props: ProviderIconProps) {
           fill={fill}
           d="M7.62249 16.7237C4.83113 14.0422 5.3124 9.89222 7.69417 7.49905C9.45541 5.72786 12.341 5.00497 14.86 6.06768L17.5653 4.81138C17.0779 4.45714 16.4533 4.07613 15.7365 3.80839C12.4966 2.46764 8.6178 3.13492 5.98413 5.78141C3.45081 8.32904 2.65415 12.2463 4.02219 15.5889C5.04412 18.0871 3.36889 19.8541 1.68137 21.6377C1.08337 22.2699 0.483318 22.9022 0 23.5716L7.62045 16.7257"
         />
+      </Svg>
+    );
+  }
+
+  if (props.provider === "bob") {
+    // IBM Bob's official favicon (bob.ibm.com/icon.svg) and its dark palette.
+    const body = isDarkMode ? "#f4f4f4" : "#001d6c";
+    return (
+      <Svg width={size} height={size} viewBox="0 0 32 32" fill="none">
+        <Defs>
+          <LinearGradient
+            id="bob-hat-fade"
+            x1="-2016.953"
+            y1="4199.361"
+            x2="-2005.859"
+            y2="4199.361"
+            gradientTransform="matrix(0 .631 1 0 -4183.361 1279.682)"
+            gradientUnits="userSpaceOnUse"
+          >
+            <Stop offset=".134" stopOpacity="0" />
+            <Stop offset=".873" />
+          </LinearGradient>
+          <LinearGradient
+            id="bob-hat-fill"
+            x1="0"
+            y1="32"
+            x2="32"
+            y2="0"
+            gradientUnits="userSpaceOnUse"
+          >
+            <Stop offset=".1" stopColor={isDarkMode ? "#bc93fd" : "#a16efb"} />
+            <Stop offset=".9" stopColor={isDarkMode ? "#4587fd" : "#0e61fa"} />
+          </LinearGradient>
+          <Mask id="bob-hat-mask" x="0" y="0" width="32" height="32" maskUnits="userSpaceOnUse">
+            <Path
+              fill="#fff"
+              d="M29.718 15.25a13.67 13.67 0 0 0-9.991-12.476A1.747 1.747 0 0 0 18 1.25h-4c-.887 0-1.615.667-1.727 1.524A13.67 13.67 0 0 0 2.282 15.25H0v1.5h32v-1.5h-2.282zM12.25 4.337V13h1.5V3a.25.25 0 0 1 .25-.25h4a.25.25 0 0 1 .25.25v10h1.5V4.337a12.183 12.183 0 0 1 8.468 10.913H3.782A12.183 12.183 0 0 1 12.25 4.337z"
+            />
+            <Path fill="url(#bob-hat-fade)" d="M21 7v7H11V7h10z" />
+          </Mask>
+        </Defs>
+        <Path mask="url(#bob-hat-mask)" fill="url(#bob-hat-fill)" d="M0 0h32v32H0z" />
+        <G fill={body}>
+          <Path d="M24 30.75H8a4.756 4.756 0 0 1-4.69-4H3c-.965 0-1.75-.785-1.75-1.75v-6h1.5v6c0 .138.112.25.25.25h1.75V26A3.254 3.254 0 0 0 8 29.25h16A3.254 3.254 0 0 0 27.25 26v-.75H29a.25.25 0 0 0 .25-.25v-6h1.5v6c0 .965-.785 1.75-1.75 1.75h-.31a4.756 4.756 0 0 1-4.69 4z" />
+          <Circle cx="22" cy="21" r="2" />
+          <Circle cx="10" cy="21" r="2" />
+          <Path d="M16 27.75a5.695 5.695 0 0 1-3.451-1.15.75.75 0 0 1 .903-1.199c1.476 1.111 3.617 1.111 5.099 0a.75.75 0 1 1 .901 1.199 5.696 5.696 0 0 1-3.45 1.15z" />
+        </G>
       </Svg>
     );
   }

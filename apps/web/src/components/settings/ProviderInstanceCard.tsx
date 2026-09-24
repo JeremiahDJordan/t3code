@@ -34,6 +34,7 @@ import {
 } from "@t3tools/shared/model";
 import { cn } from "../../lib/utils";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { supportsCustomModels } from "../../modelSelection";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -500,8 +501,9 @@ export function ProviderInstanceCard({
   const driverKind: ProviderDriverKind | null = isProviderDriverKind(instance.driver)
     ? instance.driver
     : null;
-  const customModels =
-    instance.driver === "antigravity" ? [] : readConfigCustomModels(instance.config);
+  const customModels = supportsCustomModels(driverKind)
+    ? readConfigCustomModels(instance.config)
+    : [];
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
