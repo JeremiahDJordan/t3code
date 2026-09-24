@@ -752,7 +752,7 @@ export type GrokSettings = typeof GrokSettings.Type;
  * How Bob Shell signs in. IBM SSO uses the login `bob` stores after signing in
  * in a terminal. API key reads `BOB_API_KEY` from the instance environment.
  */
-export const BOB_AUTH_METHODS = [
+const BOB_AUTH_METHODS = [
   { value: "sso", label: "IBM SSO" },
   { value: "apiKey", label: "API key" },
 ] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
