@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EventId, type OrchestrationThreadActivity, TurnId } from "@t3tools/contracts";
 
-import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "./contextWindow";
+import {
+  deriveLatestContextWindowSnapshot,
+  formatContextWindowCost,
+  formatContextWindowTokens,
+} from "./contextWindow";
 
 function makeActivity(id: string, kind: string, payload: unknown): OrchestrationThreadActivity {
   return {
@@ -61,6 +65,22 @@ describe("contextWindow", () => {
       usedPercentage: 0,
       remainingPercentage: 100,
     });
+  });
+
+  it("reads provider spend and ignores a malformed one", () => {
+    const [withCost, malformed] = [
+      { amount: 0.118, unit: "Bobcoins" },
+      { amount: -1, unit: "Bobcoins" },
+    ].map((cost) =>
+      deriveLatestContextWindowSnapshot([
+        makeActivity("activity-1", "context-window.updated", { usedTokens: 15_700, cost }),
+      ]),
+    );
+
+    expect(withCost?.cost).toEqual({ amount: 0.118, unit: "Bobcoins" });
+    expect(malformed?.cost).toBeNull();
+    expect(formatContextWindowCost(0.118)).toBe("0.118");
+    expect(formatContextWindowCost(12.3456)).toBe("12.35");
   });
 
   it("formats compact token counts", () => {

@@ -47,7 +47,7 @@ const secondTurn: BobTaskCosts = {
 };
 
 describe("bobThreadTokenUsage", () => {
-  it("reports the context size, running totals, and the change since the last reading", () => {
+  it("reports the context size, running totals, the change since the last reading, and Bobcoins", () => {
     expect(bobThreadTokenUsage(secondTurn, firstTurn)).toEqual({
       usedTokens: 18_500,
       totalProcessedTokens: 31_500,
@@ -57,6 +57,7 @@ describe("bobThreadTokenUsage", () => {
       lastInputTokens: 18_000,
       lastCachedInputTokens: 15_000,
       lastOutputTokens: 700,
+      cost: { amount: 0.118, unit: "Bobcoins" },
     });
   });
 
