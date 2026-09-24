@@ -31,7 +31,7 @@ import { ServerConfig } from "../../config.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { BOB_API_KEY_REQUIRED_MESSAGE, BOB_SSO_SIGN_IN_MESSAGE } from "../acp/BobAcpSupport.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
-import { makeBobAdapter } from "./BobAdapter.ts";
+import { type BobAdapterLiveOptions, makeBobAdapter } from "./BobAdapter.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
 
@@ -101,6 +101,7 @@ const eventsUntil = (adapter: BobAdapter, predicate: (event: ProviderRuntimeEven
     Effect.map(Fiber.join),
   );
 
+/** Runs `body` against an adapter whose `bob` is the mock agent, started with `extraEnv`. */
 const withMockBob = <A, E, R>(
   extraEnv: Record<string, string> | undefined,
   body: (input: {
@@ -108,7 +109,11 @@ const withMockBob = <A, E, R>(
     readonly requestLogPath: string;
     readonly taskDatabasePath: string;
   }) => Effect.Effect<A, E, R>,
-  instance?: { readonly authMethod: BobAuthMethod; readonly environment: NodeJS.ProcessEnv },
+  instance?: {
+    readonly authMethod?: BobAuthMethod;
+    readonly environment?: NodeJS.ProcessEnv;
+    readonly onAvailableCommands?: BobAdapterLiveOptions["onAvailableCommands"];
+  },
 ) =>
   Effect.gen(function* () {
     const dir = yield* Effect.promise(() =>
@@ -119,10 +124,16 @@ const withMockBob = <A, E, R>(
     const taskDatabasePath = NodePath.join(dir, "bob.db");
     const binaryPath = yield* Effect.promise(() => makeMockBob(requestLogPath, extraEnv));
     const adapter = yield* makeBobAdapter(
-      decodeBobSettings({ binaryPath, ...(instance ? { authMethod: instance.authMethod } : {}) }),
+      decodeBobSettings({
+        binaryPath,
+        ...(instance?.authMethod ? { authMethod: instance.authMethod } : {}),
+      }),
       {
         taskDatabasePath,
-        ...(instance ? { environment: instance.environment } : {}),
+        ...(instance?.environment ? { environment: instance.environment } : {}),
+        ...(instance?.onAvailableCommands
+          ? { onAvailableCommands: instance.onAvailableCommands }
+          : {}),
       },
     );
     return yield* body({ adapter, requestLogPath, taskDatabasePath });
@@ -300,6 +311,170 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         yield* adapter.stopSession(threadId);
       }),
     ),
+  );
+
+  it.effect("reports Bob's slash commands with the workspace of the session", () =>
+    Effect.gen(function* () {
+      const reported = yield* Queue.unbounded<readonly [ReadonlyArray<string>, string]>();
+      yield* withMockBob(
+        { T3_ACP_BOB: "1" },
+        ({ adapter }) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make("bob-commands");
+            const session = yield* adapter.startSession({
+              threadId,
+              cwd: process.cwd(),
+              runtimeMode: "full-access",
+            });
+            const commands: readonly [ReadonlyArray<string>, string] = [
+              ["create-skill", "init"],
+              process.cwd(),
+            ];
+            assert.deepStrictEqual(yield* Queue.take(reported), commands);
+            // Bob reports the commands its mode allows again after each mode switch and resume.
+            yield* adapter.sendTurn({ threadId, input: "plan it", interactionMode: "plan" });
+            assert.deepStrictEqual(yield* Queue.take(reported), commands);
+            yield* adapter.stopSession(threadId);
+            yield* adapter.startSession({
+              threadId,
+              cwd: process.cwd(),
+              runtimeMode: "full-access",
+              resumeCursor: session.resumeCursor,
+            });
+            assert.deepStrictEqual(yield* Queue.take(reported), commands);
+            yield* adapter.stopSession(threadId);
+          }),
+        {
+          onAvailableCommands: (available, cwd) =>
+            Queue.offer(reported, [available.map((command) => command.name), cwd]).pipe(
+              Effect.asVoid,
+            ),
+        },
+      );
+    }),
+  );
+
+  it.effect("proposes the final reply of a plan turn as its plan", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS: "1" },
+      ({ adapter }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-plan-card");
+          yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+          /** The proposed plans and completions among `events`, with their turns. */
+          const summarize = (events: Iterable<ProviderRuntimeEvent>) =>
+            Array.from(events).flatMap((event) =>
+              event.type === "turn.proposed.completed"
+                ? [[event.type, event.turnId, event.payload.planMarkdown]]
+                : event.type === "turn.completed"
+                  ? [[event.type, event.turnId]]
+                  : [],
+            );
+
+          const planEvents = yield* eventsUntil(
+            adapter,
+            (event) => event.type === "turn.completed",
+          );
+          const planTurn = yield* adapter.sendTurn({
+            threadId,
+            input: "plan it",
+            interactionMode: "plan",
+          });
+          // Bob wrote "before tool", ran a command, then replied "after tool".
+          assert.deepStrictEqual(summarize(yield* planEvents), [
+            ["turn.proposed.completed", planTurn.turnId, "after tool"],
+            ["turn.completed", planTurn.turnId],
+          ]);
+
+          const buildEvents = yield* eventsUntil(
+            adapter,
+            (event) => event.type === "turn.completed",
+          );
+          const buildTurn = yield* adapter.sendTurn({
+            threadId,
+            input: "build it",
+            interactionMode: "default",
+          });
+          assert.deepStrictEqual(summarize(yield* buildEvents), [
+            ["turn.completed", buildTurn.turnId],
+          ]);
+
+          yield* adapter.stopSession(threadId);
+        }),
+    ),
+  );
+
+  it.effect("proposes no plan when a plan turn is stopped", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_CONTENT_THEN_HANG: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-plan-stopped");
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+        const replying = yield* nextEvent(adapter, (event) => event.type === "content.delta");
+
+        const turnFiber = yield* adapter
+          .sendTurn({ threadId, input: "plan it", interactionMode: "plan" })
+          .pipe(Effect.forkChild);
+        yield* replying;
+        yield* adapter.interruptTurn(threadId);
+        yield* Fiber.join(turnFiber);
+
+        const collected = Array.from(yield* events);
+        const settled = collected.at(-1);
+        assert.equal(settled?.type === "turn.completed" && settled.payload.state, "cancelled");
+        assert.isFalse(collected.some((event) => event.type === "turn.proposed.completed"));
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("approves Bob's edits itself in auto-accept-edits and still asks before commands", () =>
+    Effect.gen(function* () {
+      for (const [runtimeMode, toolEdits, asked] of [
+        ["auto-accept-edits", true, []],
+        ["auto-accept-edits", false, ["exec_command_approval"]],
+        ["auto", true, ["file_change_approval"]],
+      ] as const) {
+        yield* withMockBob(
+          {
+            T3_ACP_BOB: "1",
+            T3_ACP_EMIT_TOOL_CALLS: "1",
+            ...(toolEdits ? { T3_ACP_BOB_TOOL_EDITS: "1" } : {}),
+          },
+          ({ adapter, requestLogPath }) =>
+            Effect.gen(function* () {
+              const threadId = ThreadId.make(`bob-${runtimeMode}-${toolEdits}`);
+              const opened: Array<string> = [];
+              yield* Stream.runForEach(adapter.streamEvents, (event) =>
+                event.type === "request.opened"
+                  ? Effect.sync(() => opened.push(event.payload.requestType)).pipe(
+                      Effect.andThen(
+                        adapter.respondToRequest(
+                          threadId,
+                          ApprovalRequestId.make(String(event.requestId)),
+                          "accept",
+                        ),
+                      ),
+                    )
+                  : Effect.void,
+              ).pipe(Effect.forkChild({ startImmediately: true }));
+
+              yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode });
+              yield* adapter.sendTurn({ threadId, input: "update the readme" });
+
+              assert.deepStrictEqual(opened, [...asked]);
+              // Every answer allows the tool once, never for the rest of Bob's session.
+              const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+              assert.deepStrictEqual(permissionOutcomes(requests), [
+                { outcome: "selected", optionId: "allow" },
+              ]);
+
+              yield* adapter.stopSession(threadId);
+            }),
+        );
+      }
+    }),
   );
 
   it.effect("sends a slash command to Bob without T3's runtime instructions", () =>

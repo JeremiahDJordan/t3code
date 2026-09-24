@@ -1,17 +1,26 @@
 import {
   BOB_DEFAULT_MODEL,
   type BobSettings,
+  type ServerProvider,
   type ServerProviderAuth,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import type * as EffectAcpSchema from "effect-acp/schema";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
@@ -22,16 +31,18 @@ import {
   readBobApiKey,
 } from "../acp/BobAcpSupport.ts";
 import { isBobSsoLoginExpired, readBobSsoLogin } from "./bobUsageLimits.ts";
+import { createProviderVersionAdvisory, ProviderVersionCache } from "../providerMaintenance.ts";
 import {
+  COMPACT_SLASH_COMMAND,
   DEFAULT_TIMEOUT_MS,
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
-  providerModelsFromSettings,
   spawnAndCollect,
   type ProviderProbeResult,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
+import type { ServerProviderShape } from "../Services/ServerProvider.ts";
 
 const BOB_PRESENTATION = {
   displayName: "Bob",
@@ -43,7 +54,8 @@ const BOB_PRESENTATION = {
 } as const;
 const EMPTY_CAPABILITIES = createModelCapabilities({ optionDescriptors: [] });
 
-// Bob picks its model itself and has no `session/set_model`, so T3 offers one entry for it.
+// Bob picks its model itself and has no `session/set_model`, so T3 offers one entry for it and
+// no custom models, which Bob could not switch to.
 const BOB_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
     slug: BOB_DEFAULT_MODEL,
@@ -53,17 +65,14 @@ const BOB_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   },
 ];
 
-function bobModelsFromSettings(settings: BobSettings): ReadonlyArray<ServerProviderModel> {
-  return providerModelsFromSettings(BOB_BUILT_IN_MODELS, settings.customModels, EMPTY_CAPABILITIES);
-}
-
+/** Bob's snapshot for a status check result. */
 const buildBobSnapshot = (settings: BobSettings, probe: ProviderProbeResult) =>
   Effect.map(DateTime.now, (now) =>
     buildServerProvider({
       presentation: BOB_PRESENTATION,
       enabled: settings.enabled,
       checkedAt: DateTime.formatIso(now),
-      models: bobModelsFromSettings(settings),
+      models: BOB_BUILT_IN_MODELS,
       probe,
     }),
   );
@@ -209,4 +218,155 @@ export const checkBobProviderStatus = Effect.fn("checkBobProviderStatus")(functi
         ? { message: BOB_SSO_UNCONFIRMED_MESSAGE }
         : {}),
   });
+});
+
+/** The workspaces whose commands Bob's snapshot keeps, the registry's limit too. */
+const MAX_BOB_WORKSPACES = 16;
+
+/**
+ * T3's slash commands for the ones Bob reported. Bob runs a command only when the whole prompt
+ * is `/name args`, so a name that cannot be written that way is left out, and so is `/compact`,
+ * which Bob does not have.
+ */
+function bobSlashCommands(
+  commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+): Array<ServerProviderSlashCommand> {
+  const seen = new Set([COMPACT_SLASH_COMMAND.name]);
+  return commands.flatMap((command) => {
+    const name = command.name.trim();
+    if (!name || /[\s/]/.test(name) || seen.has(name)) return [];
+    seen.add(name);
+    const description = command.description.trim();
+    const hint = command.input?.hint.trim();
+    return [
+      {
+        name,
+        ...(description ? { description } : {}),
+        ...(hint ? { input: { hint } } : {}),
+      },
+    ];
+  });
+}
+
+/**
+ * Bob reports its slash commands (the skills its current mode allows, and MCP prompts as
+ * `server:command`) only inside a session, so each workspace keeps the list its latest session
+ * reported, across health refreshes. Bob does not expand `$skill` mentions, so its skills are
+ * offered only as these commands and the snapshot lists no skills.
+ */
+export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function* (
+  provider: ServerProviderShape,
+) {
+  const workspaces = yield* SubscriptionRef.make<NonNullable<ServerProvider["workspaceSnapshots"]>>(
+    [],
+  );
+  /** Records a workspace with new commands, or with the ones it has when none are given. */
+  const recordWorkspace = (
+    cwd: string,
+    slashCommands: ReadonlyArray<ServerProviderSlashCommand> | undefined,
+  ) =>
+    Effect.flatMap(DateTime.now, (now) =>
+      SubscriptionRef.modify(workspaces, (entries) => {
+        const entry = {
+          cwd,
+          checkedAt: DateTime.formatIso(now),
+          slashCommands:
+            slashCommands ?? entries.find((existing) => existing.cwd === cwd)?.slashCommands ?? [],
+          skills: [],
+        };
+        return [
+          entry,
+          [...entries.filter((existing) => existing.cwd !== cwd), entry].slice(-MAX_BOB_WORKSPACES),
+        ] as const;
+      }),
+    );
+  const getSnapshot = Effect.all([provider.getSnapshot, SubscriptionRef.get(workspaces)]).pipe(
+    Effect.map(([snapshot, workspaceSnapshots]) =>
+      workspaceSnapshots.length > 0 ? { ...snapshot, workspaceSnapshots } : snapshot,
+    ),
+  );
+  return {
+    snapshot: {
+      ...provider,
+      getSnapshot,
+      refresh: provider.refresh.pipe(Effect.andThen(getSnapshot)),
+      streamChanges: Stream.merge(
+        provider.streamChanges.pipe(Stream.map(() => undefined)),
+        SubscriptionRef.changes(workspaces).pipe(Stream.map(() => undefined)),
+      ).pipe(Stream.mapEffect(() => getSnapshot)),
+    } satisfies ServerProviderShape,
+    /** The snapshot as a workspace sees it, which also starts keeping that workspace. */
+    snapshotForCwd: (cwd: string) =>
+      Effect.gen(function* () {
+        const workspace = yield* recordWorkspace(cwd, undefined);
+        return {
+          ...(yield* getSnapshot),
+          checkedAt: workspace.checkedAt,
+          slashCommands: workspace.slashCommands,
+          skills: workspace.skills,
+        };
+      }),
+    /** Replaces a workspace's commands with the ones a Bob session there just reported. */
+    onAvailableCommands: (commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>, cwd: string) =>
+      recordWorkspace(cwd, bobSlashCommands(commands)).pipe(Effect.asVoid),
+  };
+});
+
+/**
+ * IBM publishes the latest Bob Shell release here, and its installer downloads that release.
+ * The `@ibm/bob` npm package is an empty placeholder, so the npm registry cannot say.
+ */
+const BOB_LATEST_VERSION_URL =
+  "https://s3.us-south.cloud-object-storage.appdomain.cloud/bob-shell/bobshell2-version.txt";
+const BOB_INSTALL_COMMAND = "curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash";
+const BOB_LATEST_VERSION_TIMEOUT = Duration.seconds(4);
+const BOB_LATEST_VERSION_CACHE_TTL = Duration.hours(1);
+
+/** The latest Bob Shell release, or null when IBM's version file can't be read in time. */
+const fetchBobLatestVersion = HttpClient.get(BOB_LATEST_VERSION_URL).pipe(
+  Effect.flatMap(HttpClientResponse.filterStatusOk),
+  Effect.flatMap((response) => response.text),
+  Effect.timeoutOption(BOB_LATEST_VERSION_TIMEOUT),
+  Effect.map((text) => {
+    const version = Option.getOrUndefined(text)?.trim();
+    return version && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(version) ? version : null;
+  }),
+  Effect.orElseSucceed(() => null),
+);
+
+/** The latest Bob Shell release, cached for an hour alongside the npm version lookups. */
+const resolveBobLatestVersion = Effect.gen(function* () {
+  const cache = yield* ProviderVersionCache;
+  const now = DateTime.toEpochMillis(yield* DateTime.now);
+  const cached = cache.get(BOB_LATEST_VERSION_URL);
+  if (cached && cached.expiresAt > now) return cached.version;
+  const version = yield* fetchBobLatestVersion;
+  cache.set(BOB_LATEST_VERSION_URL, {
+    expiresAt: now + Duration.toMillis(BOB_LATEST_VERSION_CACHE_TTL),
+    version,
+  });
+  return version;
+});
+
+/**
+ * Adds the version notice: the installed Bob and, when update checks are on, whether IBM has
+ * released a newer one. Bob updates only through IBM's installer, so the notice offers its
+ * command to copy instead of a one-click update.
+ */
+export const enrichBobSnapshot = Effect.fn("enrichBobSnapshot")(function* (
+  snapshot: ServerProvider,
+  enableProviderUpdateChecks: boolean,
+) {
+  const checkForUpdates =
+    enableProviderUpdateChecks && snapshot.enabled && snapshot.installed && !!snapshot.version;
+  const latestVersion = checkForUpdates ? yield* resolveBobLatestVersion : null;
+  const versionAdvisory = createProviderVersionAdvisory({
+    driver: snapshot.driver,
+    currentVersion: snapshot.version,
+    latestVersion,
+    checkedAt: checkForUpdates ? DateTime.formatIso(yield* DateTime.now) : snapshot.checkedAt,
+  });
+  // The installer is a shell script, so a Windows host gets no command to paste.
+  const updateCommand = (yield* HostProcessPlatform) === "win32" ? null : BOB_INSTALL_COMMAND;
+  return { ...snapshot, versionAdvisory: { ...versionAdvisory, updateCommand } };
 });

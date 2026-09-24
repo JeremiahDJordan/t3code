@@ -19,6 +19,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  type RuntimeMode,
   type SessionExitedPayload,
   type ThreadId,
   TurnId,
@@ -64,7 +65,11 @@ import {
   makeAcpRequestResolvedEvent,
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
-import { type AcpSessionModeState, parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
+import {
+  type AcpSessionModeState,
+  canonicalItemTypeFromAcpToolKind,
+  parsePermissionRequest,
+} from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
   describeBobAcpSetupError,
@@ -105,6 +110,11 @@ export interface BobAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   /** Bob's task database. Defaults to the one `bob` opens for `environment`. */
   readonly taskDatabasePath?: string;
+  /** Receives the slash commands a session reports, with the session's workspace. */
+  readonly onAvailableCommands?: (
+    commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+    cwd: string,
+  ) => Effect.Effect<void>;
 }
 
 interface PendingApproval {
@@ -124,8 +134,18 @@ interface BobSessionContext {
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   activeTurnId: TurnId | undefined;
-  /** The started turn still owed a `turn.completed`, and whether Stop was pressed during it. */
-  openTurn: { readonly id: TurnId; interrupted: boolean } | undefined;
+  /**
+   * The started turn still owed a `turn.completed`, and whether Stop was pressed during it. A
+   * plan turn also keeps Bob's latest reply segment, which becomes its proposed plan.
+   */
+  openTurn:
+    | {
+        readonly id: TurnId;
+        interrupted: boolean;
+        readonly plan: boolean;
+        reply?: { readonly itemId: string | undefined; text: string };
+      }
+    | undefined;
   /** Number of sendTurn prompts currently in flight or waiting to be sent.
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
@@ -227,6 +247,22 @@ function makeBobToolCallNormalizer() {
   };
 }
 
+/**
+ * The answer T3 gives Bob without asking the user: anything in full access, and in
+ * auto-accept-edits the edits, deletes and moves T3 shows as file changes, each allowed once so
+ * Bob keeps asking about the next. Every other request goes to the user.
+ */
+function bobAutoApproval(
+  runtimeMode: RuntimeMode,
+  toolKind: EffectAcpSchema.ToolKind | null | undefined,
+): ProviderApprovalDecision | undefined {
+  if (runtimeMode === "full-access") return "acceptForSession";
+  return runtimeMode === "auto-accept-edits" &&
+    canonicalItemTypeFromAcpToolKind(toolKind ?? undefined) === "file_change"
+    ? "accept"
+    : undefined;
+}
+
 /** Bob's option ids are its own, so replies are picked by ACP option kind. */
 function selectPermissionOptionId(
   request: EffectAcpSchema.RequestPermissionRequest,
@@ -241,6 +277,10 @@ function selectPermissionOptionId(
   );
 }
 
+/**
+ * Builds the adapter for one Bob instance. Each thread gets its own `bob acp` process, whose
+ * ACP events become T3's runtime events.
+ */
 export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiveOptions) {
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("bob");
@@ -360,6 +400,28 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         });
       });
 
+    /**
+     * Bob has no plan tool, so a plan turn's plan is its final reply. When a plan turn ends
+     * normally with text, that reply becomes T3's proposed plan, which the user can implement.
+     */
+    const proposePlan = (ctx: BobSessionContext, stopReason: EffectAcpSchema.StopReason) =>
+      Effect.gen(function* () {
+        const turn = ctx.openTurn;
+        const planMarkdown =
+          turn?.plan && !turn.interrupted && stopReason === "end_turn"
+            ? turn.reply?.text.trim()
+            : undefined;
+        if (!turn || !planMarkdown) return;
+        yield* offerRuntimeEvent({
+          type: "turn.proposed.completed",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId: turn.id,
+          payload: { planMarkdown },
+        });
+      });
+
     /** A turn that ended in an error was cancelled if Stop was pressed during it. */
     const failedTurnPayload = (
       ctx: BobSessionContext,
@@ -403,6 +465,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         });
       });
 
+    /** Opens Bob for a thread, resuming its stored task when there is one. */
     const startSession: BobAdapterShape["startSession"] = (input) =>
       withThreadLock(
         input.threadId,
@@ -431,11 +494,13 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           const pendingApprovals = new Map<ApprovalRequestId, PendingApproval>();
           let ctx!: BobSessionContext;
           const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+          /** Answers what the runtime mode allows without asking, and asks the user the rest. */
           const handlePermission = (params: EffectAcpSchema.RequestPermissionRequest) =>
             Effect.gen(function* () {
               yield* logNative(input.threadId, "session/request_permission", params);
-              if (input.runtimeMode === "full-access") {
-                const optionId = selectPermissionOptionId(params, "acceptForSession");
+              const autoApproval = bobAutoApproval(input.runtimeMode, params.toolCall.kind);
+              if (autoApproval !== undefined) {
+                const optionId = selectPermissionOptionId(params, autoApproval);
                 if (optionId !== undefined) {
                   return { outcome: { outcome: "selected" as const, optionId } };
                 }
@@ -629,6 +694,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                   case "ModeChanged":
                     ctx.currentModeId = event.modeId;
                     return;
+                  case "AvailableCommandsUpdated":
+                    yield* (
+                      options?.onAvailableCommands?.(event.availableCommands, cwd) ?? Effect.void
+                    );
+                    return;
                   case "AssistantItemStarted":
                   case "AssistantItemCompleted":
                     yield* offerRuntimeEvent(
@@ -687,6 +757,13 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     return;
                   case "ContentDelta":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
+                    if (ctx.openTurn?.plan) {
+                      const turn = ctx.openTurn;
+                      if (!turn.reply || turn.reply.itemId !== event.itemId) {
+                        turn.reply = { itemId: event.itemId, text: "" };
+                      }
+                      turn.reply.text += event.text;
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
                         stamp: yield* makeEventStamp(),
@@ -753,6 +830,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         }).pipe(Effect.scoped),
       );
 
+    /** Sends a prompt to Bob as a new turn, or as a steer of the turn that is running. */
     const sendTurn: BobAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
@@ -791,7 +869,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               );
               ctx.currentModeId = modeId;
             }
-            ctx.openTurn = { id: turnId, interrupted: false };
+            ctx.openTurn = {
+              id: turnId,
+              interrupted: false,
+              plan: input.interactionMode === "plan",
+            };
             ctx.turnStartTaskCosts = ctx.taskCosts;
             yield* offerRuntimeEvent({
               type: "turn.started",
@@ -914,6 +996,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           // one continues it.
           yield* uncount;
           if (ctx.promptsInFlight === 0) {
+            yield* proposePlan(ctx, result.stopReason);
             yield* settleTurn(ctx, {
               state: result.stopReason === "cancelled" ? "cancelled" : "completed",
               stopReason: result.stopReason ?? null,
