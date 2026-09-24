@@ -150,9 +150,8 @@ export const makeBobAcpRuntime = (
           input.environment,
           input.runtimeMode,
         ),
-        // Bob's only method. A no-op with a stored IBM SSO login or an API key; when signed
-        // out it opens the IBM SSO page in a browser on the machine running `bob`.
-        authMethodId: "sso",
+        // No `authMethodId`: Bob's only method opens an IBM SSO browser on the server host
+        // and blocks until the login finishes. Bob signs in from its stored login or API key.
         resumeMethod: "resume",
         // Bob rejects a prompt while the previous one is still running, so a cancelled
         // prompt must finish on Bob's side before the next one is sent.
