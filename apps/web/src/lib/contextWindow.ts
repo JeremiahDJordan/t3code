@@ -1,4 +1,8 @@
-import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@t3tools/contracts";
+import type {
+  OrchestrationThreadActivity,
+  ThreadTokenUsageSnapshot,
+  ThreadUsageCost,
+} from "@t3tools/contracts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -10,6 +14,13 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function asCost(value: unknown): ThreadUsageCost | null {
+  const cost = asRecord(value);
+  const amount = asFiniteNumber(cost?.amount);
+  const unit = typeof cost?.unit === "string" ? cost.unit.trim() : "";
+  return amount !== null && amount >= 0 && unit ? { amount, unit } : null;
 }
 
 type NullableContextWindowUsage = {
@@ -67,11 +78,17 @@ export function deriveLatestContextWindowSnapshot(
       durationMs: asFiniteNumber(payload?.durationMs),
       compactsAutomatically: asBoolean(payload?.compactsAutomatically) ?? false,
       autoCompactThreshold: asFiniteNumber(payload?.autoCompactThreshold),
+      cost: asCost(payload?.cost),
       updatedAt: activity.createdAt,
     };
   }
 
   return null;
+}
+
+/** Provider spend, with more decimals below 1 so small amounts stay readable, as Bob Shell shows it. */
+export function formatContextWindowCost(amount: number): string {
+  return amount >= 1 ? amount.toFixed(2) : amount >= 0.01 ? amount.toFixed(3) : amount.toFixed(4);
 }
 
 export function formatContextWindowTokens(value: number | null): string {
