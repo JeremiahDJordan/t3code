@@ -21,10 +21,8 @@ export const BOB_API_KEY_ALIAS_ENV = "BOBSHELL_API_KEY";
 export const BOB_SSO_SIGN_IN_MESSAGE =
   "Bob is not signed in. Run `bob` in a terminal to sign in with IBM SSO.";
 export const BOB_API_KEY_REQUIRED_MESSAGE = `Bob is set to sign in with an API key. Add ${BOB_API_KEY_ENV} as a sensitive environment variable on this Bob provider.`;
-const BOB_LICENSE_REQUIRED_MESSAGE =
-  "Accept the IBM Bob license by running `bob` once in a terminal.";
-const BOB_UNTRUSTED_WORKSPACE_MESSAGE =
-  "Bob does not trust this workspace. Run `bob` in the project folder and choose a trust level.";
+const BOB_LICENSE_HINT = "Run `bob` once in a terminal to accept it.";
+const BOB_UNTRUSTED_WORKSPACE_HINT = "Run `bob` in the project folder and choose a trust level.";
 
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
@@ -108,8 +106,10 @@ export function describeBobAcpSetupError(
   if (!isAcpRequestError(error)) return undefined;
   if (error.code === -32000) return bobSignInMessage(authMethod);
   if (error.code !== -32600) return undefined;
-  if (/license agreement/i.test(error.errorMessage)) return BOB_LICENSE_REQUIRED_MESSAGE;
-  if (/not trusted/i.test(error.errorMessage)) return BOB_UNTRUSTED_WORKSPACE_MESSAGE;
+  // Keep Bob's own text, which names its flags, minus the generic JSON-RPC label.
+  const bobMessage = error.errorMessage.replace(/^Invalid request:\s*/, "");
+  if (/license agreement/i.test(bobMessage)) return `${bobMessage} ${BOB_LICENSE_HINT}`;
+  if (/not trusted/i.test(bobMessage)) return `${bobMessage} ${BOB_UNTRUSTED_WORKSPACE_HINT}`;
   return undefined;
 }
 
