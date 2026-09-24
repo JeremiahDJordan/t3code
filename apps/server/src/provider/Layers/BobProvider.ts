@@ -13,6 +13,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
@@ -260,23 +261,32 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
   const workspaces = yield* SubscriptionRef.make<NonNullable<ServerProvider["workspaceSnapshots"]>>(
     [],
   );
-  /** Records a workspace with new commands, or with the ones it has when none are given. */
+  /**
+   * Records a workspace with new commands, or with the ones it has when none are given. Bob
+   * re-sends its commands on every mode switch, so a list the workspace already has leaves
+   * it untouched instead of pushing an identical snapshot to every client.
+   */
   const recordWorkspace = (
     cwd: string,
     slashCommands: ReadonlyArray<ServerProviderSlashCommand> | undefined,
   ) =>
     Effect.flatMap(DateTime.now, (now) =>
-      SubscriptionRef.modify(workspaces, (entries) => {
+      SubscriptionRef.modifySome(workspaces, (entries) => {
+        const existing = entries.find((entry) => entry.cwd === cwd);
+        if (existing && slashCommands && Equal.equals(existing.slashCommands, slashCommands)) {
+          return [existing, Option.none()] as const;
+        }
         const entry = {
           cwd,
           checkedAt: DateTime.formatIso(now),
-          slashCommands:
-            slashCommands ?? entries.find((existing) => existing.cwd === cwd)?.slashCommands ?? [],
+          slashCommands: slashCommands ?? existing?.slashCommands ?? [],
           skills: [],
         };
         return [
           entry,
-          [...entries.filter((existing) => existing.cwd !== cwd), entry].slice(-MAX_BOB_WORKSPACES),
+          Option.some(
+            [...entries.filter((other) => other.cwd !== cwd), entry].slice(-MAX_BOB_WORKSPACES),
+          ),
         ] as const;
       }),
     );

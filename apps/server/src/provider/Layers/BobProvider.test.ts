@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
@@ -304,6 +305,37 @@ describe("Bob command catalog", () => {
       expect(
         refreshed.workspaceSnapshots?.find((entry) => entry.cwd === "/one")?.slashCommands,
       ).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps the snapshot as it was when Bob repeats a workspace's commands", () =>
+    Effect.gen(function* () {
+      const base = yield* makeReadyBobSnapshot;
+      const catalog = yield* makeBobCommandCatalog({
+        getSnapshot: Effect.succeed(base),
+        refresh: Effect.succeed(base),
+        streamChanges: Stream.empty,
+        resolveMaintenance: () => Effect.die("Not used"),
+        applyUsageLimits: () => Effect.void,
+      });
+      const commands = [{ name: "init", description: "Set up the project" }];
+      yield* catalog.onAvailableCommands(commands, "/one");
+      const reported = yield* catalog.snapshot.getSnapshot;
+
+      // Bob sends the same list again on every plan/agent switch. The registry publishes only
+      // a snapshot that differs, so an identical one reaches no client.
+      yield* TestClock.adjust("1 minute");
+      yield* catalog.onAvailableCommands(commands, "/one");
+      expect(yield* catalog.snapshot.getSnapshot).toEqual(reported);
+
+      // A different list is still recorded.
+      yield* TestClock.adjust("1 minute");
+      yield* catalog.onAvailableCommands([], "/one");
+      const changed = yield* catalog.snapshot.getSnapshot;
+      expect(changed.workspaceSnapshots?.[0]?.slashCommands).toEqual([]);
+      expect(changed.workspaceSnapshots?.[0]?.checkedAt).not.toBe(
+        reported.workspaceSnapshots?.[0]?.checkedAt,
+      );
     }),
   );
 });
