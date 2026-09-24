@@ -38,6 +38,14 @@ export const MAX_CUSTOM_MODEL_LENGTH = 256;
 const DEFAULT_TEXT_GENERATION_INSTANCE_ID = ProviderInstanceId.make("codex");
 
 /**
+ * Antigravity offers only its account's models and Bob picks its own, so a custom
+ * model would do nothing for either. Unknown fork drivers keep custom models.
+ */
+export function supportsCustomModels(driverKind: ProviderDriverKind | null): boolean {
+  return driverKind !== "antigravity" && driverKind !== "bob";
+}
+
+/**
  * Resolve the custom-model list for a given instance, preferring the
  * instance's own `providerInstances[id].config.customModels` blob when
  * present and falling back to the legacy per-kind
@@ -58,7 +66,7 @@ function readInstanceCustomModels(
   instanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
 ): ReadonlyArray<CustomModelDefinition> {
-  if (driverKind === "antigravity") return [];
+  if (!supportsCustomModels(driverKind)) return [];
   const instance = settings.providerInstances?.[instanceId];
   const config = instance?.config;
   if (config !== null && typeof config === "object") {
