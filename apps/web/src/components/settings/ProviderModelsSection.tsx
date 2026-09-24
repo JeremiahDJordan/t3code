@@ -11,7 +11,7 @@ import { type CustomModelDefinition, normalizeCustomModelSlug } from "@t3tools/s
 
 import { cn } from "../../lib/utils";
 import { sortModelsForProviderInstance } from "../../modelOrdering";
-import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
+import { MAX_CUSTOM_MODEL_LENGTH, supportsCustomModels } from "../../modelSelection";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Switch } from "../ui/switch";
@@ -180,6 +180,7 @@ export function ProviderModelsSection({
   const listRef = useRef<HTMLDivElement>(null);
   // Slug of a just-added custom model, scrolled into view once its row exists.
   const scrollToSlugRef = useRef<string | null>(null);
+  const canAddCustomModels = supportsCustomModels(driverKind);
   const hiddenModelSet = useMemo(() => new Set(hiddenModels), [hiddenModels]);
   const favoriteModelSet = useMemo(() => new Set(favoriteModels), [favoriteModels]);
   const displayModels = useMemo(
@@ -222,8 +223,9 @@ export function ProviderModelsSection({
     row.scrollIntoView({ block: "nearest" });
   }, [displayModels]);
 
+  /** Validates the typed slug and saves it as a custom model. */
   const handleAdd = () => {
-    if (driverKind === "antigravity") return;
+    if (!canAddCustomModels) return;
     const normalized = normalizeCustomModelSlug(input);
     if (!normalized) {
       setError("Enter a model slug.");
@@ -534,7 +536,7 @@ export function ProviderModelsSection({
             {hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}
           </span>
         </div>
-        {driverKind !== "antigravity" && !isAdding ? (
+        {canAddCustomModels && !isAdding ? (
           <Button
             type="button"
             size="xs"
@@ -592,7 +594,7 @@ export function ProviderModelsSection({
         })}
       </div>
 
-      {driverKind === "antigravity" ? null : isAdding ? (
+      {canAddCustomModels && isAdding ? (
         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
           <Input
             id={`provider-instance-${instanceId}-custom-model`}
@@ -627,7 +629,7 @@ export function ProviderModelsSection({
         </div>
       ) : null}
 
-      {driverKind !== "antigravity" && error ? (
+      {canAddCustomModels && error ? (
         <p className="mt-2 text-xs text-destructive">{error}</p>
       ) : null}
     </div>
