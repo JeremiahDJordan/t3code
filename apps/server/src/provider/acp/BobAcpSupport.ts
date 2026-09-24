@@ -26,12 +26,23 @@ const BOB_UNTRUSTED_WORKSPACE_HINT = "Run `bob` in the project folder and choose
 
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
+/** Deleting a session only tidies Bob's history, so a stuck delete must not hold up the caller. */
+const BOB_SESSION_DELETE_TIMEOUT = "5 seconds";
+
 type BobAcpRuntimeBobSettings = Pick<BobSettings, "binaryPath" | "authMethod">;
 
-interface BobAcpRuntimeInput extends Omit<
-  AcpSessionRuntime.AcpSessionRuntimeOptions,
-  "authMethodId" | "cancelBehavior" | "clientCapabilities" | "resumeMethod" | "spawn"
-> {
+interface BobAcpSpawnOptions {
+  /** Skips the user's MCP servers and subagents, for one-shot sessions that only return text. */
+  readonly disableMcpAndSubagents?: boolean;
+}
+
+interface BobAcpRuntimeInput
+  extends
+    Omit<
+      AcpSessionRuntime.AcpSessionRuntimeOptions,
+      "authMethodId" | "cancelBehavior" | "clientCapabilities" | "resumeMethod" | "spawn"
+    >,
+    BobAcpSpawnOptions {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly bobSettings: BobAcpRuntimeBobSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
@@ -75,19 +86,29 @@ export function bobSignInMessage(authMethod: BobAuthMethod): string {
  * The user opened the project in T3, so Bob trusts it. Only Full access skips
  * Bob's permission prompts; every other mode forwards them through T3.
  */
-export function bobAcpSpawnArgs(runtimeMode?: RuntimeMode): ReadonlyArray<string> {
-  return runtimeMode === "full-access" ? ["acp", "--trust", "--auto-approve"] : ["acp", "--trust"];
+export function bobAcpSpawnArgs(
+  runtimeMode?: RuntimeMode,
+  options: BobAcpSpawnOptions = {},
+): ReadonlyArray<string> {
+  return [
+    "acp",
+    "--trust",
+    ...(runtimeMode === "full-access" ? ["--auto-approve"] : []),
+    ...(options.disableMcpAndSubagents ? ["--disable-mcp", "--disable-subagents"] : []),
+  ];
 }
 
+/** How to start `bob acp` for a session in `cwd`. */
 export function buildBobAcpSpawnInput(
   bobSettings: BobAcpRuntimeBobSettings | null | undefined,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
   runtimeMode?: RuntimeMode,
+  options?: BobAcpSpawnOptions,
 ): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: bobSettings?.binaryPath || "bob",
-    args: [...bobAcpSpawnArgs(runtimeMode)],
+    args: [...bobAcpSpawnArgs(runtimeMode, options)],
     cwd,
     // The full environment, not merged over the server's, so SSO can drop the key variables.
     env: bobSpawnEnvironment(bobSettings?.authMethod ?? "sso", environment ?? process.env),
@@ -126,6 +147,19 @@ export const setBobSessionMode = (
     } satisfies EffectAcpSchema.SetSessionModeRequest)
     .pipe(Effect.asVoid);
 
+/**
+ * Deletes a session and its task from Bob's history with ACP `session/delete`, for
+ * sessions the user never sees. Best effort: a failed or slow delete leaves the task.
+ */
+export const deleteBobSession = (
+  runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
+  sessionId: string,
+): Effect.Effect<void> =>
+  runtime
+    .request("session/delete", { sessionId })
+    .pipe(Effect.timeoutOption(BOB_SESSION_DELETE_TIMEOUT), Effect.ignore);
+
+/** Starts `bob acp` in the caller's scope and returns its ACP session runtime. */
 export const makeBobAcpRuntime = (
   input: BobAcpRuntimeInput,
 ): Effect.Effect<
@@ -149,6 +183,7 @@ export const makeBobAcpRuntime = (
           input.cwd,
           input.environment,
           input.runtimeMode,
+          { disableMcpAndSubagents: input.disableMcpAndSubagents === true },
         ),
         // No `authMethodId`: Bob's only method opens an IBM SSO browser on the server host
         // and blocks until the login finishes. Bob signs in from its stored login or API key.
