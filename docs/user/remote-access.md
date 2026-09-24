@@ -141,7 +141,9 @@ the connection stops a server that T3 Code launched; a server that was already
 running is left alone.
 
 For Antigravity's Google callback on a remote host, see
-[remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
+[remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device). Bob Shell's
+IBM SSO cannot finish from another device, so use an
+[API key](./providers-bob.md#choose-a-sign-in-method) on a remote host.
 
 ## Manage or revoke access
 

@@ -99,6 +99,9 @@ Grok reports the remaining subscription allowance and reset time for its current
 after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
 or endpoint configurations do not report subscription limits.
 
+Bob Shell reports its team's monthly Bobcoin allowance with IBM SSO or an API key. See
+[Bob Shell usage](./providers-bob.md#usage) for per-thread Bobcoins.
+
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.
 

@@ -142,13 +142,11 @@ offers, which can trail the npm release by a few hours.
 Add another provider instance for a separate account or configuration. Each
 instance can have its own environment variables, such as API keys or a custom
 base URL. Mark secret values as sensitive; after saving, T3 Code does not display
-their original values. Bob Shell signs in with the IBM SSO login from `bob`; to use
-an API key instead, set its **Sign-in method** to **API key** and add
-`BOB_API_KEY` as a sensitive environment variable.
+their original values.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
-[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md), and
-[Antigravity](./providers-antigravity.md).
+[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
+[Bob Shell](./providers-bob.md), and [Antigravity](./providers-antigravity.md).
 
 ## Next steps
 
