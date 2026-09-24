@@ -23,6 +23,7 @@ import {
   sanitizeThreadTitle,
 } from "./TextGenerationUtils.ts";
 import {
+  deleteBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
   setBobSessionMode,
@@ -40,6 +41,7 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
   const crypto = yield* Crypto.Crypto;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
+  /** Runs one prompt in a throwaway Bob session and decodes the JSON object Bob answers with. */
   const runBobJson = <S extends Schema.Top>({
     operation,
     cwd,
@@ -58,12 +60,14 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
     Effect.gen(function* () {
       const outputRef = yield* Ref.make("");
       // No runtime mode, so Bob asks before running tools and, with no handler, is refused.
+      // A one-shot session needs none of the user's MCP servers or subagents.
       const runtime = yield* makeBobAcpRuntime({
         bobSettings,
         environment,
         childProcessSpawner: commandSpawner,
         cwd,
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
+        disableMcpAndSubagents: true,
       }).pipe(Effect.provideService(Crypto.Crypto, crypto));
 
       yield* runtime.handleSessionUpdate((notification) => {
@@ -80,6 +84,8 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
 
       const promptResult = yield* Effect.gen(function* () {
         const started = yield* runtime.start();
+        // Runs before Bob stops, whatever the outcome, so no task is left in the user's Bob history.
+        yield* Effect.addFinalizer(() => deleteBobSession(runtime, started.sessionId));
         // Bob's read-only Q&A mode; permission prompts are refused here in any mode.
         yield* Effect.ignore(setBobSessionMode(runtime, started.sessionId, "ask"));
         return yield* runtime.prompt({
