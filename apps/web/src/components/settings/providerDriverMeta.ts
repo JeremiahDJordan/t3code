@@ -1,5 +1,6 @@
 import {
   AntigravitySettings,
+  BobSettings,
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
@@ -10,6 +11,7 @@ import {
 import type * as Schema from "effect/Schema";
 import {
   AntigravityIcon,
+  BobIcon,
   ClaudeAI,
   CursorIcon,
   GrokIcon,
@@ -75,6 +77,13 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "OpenCode",
     icon: OpenCodeIcon,
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("bob"),
+    label: "Bob",
+    icon: BobIcon,
+    badgeLabel: "Early Access",
+    settingsSchema: BobSettings,
   },
   {
     value: ProviderDriverKind.make("antigravity"),
