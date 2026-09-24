@@ -73,12 +73,12 @@ describe("describeBobAcpSetupError", () => {
     expect(describeBobAcpSetupError(error, "apiKey")).toBe(BOB_API_KEY_REQUIRED_MESSAGE);
   });
 
-  it("explains how to accept the license, which Bob checks after sign-in", () => {
+  it("keeps Bob's license message and says how to accept it", () => {
     const error = EffectAcpErrors.AcpRequestError.invalidRequest(
       "Invalid request: A license agreement is required. Review it with --show-license and accept it with --accept-license.",
     );
     expect(describeBobAcpSetupError(error, "sso")).toBe(
-      "Accept the IBM Bob license by running `bob` once in a terminal.",
+      "A license agreement is required. Review it with --show-license and accept it with --accept-license. Run `bob` once in a terminal to accept it.",
     );
   });
 
@@ -86,7 +86,9 @@ describe("describeBobAcpSetupError", () => {
     const error = EffectAcpErrors.AcpRequestError.invalidRequest(
       'Invalid request: Workspace "/tmp/project" is not trusted. Pass --trust to trust each workspace opened by this ACP server.',
     );
-    expect(describeBobAcpSetupError(error, "sso")).toMatch(/does not trust this workspace/);
+    expect(describeBobAcpSetupError(error, "sso")).toBe(
+      'Workspace "/tmp/project" is not trusted. Pass --trust to trust each workspace opened by this ACP server. Run `bob` in the project folder and choose a trust level.',
+    );
   });
 
   it("leaves other ACP failures to the generic mapping", () => {
