@@ -118,6 +118,7 @@ computer.
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                        |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                           |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                     |
+| Bob Shell   | Install [Bob Shell](https://bob.ibm.com/download?bob=shell), then run `bob` to sign in.      |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                            |
 
 Provider CLIs must be on the server's `PATH`. If T3 Code cannot find one, set its
@@ -141,7 +142,9 @@ offers, which can trail the npm release by a few hours.
 Add another provider instance for a separate account or configuration. Each
 instance can have its own environment variables, such as API keys or a custom
 base URL. Mark secret values as sensitive; after saving, T3 Code does not display
-their original values.
+their original values. Bob Shell signs in with the IBM SSO login from `bob`; to use
+an API key instead, set its **Sign-in method** to **API key** and add
+`BOB_API_KEY` as a sensitive environment variable.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md), and

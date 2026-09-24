@@ -41,6 +41,15 @@
       ]
     },
     {
+      "driver": "bob",
+      "t3CodeRange": ">=0.0.42",
+      "recommendedRange": ">=2.0.4",
+      "ranges": [
+        { "range": ">=2.0.4", "status": "supported" },
+        { "range": "<2.0.4", "status": "unknown" }
+      ]
+    },
+    {
       "driver": "opencode",
       "t3CodeRange": ">=0.0.42",
       "recommendedRange": ">=1.14.19",
