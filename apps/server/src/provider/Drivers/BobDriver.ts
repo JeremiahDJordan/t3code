@@ -2,7 +2,9 @@
  * BobDriver — `ProviderDriver` for IBM Bob Shell (`bob acp`).
  *
  * Bob manages its own model and login. The status check runs `bob --version`,
- * reads the sign-in the instance uses, and then the monthly Bobcoin budget.
+ * reads the sign-in the instance uses, and then the monthly Bobcoin budget. Slash
+ * commands come from Bob's sessions, per workspace, and the version notice from
+ * the release IBM publishes.
  *
  * @module provider/Drivers/BobDriver
  */
@@ -21,7 +23,12 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeBobTextGeneration } from "../../textGeneration/BobTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeBobAdapter } from "../Layers/BobAdapter.ts";
-import { buildInitialBobProviderSnapshot, checkBobProviderStatus } from "../Layers/BobProvider.ts";
+import {
+  buildInitialBobProviderSnapshot,
+  checkBobProviderStatus,
+  enrichBobSnapshot,
+  makeBobCommandCatalog,
+} from "../Layers/BobProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { readBobUsageLimits } from "../Layers/bobUsageLimits.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
@@ -65,6 +72,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
   },
   configSchema: BobSettings,
   defaultConfig: (): BobSettings => decodeBobSettings({}),
+  /** Builds one Bob instance: its snapshot, its per-workspace command catalog, and its adapter. */
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -86,11 +94,6 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies BobSettings;
-      const adapter = yield* makeBobAdapter(effectiveConfig, {
-        environment: processEnv,
-        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
-        instanceId,
-      });
       const textGeneration = yield* makeBobTextGeneration(effectiveConfig, processEnv);
 
       const checkProvider = checkBobProviderStatus(effectiveConfig, processEnv).pipe(
@@ -114,7 +117,9 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       );
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<BobSettings>>({
+      const managedSnapshot = yield* makeManagedServerProvider<
+        ProviderSnapshotSettings<BobSettings>
+      >({
         resolveMaintenance: () => Effect.succeed(MAINTENANCE_CAPABILITIES),
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
@@ -122,6 +127,12 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         initialSnapshot: (settings) =>
           buildInitialBobProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
         checkProvider,
+        /** Adds the version notice after each status check. */
+        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
+          enrichBobSnapshot(currentSnapshot, settings.enableProviderUpdateChecks).pipe(
+            Effect.flatMap(publishSnapshot),
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+          ),
       }).pipe(
         Effect.mapError(
           (cause) =>
@@ -134,6 +145,15 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         ),
       );
 
+      const { snapshot, onAvailableCommands, snapshotForCwd } =
+        yield* makeBobCommandCatalog(managedSnapshot);
+      const adapter = yield* makeBobAdapter(effectiveConfig, {
+        environment: processEnv,
+        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
+        instanceId,
+        onAvailableCommands,
+      });
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
@@ -142,6 +162,9 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
+        /** A workspace sees the commands Bob's latest session there reported. */
+        snapshotForCwd: (cwd) =>
+          effectiveConfig.enabled ? snapshotForCwd(cwd) : snapshot.getSnapshot,
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

@@ -6,13 +6,27 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
-import { BOB_DEFAULT_MODEL, BobSettings } from "@t3tools/contracts";
+import * as Stream from "effect/Stream";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
+import {
+  BOB_DEFAULT_MODEL,
+  BobSettings,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { BOB_API_KEY_REQUIRED_MESSAGE } from "../acp/BobAcpSupport.ts";
+import { ProviderVersionCache } from "../providerMaintenance.ts";
 import {
   BOB_SSO_UNCONFIRMED_MESSAGE,
   buildInitialBobProviderSnapshot,
   checkBobProviderStatus,
+  enrichBobSnapshot,
+  makeBobCommandCatalog,
 } from "./BobProvider.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
@@ -35,14 +49,13 @@ describe("buildInitialBobProviderSnapshot", () => {
     }),
   );
 
-  it.effect("offers Bob's configured model ahead of custom models", () =>
+  it.effect("offers only Bob's configured model, since Bob can't switch to a custom one", () =>
     Effect.gen(function* () {
       const snapshot = yield* buildInitialBobProviderSnapshot(
         decodeBobSettings({ enabled: true, customModels: ["granite-custom"] }),
       );
       expect(snapshot.models.map((model) => [model.slug, model.isCustom])).toEqual([
         [BOB_DEFAULT_MODEL, false],
-        ["granite-custom", true],
       ]);
     }),
   );
@@ -217,5 +230,178 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
       expect(snapshot.status).toBe("error");
       expect(snapshot.message).toBe("Bob Shell is installed but failed to run.");
     }).pipe(Effect.scoped),
+  );
+});
+
+/** A signed-in Bob 2.0.4, as the status check reports it. */
+const makeReadyBobSnapshot = Effect.map(
+  buildInitialBobProviderSnapshot(decodeBobSettings({ enabled: true })),
+  (draft): ServerProvider => ({
+    ...draft,
+    instanceId: ProviderInstanceId.make("bob"),
+    driver: ProviderDriverKind.make("bob"),
+    installed: true,
+    version: "2.0.4",
+    status: "ready",
+  }),
+);
+
+describe("Bob command catalog", () => {
+  it.effect("keeps each workspace's commands from Bob's sessions, without /compact", () =>
+    Effect.gen(function* () {
+      const base = yield* makeReadyBobSnapshot;
+      const catalog = yield* makeBobCommandCatalog({
+        getSnapshot: Effect.succeed(base),
+        refresh: Effect.succeed(base),
+        streamChanges: Stream.empty,
+        resolveMaintenance: () => Effect.die("Not used"),
+        applyUsageLimits: () => Effect.void,
+      });
+
+      // Before a session there, a workspace has no commands to offer.
+      const unopened = yield* catalog.snapshotForCwd("/unopened");
+      expect(unopened.slashCommands).toEqual([]);
+      expect(unopened.skills).toEqual([]);
+
+      yield* catalog.onAvailableCommands(
+        [
+          { name: "create-skill", description: "Create a skill", input: { hint: "name" } },
+          { name: "github:review", description: "Review a pull request" },
+          { name: "compact", description: "Not a Bob command" },
+          { name: "create-skill", description: "Duplicate" },
+          { name: "two words", description: "Cannot be sent as a command" },
+        ],
+        "/one",
+      );
+      yield* catalog.onAvailableCommands([{ name: "init", description: "" }], "/two");
+
+      const one = yield* catalog.snapshotForCwd("/one");
+      expect(one.slashCommands).toEqual([
+        { name: "create-skill", description: "Create a skill", input: { hint: "name" } },
+        { name: "github:review", description: "Review a pull request" },
+      ]);
+      // Bob does not expand `$skill` mentions, so its skills are only commands.
+      expect(one.skills).toEqual([]);
+      expect(one.workspaceSnapshots?.map((entry) => entry.cwd)).toEqual([
+        "/unopened",
+        "/two",
+        "/one",
+      ]);
+      // Commands belong to their workspace; the machine-wide list stays empty.
+      const published = yield* catalog.snapshot.streamChanges.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+      );
+      const latest = Array.from(published)[0];
+      expect(latest?.slashCommands).toEqual([]);
+      expect(
+        latest?.workspaceSnapshots?.find((entry) => entry.cwd === "/two")?.slashCommands,
+      ).toEqual([{ name: "init" }]);
+
+      // A later report replaces the workspace's list, as after Bob switches modes.
+      yield* catalog.onAvailableCommands([], "/one");
+      const refreshed = yield* catalog.snapshot.refresh;
+      expect(
+        refreshed.workspaceSnapshots?.find((entry) => entry.cwd === "/one")?.slashCommands,
+      ).toEqual([]);
+    }),
+  );
+});
+
+describe("enrichBobSnapshot", () => {
+  const BOB_VERSION_URL =
+    "https://s3.us-south.cloud-object-storage.appdomain.cloud/bob-shell/bobshell2-version.txt";
+  const BOB_INSTALL_COMMAND = "curl -fsSL https://bob.ibm.com/download/bobshell.sh | bash";
+
+  /** Serves IBM's version file from `respond`, counting the requests T3 makes. */
+  const withVersionFile = <A, E, R>(
+    respond: (request: HttpClientRequest.HttpClientRequest) => Response,
+    body: (requests: { count: number }) => Effect.Effect<A, E, R>,
+  ) => {
+    const requests = { count: 0 };
+    return body(requests).pipe(
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.sync(() => {
+            requests.count += 1;
+            return HttpClientResponse.fromWeb(request, respond(request));
+          }),
+        ),
+      ),
+      Effect.provideService(ProviderVersionCache, new Map()),
+      Effect.provideService(HostProcessPlatform, "darwin"),
+    );
+  };
+
+  it.effect("offers IBM's installer when IBM has released a newer Bob", () =>
+    withVersionFile(
+      (request) => {
+        expect([request.method, request.url]).toEqual(["GET", BOB_VERSION_URL]);
+        return new Response("2.0.5\n");
+      },
+      (requests) =>
+        Effect.gen(function* () {
+          const snapshot = yield* makeReadyBobSnapshot;
+          const enriched = yield* enrichBobSnapshot(snapshot, true);
+          expect(enriched.versionAdvisory).toMatchObject({
+            status: "behind_latest",
+            currentVersion: "2.0.4",
+            latestVersion: "2.0.5",
+            updateCommand: BOB_INSTALL_COMMAND,
+            // T3 does not run the installer itself.
+            canUpdate: false,
+          });
+          // The release is read once an hour, not on every status check.
+          yield* enrichBobSnapshot(snapshot, true);
+          expect(requests.count).toBe(1);
+        }),
+    ),
+  );
+
+  it.effect("reports the installed Bob as current when it is the latest release", () =>
+    withVersionFile(
+      () => new Response("2.0.4"),
+      () =>
+        Effect.gen(function* () {
+          const enriched = yield* enrichBobSnapshot(yield* makeReadyBobSnapshot, true);
+          expect(enriched.versionAdvisory?.status).toBe("current");
+        }),
+    ),
+  );
+
+  it.effect("leaves the latest release unknown when IBM's file can't be read", () =>
+    Effect.gen(function* () {
+      for (const response of [
+        () => new Response("Not found", { status: 404 }),
+        () => new Response("<html>maintenance</html>"),
+      ]) {
+        yield* withVersionFile(response, () =>
+          Effect.gen(function* () {
+            const enriched = yield* enrichBobSnapshot(yield* makeReadyBobSnapshot, true);
+            expect(enriched.versionAdvisory).toMatchObject({
+              status: "unknown",
+              currentVersion: "2.0.4",
+              latestVersion: null,
+            });
+          }),
+        );
+      }
+    }),
+  );
+
+  it.effect("does not ask IBM when update checks are off", () =>
+    withVersionFile(
+      () => new Response("9.9.9"),
+      (requests) =>
+        Effect.gen(function* () {
+          const enriched = yield* enrichBobSnapshot(yield* makeReadyBobSnapshot, false);
+          expect(enriched.versionAdvisory).toMatchObject({
+            status: "unknown",
+            currentVersion: "2.0.4",
+          });
+          expect(requests.count).toBe(0);
+        }),
+    ),
   );
 });
