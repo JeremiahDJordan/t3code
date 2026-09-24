@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - fixtures write the raw JSON files and output Bob produces.
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -8,17 +8,22 @@ import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import { BOB_DEFAULT_MODEL, BobSettings } from "@t3tools/contracts";
 
-import { BOB_API_KEY_REQUIRED_MESSAGE, BOB_SSO_SIGN_IN_MESSAGE } from "../acp/BobAcpSupport.ts";
-import { buildInitialBobProviderSnapshot, checkBobProviderStatus } from "./BobProvider.ts";
+import { BOB_API_KEY_REQUIRED_MESSAGE } from "../acp/BobAcpSupport.ts";
+import {
+  BOB_SSO_UNCONFIRMED_MESSAGE,
+  buildInitialBobProviderSnapshot,
+  checkBobProviderStatus,
+} from "./BobProvider.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
 
 /** `auth-secrets.json` as Bob writes it: the login is a JSON string under a gateway key. */
-function bobAuthSecrets(login: Record<string, unknown>): string {
-  return JSON.stringify({
-    "bob.auth.tokens-https://api.us-east.bob.ibm.com": JSON.stringify(login),
-  });
+function bobAuthSecrets(
+  login: Record<string, unknown>,
+  gatewayUrl = "https://api.us-east.bob.ibm.com",
+): string {
+  return JSON.stringify({ [`bob.auth.tokens-${gatewayUrl}`]: JSON.stringify(login) });
 }
 
 describe("buildInitialBobProviderSnapshot", () => {
@@ -58,17 +63,14 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
     'process.stdout.write("2.0.4\\ncommit: 01dddf684\\n");',
     "",
   ].join("\n");
-  /** A home directory holding Bob's stored SSO login, or none when `secrets` is omitted. */
-  const makeBobHome = (secrets?: string) =>
+  /** A home directory holding the files Bob keeps in `~/.bob/settings`, by name. */
+  const makeBobHome = (files: Record<string, string> = {}) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-bob-home-" });
-      if (secrets !== undefined) {
-        yield* fs.makeDirectory(NodePath.join(home, ".bob", "settings"), { recursive: true });
-        yield* fs.writeFileString(
-          NodePath.join(home, ".bob", "settings", "auth-secrets.json"),
-          secrets,
-        );
+      yield* fs.makeDirectory(NodePath.join(home, ".bob", "settings"), { recursive: true });
+      for (const [name, contents] of Object.entries(files)) {
+        yield* fs.writeFileString(NodePath.join(home, ".bob", "settings", name), contents);
       }
       return home;
     });
@@ -86,21 +88,6 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
     }),
   );
 
-  it.effect("asks for an IBM SSO sign-in when Bob has no stored login", () =>
-    Effect.gen(function* () {
-      const bobPath = yield* writeFakeBobCli(BOB_VERSION_SOURCE);
-      const home = yield* makeBobHome();
-      const snapshot = yield* checkBobProviderStatus(
-        decodeBobSettings({ enabled: true, binaryPath: bobPath }),
-        { ...process.env, HOME: home },
-      );
-      expect(snapshot.version).toBe("2.0.4");
-      expect(snapshot.status).toBe("error");
-      expect(snapshot.auth.status).toBe("unauthenticated");
-      expect(snapshot.message).toBe(BOB_SSO_SIGN_IN_MESSAGE);
-    }).pipe(Effect.scoped),
-  );
-
   it.effect("reads the stored SSO login and ignores API keys in the environment", () =>
     Effect.gen(function* () {
       const bobPath = yield* writeFakeBobCli(BOB_VERSION_SOURCE);
@@ -109,7 +96,7 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
         // Bob renews an expired login itself when the next session starts.
         { token: "jwt", refreshToken: "refresh", userId: "user", expiresAt: 1 },
       ]) {
-        const home = yield* makeBobHome(bobAuthSecrets(login));
+        const home = yield* makeBobHome({ "auth-secrets.json": bobAuthSecrets(login) });
         const snapshot = yield* checkBobProviderStatus(
           decodeBobSettings({ enabled: true, binaryPath: bobPath }),
           { ...process.env, HOME: home, BOB_API_KEY: "one", BOBSHELL_API_KEY: "two" },
@@ -120,18 +107,54 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  it.effect("asks to sign in again when an expired login cannot be renewed", () =>
+  it.effect("reads the login stored for the gateway in Bob's settings", () =>
     Effect.gen(function* () {
       const bobPath = yield* writeFakeBobCli(BOB_VERSION_SOURCE);
-      const home = yield* makeBobHome(
-        bobAuthSecrets({ token: "jwt", refreshToken: "", userId: "user", expiresAt: 1 }),
-      );
+      const home = yield* makeBobHome({
+        "settings.json": JSON.stringify({ gatewayUrl: "https://gateway.example" }),
+        "auth-secrets.json": bobAuthSecrets(
+          { token: "jwt", refreshToken: "refresh", userId: "user", expiresAt: unexpired },
+          "https://gateway.example",
+        ),
+      });
       const snapshot = yield* checkBobProviderStatus(
         decodeBobSettings({ enabled: true, binaryPath: bobPath }),
         { ...process.env, HOME: home },
       );
-      expect(snapshot.auth.status).toBe("unauthenticated");
-      expect(snapshot.message).toBe(BOB_SSO_SIGN_IN_MESSAGE);
+      expect(snapshot.auth.status).toBe("authenticated");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps Bob selectable when its SSO login can't be confirmed", () =>
+    Effect.gen(function* () {
+      const bobPath = yield* writeFakeBobCli(BOB_VERSION_SOURCE);
+      for (const files of [
+        {},
+        { "auth-secrets.json": "{}" },
+        { "auth-secrets.json": "not json" },
+        { "auth-secrets.json": JSON.stringify({ "bob.auth.tokens-v2": { token: "jwt" } }) },
+        // A login in a shape T3 does not know.
+        { "auth-secrets.json": bobAuthSecrets({ accessToken: "jwt", expires: unexpired }) },
+        // Bob cannot renew an expired SAML login, but it reports that itself.
+        {
+          "auth-secrets.json": bobAuthSecrets({
+            token: "jwt",
+            refreshToken: "",
+            userId: "user",
+            expiresAt: 1,
+          }),
+        },
+      ]) {
+        const home = yield* makeBobHome(files);
+        const snapshot = yield* checkBobProviderStatus(
+          decodeBobSettings({ enabled: true, binaryPath: bobPath }),
+          { ...process.env, HOME: home },
+        );
+        expect(snapshot.version).toBe("2.0.4");
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.auth).toEqual({ status: "unknown" });
+        expect(snapshot.message).toBe(BOB_SSO_UNCONFIRMED_MESSAGE);
+      }
     }).pipe(Effect.scoped),
   );
 

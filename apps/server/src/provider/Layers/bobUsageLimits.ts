@@ -27,20 +27,48 @@ const BOB_DEFAULT_GATEWAY_URL = "https://api.us-east.bob.ibm.com";
 const BOB_TOKEN_EXPIRY_SKEW_SECONDS = 60;
 export const BOB_SSO_REFRESH_MESSAGE = "Run `bob` to refresh your IBM sign-in.";
 
-/**
- * Bob's gateway, normalized as Bob normalizes it, since the gateway names the
- * storage key of the SSO login. Bob's `gatewayUrl` user setting is not read.
- */
-export function resolveBobGatewayUrl(environment: NodeJS.ProcessEnv): string {
-  return (environment.BOB_GATEWAY_URL?.trim() || BOB_DEFAULT_GATEWAY_URL)
-    .replace(/\/+/g, "/")
-    .replace(/:\//g, "://")
-    .replace(/\/+$/, "");
+/** Collapses repeated slashes, keeping the scheme's, and drops trailing ones, as Bob does. */
+function normalizeBobGatewayUrl(url: string): string {
+  return url.replace(/\/+/g, "/").replace(/:\//g, "://").replace(/\/+$/, "");
 }
 
-// `auth-secrets.json` maps storage keys to strings; the login is itself a JSON string.
-const BobAuthSecrets = Schema.Record(Schema.String, Schema.Unknown);
-const decodeAuthSecrets = Schema.decodeEffect(Schema.fromJsonString(BobAuthSecrets));
+// Bob's settings files are JSON objects. `auth-secrets.json` maps storage keys to strings.
+const decodeBobSettingsFile = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
+
+/**
+ * A file Bob keeps in `~/.bob/settings`. Undefined when it is missing or not a JSON
+ * object: these are Bob's private files, so T3 never fails on their contents.
+ */
+const readBobSettingsFile = (environment: NodeJS.ProcessEnv, name: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return yield* fs
+      .readFileString(path.join(bobHomeDirectory(environment, path), "settings", name))
+      .pipe(
+        Effect.flatMap(decodeBobSettingsFile),
+        Effect.orElseSucceed(() => undefined),
+      );
+  });
+
+/**
+ * The gateway Bob uses, resolved as a started Bob resolves it: its `gatewayUrl` user
+ * setting as written, which Bob applies over the environment, else `BOB_GATEWAY_URL` or
+ * IBM's gateway, normalized. Bob names the SSO login's storage key after this value and
+ * normalizes it for requests.
+ */
+const resolveBobGatewayUrl = Effect.fn("resolveBobGatewayUrl")(function* (
+  environment: NodeJS.ProcessEnv,
+) {
+  const configured = (yield* readBobSettingsFile(environment, "settings.json"))?.gatewayUrl;
+  return typeof configured === "string" && configured
+    ? configured
+    : normalizeBobGatewayUrl(environment.BOB_GATEWAY_URL?.trim() || BOB_DEFAULT_GATEWAY_URL);
+});
+
+// The login is itself a JSON string in `auth-secrets.json`.
 const BobStoredLogin = Schema.Struct({
   token: Schema.String,
   refreshToken: Schema.optional(Schema.String),
@@ -59,25 +87,16 @@ export interface BobSsoLogin {
 }
 
 /**
- * Reads the IBM SSO login Bob stored after signing in. Undefined when there is
- * none for this gateway. T3 only reads the file: refreshing would race Bob and
- * rotate its refresh token.
+ * Reads the IBM SSO login Bob stored after signing in. Undefined when none for this
+ * gateway is found in a shape T3 knows. T3 only reads the file: refreshing would race
+ * Bob and rotate its refresh token.
  */
 export const readBobSsoLogin = Effect.fn("readBobSsoLogin")(function* (
   environment: NodeJS.ProcessEnv,
 ) {
-  const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  const contents = yield* fs
-    .readFileString(path.join(bobHomeDirectory(environment, path), "settings", "auth-secrets.json"))
-    .pipe(
-      Effect.catchTags({
-        PlatformError: (error) =>
-          error.reason._tag === "NotFound" ? Effect.succeed("{}") : Effect.fail(error),
-      }),
-    );
-  const secrets = yield* decodeAuthSecrets(contents);
-  const stored = secrets[`bob.auth.tokens-${resolveBobGatewayUrl(environment)}`];
+  const secrets = yield* readBobSettingsFile(environment, "auth-secrets.json");
+  if (!secrets) return undefined;
+  const stored = secrets[`bob.auth.tokens-${yield* resolveBobGatewayUrl(environment)}`];
   const login = typeof stored === "string" ? decodeStoredLogin(stored) : Option.none();
   if (Option.isNone(login) || !login.value.token) return undefined;
   const activeProfileId = secrets["bob.profile.active"];
@@ -209,9 +228,10 @@ export const readBobUsageLimits = Effect.fn("readBobUsageLimits")(function* (
         }),
       } satisfies BobUsage;
     }
+    const gatewayUrl = normalizeBobGatewayUrl(yield* resolveBobGatewayUrl(environment));
     const client = yield* HttpClient.HttpClient;
     const response = yield* client.execute(
-      HttpClientRequest.get(`${resolveBobGatewayUrl(environment)}/admin/v1/profile`).pipe(
+      HttpClientRequest.get(`${gatewayUrl}/admin/v1/profile`).pipe(
         HttpClientRequest.setHeader("authorization", authorization),
       ),
     );
