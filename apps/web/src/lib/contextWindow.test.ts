@@ -67,6 +67,24 @@ describe("contextWindow", () => {
     });
   });
 
+  it("leaves the used share unknown, not 0%, when the provider reports no limit", () => {
+    // Bob reports the context size and spend, but not its model's context window.
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", {
+        usedTokens: 15_700,
+        cost: { amount: 0.118, unit: "Bobcoins" },
+      }),
+    ]);
+
+    expect(snapshot).toMatchObject({
+      usedTokens: 15_700,
+      maxTokens: null,
+      remainingTokens: null,
+      usedPercentage: null,
+      remainingPercentage: null,
+    });
+  });
+
   it("reads provider spend and ignores a malformed one", () => {
     const [withCost, malformed] = [
       { amount: 0.118, unit: "Bobcoins" },
