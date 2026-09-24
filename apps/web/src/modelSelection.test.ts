@@ -1,5 +1,6 @@
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
+  BOB_DEFAULT_MODEL,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -653,6 +654,31 @@ describe("instance-scoped model selection", () => {
     for (const entry of entries) {
       expect(getAppModelOptionsForInstance(settings, entry).map((model) => model.slug)).toEqual([
         nativeModel,
+      ]);
+    }
+  });
+
+  it("offers only Bob's configured model despite custom model settings", () => {
+    const driver = ProviderDriverKind.make("bob");
+    const customId = ProviderInstanceId.make("bob_work");
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providers: {
+        ...DEFAULT_UNIFIED_SETTINGS.providers,
+        bob: { ...DEFAULT_UNIFIED_SETTINGS.providers.bob, customModels: ["legacy-model"] },
+      },
+      providerInstances: {
+        [customId]: { driver, config: { customModels: ["instance-model"] } },
+      },
+    };
+    const entries = deriveProviderInstanceEntries([
+      provider({ provider: driver, instanceId: "bob", models: [BOB_DEFAULT_MODEL] }),
+      provider({ provider: driver, instanceId: customId, models: [BOB_DEFAULT_MODEL] }),
+    ]);
+
+    for (const entry of entries) {
+      expect(getAppModelOptionsForInstance(settings, entry).map((model) => model.slug)).toEqual([
+        BOB_DEFAULT_MODEL,
       ]);
     }
   });
