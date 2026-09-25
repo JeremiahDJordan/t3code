@@ -278,6 +278,21 @@ function bobAutoApproval(
     : undefined;
 }
 
+/**
+ * The line an approval card shows for Bob's request. T3 labels every file change "Changed
+ * files", so for those it shows Bob's own title, which names the file and what Bob will do to it.
+ */
+function bobPermissionDetail(
+  request: EffectAcpSchema.RequestPermissionRequest,
+  fallback: string | undefined,
+): string | undefined {
+  const title = request.toolCall.title?.trim();
+  return title &&
+    canonicalItemTypeFromAcpToolKind(request.toolCall.kind ?? undefined) === "file_change"
+    ? title
+    : fallback;
+}
+
 /** Bob's option ids are its own, so replies are picked by ACP option kind. */
 function selectPermissionOptionId(
   request: EffectAcpSchema.RequestPermissionRequest,
@@ -581,7 +596,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                   requestId: runtimeRequestId,
                   permissionRequest,
                   detail:
-                    permissionRequest.detail ??
+                    bobPermissionDetail(params, permissionRequest.detail) ??
                     encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
                     "[unserializable params]",
                   args: params,
