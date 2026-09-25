@@ -1165,6 +1165,57 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("asks about the tools of a message sent right after Stop", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-steer-after-stop");
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        });
+        const firstCard = yield* nextEvent(adapter, (event) => event.type === "request.opened");
+        const completed = yield* nextEvent(adapter, (event) => event.type === "turn.completed");
+
+        const first = yield* adapter
+          .sendTurn({ threadId, input: "list the files" })
+          .pipe(Effect.forkChild);
+        yield* firstCard;
+        const secondCard = yield* nextEvent(adapter, (event) => event.type === "request.opened");
+        // Stop, then type the correction at once: it reaches the adapter while Bob is still
+        // cancelling, so it continues the stopped turn as a steer.
+        const stopping = yield* adapter.interruptTurn(threadId).pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        const steer = yield* adapter
+          .sendTurn({ threadId, input: "list them again" })
+          .pipe(Effect.forkChild);
+        yield* Fiber.join(stopping);
+
+        // The steer's own tool is asked about, not refused as part of the stopped prompt.
+        const card = yield* secondCard;
+        assert.equal(card.type, "request.opened");
+        yield* adapter.respondToRequest(
+          threadId,
+          ApprovalRequestId.make(String(card.requestId)),
+          "accept",
+        );
+        yield* Fiber.join(first);
+        yield* Fiber.join(steer);
+        const settled = yield* completed;
+        assert.equal(settled.type === "turn.completed" && settled.payload.state, "completed");
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.lengthOf(paramsOf(requests, "session/prompt"), 2);
+        assert.deepStrictEqual(permissionOutcomes(requests).at(-1), {
+          outcome: "selected",
+          optionId: "allow",
+        });
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
   it.effect("drops a follow-up still waiting behind the prompt that Stop cancels", () =>
     withMockBob(
       { T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1" },

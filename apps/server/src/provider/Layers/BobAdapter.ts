@@ -184,6 +184,11 @@ interface BobSessionContext {
   readonly promptLock: Semaphore.Semaphore;
   /** Counts Stop requests. A prompt waiting to be sent when Stop is pressed is dropped. */
   interrupts: number;
+  /**
+   * `interrupts` when the prompt now with Bob was sent. A Stop since then refuses that prompt's
+   * permission requests; a steer sent after the Stop carries the new count and is asked.
+   */
+  promptEpoch: number | undefined;
   /** The latest reading of the task's running totals, and the one when the turn began. */
   taskCosts: BobTaskCosts | undefined;
   turnStartTaskCosts: BobTaskCosts | undefined;
@@ -652,7 +657,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
            * may run, and an open question would hold Bob's cancel until the runtime kills it.
            */
           const refusesPermission = () =>
-            ctx?.stopped === true || ctx?.openTurn?.interrupted === true;
+            ctx?.stopped === true ||
+            (ctx?.promptEpoch !== undefined && ctx.promptEpoch !== ctx.interrupts);
           const handlePermission = (params: EffectAcpSchema.RequestPermissionRequest) =>
             Effect.gen(function* () {
               yield* logNative(input.threadId, "session/request_permission", params);
@@ -720,8 +726,9 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               ),
             );
 
-          // Every Bob for this thread, including one that moves its task, runs with the same
-          // environment, so a device environment that sets HOME opens the same Bob.
+          // Every Bob process for this thread, including one that moves its task, starts with the
+          // same environment. The device environment adds only a PATH shim, so Bob's home, which
+          // T3 reads usage, settings and limits from, is the instance's either way.
           const bobEnvironment =
             options?.environment || mcpSession?.agentDeviceEnvironment
               ? {
@@ -884,6 +891,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             promptsInFlight: 0,
             promptLock: yield* Semaphore.make(1),
             interrupts: 0,
+            promptEpoch: undefined,
             taskCosts,
             turnStartTaskCosts: taskCosts,
             canCloseSessions:
@@ -1183,6 +1191,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
           // Stop drops a prompt that was still waiting, instead of sending it after the cancel.
           const dropped = ctx.interrupts !== interrupts;
+          if (!dropped) ctx.promptEpoch = interrupts;
           // ACP commands parse the complete text. Extra context can turn an exact
           // command into an ordinary model prompt or change its arguments.
           const result: EffectAcpSchema.PromptResponse = dropped
@@ -1199,6 +1208,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 .pipe(
                   Effect.mapError((error) =>
                     mapBobAcpError(input.threadId, "session/prompt", error),
+                  ),
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      ctx.promptEpoch = undefined;
+                    }),
                   ),
                 );
 
