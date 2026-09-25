@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import type * as EffectAcpSchema from "effect-acp/schema";
 import * as DateTime from "effect/DateTime";
@@ -108,6 +109,19 @@ export const buildInitialBobProviderSnapshot = (
 
 export const BOB_SSO_UNCONFIRMED_MESSAGE =
   "Couldn't confirm Bob's IBM SSO sign-in. If sessions fail, run `bob` in a terminal to sign in.";
+
+/**
+ * The oldest Bob Shell T3 Code is tested with. Older 2.x Bobs still run turns, so an older
+ * version warns instead of blocking; moving a thread's task between folders and closing
+ * sessions need this version.
+ */
+export const MINIMUM_BOB_VERSION = "2.0.5";
+
+/** The warning for a Bob older than `MINIMUM_BOB_VERSION`, or undefined. */
+const bobVersionWarning = (version: string | null) =>
+  version !== null && compareSemverVersions(version, MINIMUM_BOB_VERSION) < 0
+    ? `Bob Shell v${version} is older than v${MINIMUM_BOB_VERSION}, the oldest version T3 Code supports. Update Bob Shell with IBM's installer.`
+    : undefined;
 
 /**
  * Sign-in from the login Bob stored. An expired login still counts when Bob can renew it,
@@ -212,13 +226,23 @@ export const checkBobProviderStatus = Effect.fn("checkBobProviderStatus")(functi
         ? { status: "authenticated", type: "api_key", label: "Bob API key" }
         : { status: "unauthenticated" }
       : yield* readBobSsoAuth(environment);
+  if (auth.status === "unauthenticated") {
+    return yield* buildBobSnapshot(settings, {
+      installed: true,
+      version,
+      status: "error",
+      auth,
+      message: bobSignInMessage(settings.authMethod),
+    });
+  }
+  const versionWarning = bobVersionWarning(version);
   return yield* buildBobSnapshot(settings, {
     installed: true,
     version,
-    status: auth.status === "unauthenticated" ? "error" : "ready",
+    status: versionWarning ? "warning" : "ready",
     auth,
-    ...(auth.status === "unauthenticated"
-      ? { message: bobSignInMessage(settings.authMethod) }
+    ...(versionWarning
+      ? { message: versionWarning }
       : auth.status === "unknown"
         ? { message: BOB_SSO_UNCONFIRMED_MESSAGE }
         : {}),
