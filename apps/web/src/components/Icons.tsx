@@ -273,12 +273,18 @@ export const GrokIcon: Icon = ({ className, ...props }) => (
   </svg>
 );
 
-/** IBM Bob's official favicon (bob.ibm.com/icon.svg), with its dark palette following the app theme. */
+/**
+ * IBM Bob's official favicon (bob.ibm.com/icon.svg), with its dark palette following the app
+ * theme. Like OpenCode's icon, each palette is its own element shown by `dark:`, so the colors
+ * stay SVG attributes rather than arbitrary classes.
+ */
 export const BobIcon: Icon = (props) => {
   const id = useId().replaceAll(":", "");
   const hatFadeId = `${id}-bob-hat-fade`;
   const hatFillId = `${id}-bob-hat-fill`;
+  const hatFillDarkId = `${id}-bob-hat-fill-dark`;
   const hatMaskId = `${id}-bob-hat-mask`;
+  const faceId = `${id}-bob-face`;
 
   return (
     <svg {...props} viewBox="0 0 32 32" fill="none">
@@ -296,8 +302,19 @@ export const BobIcon: Icon = (props) => {
           <stop offset=".873" />
         </linearGradient>
         <linearGradient id={hatFillId} x1="0" y1="32" x2="32" y2="0" gradientUnits="userSpaceOnUse">
-          <stop offset=".1" stopColor="#a16efb" className="dark:[stop-color:#bc93fd]" />
-          <stop offset=".9" stopColor="#0e61fa" className="dark:[stop-color:#4587fd]" />
+          <stop offset=".1" stopColor="#a16efb" />
+          <stop offset=".9" stopColor="#0e61fa" />
+        </linearGradient>
+        <linearGradient
+          id={hatFillDarkId}
+          x1="0"
+          y1="32"
+          x2="32"
+          y2="0"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset=".1" stopColor="#bc93fd" />
+          <stop offset=".9" stopColor="#4587fd" />
         </linearGradient>
         <mask id={hatMaskId} x="0" y="0" width="32" height="32" maskUnits="userSpaceOnUse">
           <path
@@ -306,14 +323,27 @@ export const BobIcon: Icon = (props) => {
           />
           <path fill={`url(#${hatFadeId})`} d="M21 7v7H11V7h10z" />
         </mask>
+        <g id={faceId}>
+          <path d="M24 30.75H8a4.756 4.756 0 0 1-4.69-4H3c-.965 0-1.75-.785-1.75-1.75v-6h1.5v6c0 .138.112.25.25.25h1.75V26A3.254 3.254 0 0 0 8 29.25h16A3.254 3.254 0 0 0 27.25 26v-.75H29a.25.25 0 0 0 .25-.25v-6h1.5v6c0 .965-.785 1.75-1.75 1.75h-.31a4.756 4.756 0 0 1-4.69 4z" />
+          <circle cx="22" cy="21" r="2" />
+          <circle cx="10" cy="21" r="2" />
+          <path d="M16 27.75a5.695 5.695 0 0 1-3.451-1.15.75.75 0 0 1 .903-1.199c1.476 1.111 3.617 1.111 5.099 0a.75.75 0 1 1 .901 1.199 5.696 5.696 0 0 1-3.45 1.15z" />
+        </g>
       </defs>
-      <path mask={`url(#${hatMaskId})`} fill={`url(#${hatFillId})`} d="M0 0h32v32H0z" />
-      <g className="fill-[#001d6c] dark:fill-[#f4f4f4]">
-        <path d="M24 30.75H8a4.756 4.756 0 0 1-4.69-4H3c-.965 0-1.75-.785-1.75-1.75v-6h1.5v6c0 .138.112.25.25.25h1.75V26A3.254 3.254 0 0 0 8 29.25h16A3.254 3.254 0 0 0 27.25 26v-.75H29a.25.25 0 0 0 .25-.25v-6h1.5v6c0 .965-.785 1.75-1.75 1.75h-.31a4.756 4.756 0 0 1-4.69 4z" />
-        <circle cx="22" cy="21" r="2" />
-        <circle cx="10" cy="21" r="2" />
-        <path d="M16 27.75a5.695 5.695 0 0 1-3.451-1.15.75.75 0 0 1 .903-1.199c1.476 1.111 3.617 1.111 5.099 0a.75.75 0 1 1 .901 1.199 5.696 5.696 0 0 1-3.45 1.15z" />
-      </g>
+      <path
+        className="dark:hidden"
+        mask={`url(#${hatMaskId})`}
+        fill={`url(#${hatFillId})`}
+        d="M0 0h32v32H0z"
+      />
+      <path
+        className="hidden dark:block"
+        mask={`url(#${hatMaskId})`}
+        fill={`url(#${hatFillDarkId})`}
+        d="M0 0h32v32H0z"
+      />
+      <use href={`#${faceId}`} className="dark:hidden" fill="#001d6c" />
+      <use href={`#${faceId}`} className="hidden dark:block" fill="#f4f4f4" />
     </svg>
   );
 };
