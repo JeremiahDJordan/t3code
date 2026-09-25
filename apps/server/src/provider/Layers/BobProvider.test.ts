@@ -31,6 +31,7 @@ import {
   enrichBobSnapshot,
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
+  MINIMUM_BOB_VERSION,
 } from "./BobProvider.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
@@ -73,13 +74,15 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
       const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-bob-probe-" });
       return writeFakeCli({ directory, name: "bob", source });
     });
-  const BOB_VERSION_SOURCE = [
-    'if (process.argv[2] !== "--version") process.exit(9);',
-    // Bob exits when both key variables disagree; SSO instances must not pass them at all.
-    "if (process.env.BOB_API_KEY && process.env.BOBSHELL_API_KEY) process.exit(1);",
-    'process.stdout.write("2.0.4\\ncommit: 01dddf684\\n");',
-    "",
-  ].join("\n");
+  const bobVersionSource = (version: string) =>
+    [
+      'if (process.argv[2] !== "--version") process.exit(9);',
+      // Bob exits when both key variables disagree; SSO instances must not pass them at all.
+      "if (process.env.BOB_API_KEY && process.env.BOBSHELL_API_KEY) process.exit(1);",
+      `process.stdout.write("${version}\\ncommit: 01dddf684\\n");`,
+      "",
+    ].join("\n");
+  const BOB_VERSION_SOURCE = bobVersionSource(MINIMUM_BOB_VERSION);
   /** A home directory holding the files Bob keeps in `~/.bob/settings`, by name. */
   const makeBobHome = (files: Record<string, string> = {}) =>
     Effect.gen(function* () {
@@ -167,7 +170,7 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
           decodeBobSettings({ enabled: true, binaryPath: bobPath }),
           { ...process.env, HOME: home },
         );
-        expect(snapshot.version).toBe("2.0.4");
+        expect(snapshot.version).toBe(MINIMUM_BOB_VERSION);
         expect(snapshot.status).toBe("ready");
         expect(snapshot.auth).toEqual({ status: "unknown" });
         expect(snapshot.message).toBe(BOB_SSO_UNCONFIRMED_MESSAGE);
@@ -219,6 +222,28 @@ it.layer(NodeServices.layer)("checkBobProviderStatus", (it) => {
       );
       expect(snapshot.status).toBe("error");
       expect(snapshot.message).toContain("Unset BOBSHELL_API_KEY");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("warns about a Bob older than the minimum version but keeps it usable", () =>
+    Effect.gen(function* () {
+      const bobPath = yield* writeFakeBobCli(bobVersionSource("2.0.4"));
+      const snapshot = yield* checkBobProviderStatus(
+        decodeBobSettings({ enabled: true, binaryPath: bobPath, authMethod: "apiKey" }),
+        { ...process.env, BOB_API_KEY: "test-key", BOBSHELL_API_KEY: "" },
+      );
+      expect(snapshot.version).toBe("2.0.4");
+      expect(snapshot.status).toBe("warning");
+      expect(snapshot.auth.status).toBe("authenticated");
+      expect(snapshot.message).toContain(`older than v${MINIMUM_BOB_VERSION}`);
+
+      // A missing sign-in still blocks, and says so rather than the version.
+      const signedOut = yield* checkBobProviderStatus(
+        decodeBobSettings({ enabled: true, binaryPath: bobPath, authMethod: "apiKey" }),
+        { ...process.env, BOB_API_KEY: "", BOBSHELL_API_KEY: "" },
+      );
+      expect(signedOut.status).toBe("error");
+      expect(signedOut.message).toBe(BOB_API_KEY_REQUIRED_MESSAGE);
     }).pipe(Effect.scoped),
   );
 

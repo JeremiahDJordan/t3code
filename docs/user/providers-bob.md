@@ -6,9 +6,10 @@ by every provider.
 
 ## Set up Bob Shell
 
-On the environment's machine, install Bob Shell with
+On the environment's machine, install Bob Shell 2.0.5 or later with
 [IBM's installer](https://bob.ibm.com/download?bob=shell), then run `bob` once in a
-terminal. The first run asks you to accept IBM's license agreement, which Bob
+terminal. An older Bob still runs, but the provider shows a warning, and moving a
+thread's conversation between folders does not work. The first run asks you to accept IBM's license agreement, which Bob
 requires before T3 Code can start it. Then enable Bob Shell in
 **Settings → Providers**.
 
@@ -34,7 +35,7 @@ T3 Code tells Bob to trust each project folder you open, and Bob remembers it, s
 you do not need to trust the folder in Bob first. After Bob has run in a project,
 its skills and MCP prompts appear in the composer's `/` menu. When a thread moves
 to another folder, such as picking a branch that lives in another worktree, Bob
-Shell 2.0.5 or later moves the conversation with it.
+moves the conversation with it.
 
 T3 Code's Plan mode uses Bob's plan mode. After Bob has run, the model picker's
 **Mode** option also offers Bob's Ask mode and your custom modes
