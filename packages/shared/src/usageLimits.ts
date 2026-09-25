@@ -21,6 +21,8 @@ import {
 
 import * as DateTime from "effect/DateTime";
 
+import { normalizeProjectPathForComparison } from "./path.ts";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -645,13 +647,32 @@ export function withUsageLimitsCommands(
   });
 }
 
-/** A point-in-time report; never refreshes or guesses which pooled account serves a turn. */
+/**
+ * A provider with the limits of work in `cwd`, when that folder has its own, such as a Bob
+ * folder that pins another team.
+ */
+function withWorkspaceUsageLimits(provider: ServerProvider, cwd: string): ServerProvider {
+  const folder = normalizeProjectPathForComparison(cwd);
+  const usageLimits = provider.workspaceSnapshots?.find(
+    (snapshot) => normalizeProjectPathForComparison(snapshot.cwd) === folder,
+  )?.usageLimits;
+  return usageLimits ? { ...provider, usageLimits } : provider;
+}
+
+/**
+ * A point-in-time report; never refreshes or guesses which pooled account serves a turn.
+ * With `cwd`, a folder's own limits replace its provider's, for a thread working there.
+ */
 export function collectProviderUsageLimits(
   instanceId: ProviderInstanceId,
-  providers: readonly ServerProvider[],
+  allProviders: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
   now: number,
+  cwd?: string | null,
 ): UsageLimitsReport | null {
+  const providers = cwd
+    ? allProviders.map((provider) => withWorkspaceUsageLimits(provider, cwd))
+    : allProviders;
   const selected = providers.find((provider) => provider.instanceId === instanceId);
   if (!selected || !hasProviderUsageLimits(selected.driver, providers, sources)) return null;
   const native = providersWithLimits(providers).filter(
