@@ -69,8 +69,13 @@ const resolveBobGatewayUrl = Effect.fn("resolveBobGatewayUrl")(function* (
 });
 
 /**
- * The model pinned by Bob's `session.model` user setting, which Bob reads when a session starts
- * and sends instead of asking its router. Undefined when unset or unreadable.
+ * The model pinned by Bob's `session.model` user setting, which Bob sends instead of asking its
+ * router. Undefined when unset or unreadable.
+ *
+ * Bob 2.0.5 takes the model from its `--model` flag, which T3 does not pass, else this user
+ * file. It never reads one from a folder's `.bob/settings.json`, which it consults only for
+ * pinned teams and hooks, and in an untrusted folder it ignores this setting too; T3 starts
+ * Bob with `--trust`. Bob rereads the file every turn.
  */
 export const readBobConfiguredModel = Effect.fn("readBobConfiguredModel")(function* (
   environment: NodeJS.ProcessEnv,
