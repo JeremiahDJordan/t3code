@@ -49,10 +49,12 @@ import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { resolveAntigravityInstanceDirectories } from "../provider/antigravityAuthSupport.ts";
+import { resolveBobTaskDatabasePath } from "../provider/Layers/bobTaskUsage.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { readAntigravityUsage } from "./antigravityUsageReader.ts";
 import { readCursorAccountUsage } from "./cursorUsageReader.ts";
+import { readBobUsage } from "./bobUsageReader.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
@@ -580,6 +582,34 @@ export const make = Effect.gen(function* () {
         files: !exists && !failed ? null : antigravity.files.filter((file) => file.root === dir),
         status: failed ? "partial" : "ok",
         ...(failed ? { message: "Some Antigravity history could not be read." } : {}),
+      });
+    }
+    // Bob keeps its history in one task database per home. Every account
+    // counts, disabled ones too, and an explicit default slot replaces the
+    // legacy settings, as for the transcript providers above.
+    const bobEnvironments = Object.values(settings.providerInstances).flatMap((instance) =>
+      instance.driver === "bob" ? [instance.environment] : [],
+    );
+    if (!Object.hasOwn(settings.providerInstances, "bob")) bobEnvironments.push(undefined);
+    const bobDatabases = new Set<string>();
+    for (const environment of bobEnvironments) {
+      const databasePath = resolveBobTaskDatabasePath(
+        mergeProviderInstanceEnvironment(environment, hostEnvironment),
+        path,
+      );
+      bobDatabases.add(
+        yield* fileSystem.realPath(databasePath).pipe(Effect.orElseSucceed(() => databasePath)),
+      );
+    }
+    for (const databasePath of bobDatabases) {
+      const result = yield* Effect.promise(() => readBobUsage(databasePath, windowStartMs));
+      scanned.push({
+        provider: "bob",
+        dir: databasePath,
+        volumeId: yield* Effect.promise(() => readDirectoryVolumeId(databasePath)),
+        files: result.missing && !result.error ? null : result.files,
+        status: result.error ? "partial" : "ok",
+        ...(result.error ? { message: "Some Bob history could not be read." } : {}),
       });
     }
     const cursorUserHome =

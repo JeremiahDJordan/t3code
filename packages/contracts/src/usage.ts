@@ -12,6 +12,7 @@
 import * as Schema from "effect/Schema";
 
 import { ForwardCompatibleArray, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ThreadUsageCost } from "./providerRuntime.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
@@ -20,13 +21,13 @@ import { ForwardCompatibleArray, NonNegativeInt, TrimmedNonEmptyString } from ".
  * Adding providers or other array-element variants is additive: unknown
  * entries are skipped on decode and do not require a version bump.
  */
-export const USAGE_CONTRACT_VERSION = 6 as const;
+export const USAGE_CONTRACT_VERSION = 7 as const;
 
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * v5/v6 add providers and optional source attribution; v4 Claude/Codex
- * buckets remain valid in mixed-version environments.
+ * v5-v7 add providers, optional source attribution, and optional bucket
+ * `credits`; v4 Claude/Codex buckets remain valid in mixed-version environments.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
@@ -37,6 +38,7 @@ export const UsageProviderKind = Schema.Literals([
   "cursor",
   "opencode",
   "antigravity",
+  "bob",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
@@ -109,6 +111,12 @@ export const UsageBucket = Schema.Struct({
    */
   cacheSavingsUsd: Schema.Number,
   costSource: UsageCostSource,
+  /**
+   * Spend the provider reported in its own billing unit, such as Bob Shell's
+   * Bobcoins. It is not money: it never enters `costUsd`, and such records are
+   * `unpriced` unless the user set a custom price for the model.
+   */
+  credits: Schema.optional(ThreadUsageCost),
   /** Distinct assistant responses, after de-duplication. */
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
@@ -118,7 +126,21 @@ export const UsageBucket = Schema.Struct({
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
- * Identifies the physical transcript directory a source read from.
+ * Adds spend in a provider's own unit. Amounts in different units cannot be
+ * added, so a `next` in another unit leaves `total` unchanged.
+ */
+export function addUsageCredits(
+  total: ThreadUsageCost | undefined,
+  next: ThreadUsageCost,
+): ThreadUsageCost {
+  if (total === undefined) return next;
+  return total.unit === next.unit
+    ? { amount: total.amount + next.amount, unit: total.unit }
+    : total;
+}
+
+/**
+ * Identifies the physical transcript directory, or database file, a source read from.
  *
  * Two environments on the same machine (worktree servers, for example) resolve
  * the same provider home and would otherwise double count. The client drops
