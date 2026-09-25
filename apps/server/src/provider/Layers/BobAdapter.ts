@@ -76,6 +76,7 @@ import {
   closeBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
+  moveBobTask,
   setBobSessionMode,
 } from "../acp/BobAcpSupport.ts";
 import { type BobAdapterShape } from "../Services/BobAdapter.ts";
@@ -719,20 +720,60 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               return { scope, acp, started };
             });
 
-          // Bob cannot resume a task it deleted or that belongs to another folder. The thread
-          // then continues in a new Bob conversation rather than failing; sign-in, license and
-          // trust errors still fail, since a new conversation would hit them too, and so does a
-          // resume that times out, since its task may still be there.
+          /**
+           * Moves the thread's Bob task into this folder with a short-lived Bob here, and returns
+           * its new id there, or undefined when it cannot move.
+           */
+          const moveTaskHere = (sessionId: string) =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const mover = yield* makeBobAcpRuntime({
+                  bobSettings,
+                  ...(options?.environment ? { environment: options.environment } : {}),
+                  childProcessSpawner,
+                  cwd,
+                  clientInfo: { name: "t3-code", version: "0.0.0" },
+                  ...makeAcpNativeLoggers({
+                    nativeEventLogger,
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                  }),
+                });
+                yield* mover.initialize();
+                return yield* moveBobTask(mover, sessionId, cwd);
+              }),
+            ).pipe(
+              Effect.provideService(Crypto.Crypto, crypto),
+              Effect.orElseSucceed(() => undefined),
+            );
+          const isResumeUnavailable = (error: unknown): error is EffectAcpErrors.AcpError =>
+            isAcpError(error) && isBobResumeUnavailable(error);
+          const openNewConversation = (error: EffectAcpErrors.AcpError) =>
+            Effect.suspend(() => {
+              lostResume = error;
+              return openBob(undefined);
+            });
+
+          // Bob resumes a task only in the folder it started in, and not one it deleted. A thread
+          // that moved to another folder, such as a worktree, takes its task along; otherwise it
+          // continues in a new Bob conversation rather than failing. Sign-in, license and trust
+          // errors still fail, since a new conversation would hit them too, and so does a resume
+          // that times out, since its task may still be there.
           const resumeSessionId = parseBobResume(input.resumeCursor)?.sessionId;
           let lostResume: EffectAcpErrors.AcpError | undefined;
           const { scope, acp, started } = yield* openBob(resumeSessionId).pipe(
             Effect.catchIf(
               (error): error is EffectAcpErrors.AcpError =>
-                resumeSessionId !== undefined && isAcpError(error) && isBobResumeUnavailable(error),
+                resumeSessionId !== undefined && isResumeUnavailable(error),
               (error) =>
-                Effect.suspend(() => {
-                  lostResume = error;
-                  return openBob(undefined);
+                Effect.gen(function* () {
+                  const movedSessionId = resumeSessionId
+                    ? yield* moveTaskHere(resumeSessionId)
+                    : undefined;
+                  if (movedSessionId === undefined) return yield* openNewConversation(error);
+                  return yield* openBob(movedSessionId).pipe(
+                    Effect.catchIf(isResumeUnavailable, openNewConversation),
+                  );
                 }),
             ),
             Effect.mapError((error) =>

@@ -30,6 +30,8 @@ const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 const BOB_SESSION_DELETE_TIMEOUT = "5 seconds";
 /** Closing only lets Bob tidy up before it stops, so a stuck close must not hold up the stop. */
 const BOB_SESSION_CLOSE_TIMEOUT = "5 seconds";
+/** Moving a task copies its whole history, so it gets longer than the other requests. */
+const BOB_TASK_MOVE_TIMEOUT = "30 seconds";
 
 type BobAcpRuntimeBobSettings = Pick<BobSettings, "binaryPath" | "authMethod">;
 
@@ -181,6 +183,73 @@ export const closeBobSession = (
   runtime
     .request("session/close", { sessionId })
     .pipe(Effect.timeoutOption(BOB_SESSION_CLOSE_TIMEOUT), Effect.ignore);
+
+/**
+ * The part of a Bob 2.0.5 `_bob/task/export` result T3 reads. The rest, including the task's
+ * messages, goes back to Bob unchanged.
+ */
+const BobTaskExport = Schema.Struct({
+  version: Schema.Literal(1),
+  tasks: Schema.NonEmptyArray(
+    Schema.Struct({ task: Schema.Record(Schema.String, Schema.Unknown) }),
+  ),
+});
+const isBobTaskExport = Schema.is(BobTaskExport);
+const decodeBobTaskImport = Schema.decodeUnknownOption(
+  Schema.Struct({ sessionIds: Schema.NonEmptyArray(Schema.String) }),
+);
+
+/** `value` as a plain object, for editing the loosely typed parts of a task export. */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * The exported task for `cwd`. Bob's import sets the task's workspace but keeps the folder
+ * named in its system prompt (`env.staticEnvInfo.primaryWorkspace`), so that moves here.
+ */
+function exportedTaskInFolder(task: Record<string, unknown>, cwd: string): Record<string, unknown> {
+  const env = asRecord(task.env);
+  const staticEnvInfo = asRecord(env?.staticEnvInfo);
+  if (!env || !staticEnvInfo) return task;
+  return { ...task, env: { ...env, staticEnvInfo: { ...staticEnvInfo, primaryWorkspace: cwd } } };
+}
+
+/**
+ * Moves a Bob task into `cwd` and returns the id Bob gave it there, or undefined when the task
+ * cannot move (gone, or a Bob before 2.0.5). Bob resumes a task only in the folder it started
+ * in, so a thread that moved to another folder, such as a worktree, would otherwise lose its
+ * conversation. Bob copies the task with `_bob/task/export` and `_bob/task/import`; the original
+ * is then deleted, so Bob's history and Bobcoin totals count the conversation once.
+ */
+export const moveBobTask = (
+  runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
+  sessionId: string,
+  cwd: string,
+): Effect.Effect<string | undefined> =>
+  Effect.gen(function* () {
+    const exported = yield* runtime.request("_bob/task/export", { sessionId });
+    if (!isBobTaskExport(exported)) return undefined;
+    const snapshot = {
+      ...exported,
+      tasks: exported.tasks.map((entry) => ({
+        ...entry,
+        task: exportedTaskInFolder(entry.task, cwd),
+      })),
+    };
+    const imported = decodeBobTaskImport(
+      yield* runtime.request("_bob/task/import", { cwd, snapshot }),
+    );
+    if (imported._tag === "None") return undefined;
+    yield* deleteBobSession(runtime, sessionId);
+    return imported.value.sessionIds[0];
+  }).pipe(
+    Effect.timeoutOption(BOB_TASK_MOVE_TIMEOUT),
+    Effect.map((moved) => (moved._tag === "Some" ? moved.value : undefined)),
+    Effect.orElseSucceed(() => undefined),
+  );
 
 /** Starts `bob acp` in the caller's scope and returns its ACP session runtime. */
 export const makeBobAcpRuntime = (

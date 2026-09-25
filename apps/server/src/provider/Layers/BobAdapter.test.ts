@@ -663,6 +663,54 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("moves the thread's Bob task along when the thread moves to another folder", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_TASK_TRANSFER: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-moved-folder");
+        const cwd = process.cwd();
+
+        const session = yield* adapter.startSession({
+          threadId,
+          cwd,
+          runtimeMode: "full-access",
+          resumeCursor: { schemaVersion: 1, sessionId: "task-in-old-folder" },
+        });
+        assert.deepStrictEqual(session.resumeCursor, {
+          schemaVersion: 1,
+          sessionId: "bob-moved-task",
+        });
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(paramsOf(requests, "_bob/task/export"), [
+          { sessionId: "task-in-old-folder" },
+        ]);
+        // The copy lands in this folder and its system prompt names this folder too.
+        const [imported] = paramsOf(requests, "_bob/task/import");
+        const snapshot = imported?.snapshot as {
+          readonly tasks: ReadonlyArray<{
+            readonly task: { readonly env: { readonly staticEnvInfo: unknown } };
+          }>;
+        };
+        assert.equal(imported?.cwd, cwd);
+        assert.deepStrictEqual(snapshot.tasks[0]?.task.env.staticEnvInfo, {
+          primaryWorkspace: cwd,
+          systemInfo: {},
+        });
+        // The original goes, so Bob counts the conversation once.
+        assert.deepStrictEqual(paramsOf(requests, "session/delete"), [
+          { sessionId: "task-in-old-folder" },
+        ]);
+        assert.deepStrictEqual(
+          paramsOf(requests, "session/resume").map((params) => params.sessionId),
+          ["task-in-old-folder", "bob-moved-task"],
+        );
+        assert.lengthOf(paramsOf(requests, "session/new"), 0);
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
   it.effect("closes Bob's session with session/close when the session stops", () =>
     withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, requestLogPath }) =>
       Effect.gen(function* () {
