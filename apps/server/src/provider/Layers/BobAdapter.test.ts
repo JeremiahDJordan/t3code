@@ -268,6 +268,43 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("names the file in Bob's edit approvals with Bob's own title", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1", T3_ACP_BOB_TOOL_EDITS: "1" },
+      ({ adapter }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-edit-approval");
+          const opened = yield* nextEvent(adapter, (event) => event.type === "request.opened");
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+          });
+
+          const turnFiber = yield* adapter
+            .sendTurn({ threadId, input: "update the readme" })
+            .pipe(Effect.forkChild);
+          const request = yield* opened;
+          yield* adapter.respondToRequest(
+            threadId,
+            ApprovalRequestId.make(String(request.requestId)),
+            "decline",
+          );
+          yield* Fiber.join(turnFiber);
+
+          assert.deepStrictEqual(
+            request.type === "request.opened" && [
+              request.payload.requestType,
+              request.payload.detail,
+            ],
+            ["file_change_approval", "Edit README.md"],
+          );
+
+          yield* adapter.stopSession(threadId);
+        }),
+    ),
+  );
+
   it.effect("approves Bob's tools itself in full access and maps their progress", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
       Effect.gen(function* () {
