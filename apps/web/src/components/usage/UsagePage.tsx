@@ -45,6 +45,7 @@ import {
   formatPercent,
   formatTokens,
   formatUsageContractMismatch,
+  formatUsageSpend,
   formatUsd,
   makeWindow,
 } from "@t3tools/shared/usageFormat";
@@ -542,14 +543,14 @@ export function UsagePage() {
                             </span>
                             <span className="shrink-0 text-sm font-medium text-foreground tabular-nums">
                               {metric === "cost"
-                                ? formatUsd(totals?.costUsd ?? 0)
+                                ? formatUsageSpend(totals?.costUsd ?? 0, totals?.credits)
                                 : formatTokens(totals?.totalTokens ?? 0)}
                             </span>
                           </div>
                           <span className="text-xs text-muted-foreground">
                             {metric === "cost"
                               ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
-                              : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
+                              : `${formatPercent(share)} of tokens · ${formatUsageSpend(totals?.costUsd ?? 0, totals?.credits)}`}
                           </span>
                         </div>
                       );
@@ -653,7 +654,9 @@ export function UsagePage() {
                                 </span>
                               </td>
                               <td className="py-2 text-right text-foreground tabular-nums">
-                                {isModelCostUnknown(model) ? (
+                                {model.credits !== undefined ? (
+                                  formatUsageSpend(model.costUsd, model.credits)
+                                ) : isModelCostUnknown(model) ? (
                                   <span className="text-muted-foreground">Unpriced</span>
                                 ) : (
                                   formatUsd(model.costUsd)
@@ -713,14 +716,17 @@ export function UsagePage() {
                                   ? formatHourShort(period.hourStart, window.timeZone)
                                   : formatDayShort(period.day)}
                               </td>
-                              {activeProviders.map((provider) => (
-                                <td
-                                  key={provider}
-                                  className="py-2 text-right text-muted-foreground tabular-nums"
-                                >
-                                  {formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
-                                </td>
-                              ))}
+                              {activeProviders.map((provider) => {
+                                const entry = period.byProvider.get(provider);
+                                return (
+                                  <td
+                                    key={provider}
+                                    className="py-2 text-right text-muted-foreground tabular-nums"
+                                  >
+                                    {formatUsageSpend(entry?.costUsd ?? 0, entry?.credits)}
+                                  </td>
+                                );
+                              })}
                               <td className="py-2 text-right text-foreground tabular-nums">
                                 {formatUsd(period.costUsd)}
                               </td>
