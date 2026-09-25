@@ -623,11 +623,17 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
            * Answers what the runtime mode allows without asking, and asks the user the rest. A
            * stopped session asks no one: Bob is being cancelled or closed, so it is refused.
            */
+          /**
+           * Bob can reach its next tool's prompt before it acts on a cancel. After Stop nothing
+           * may run, and an open question would hold Bob's cancel until the runtime kills it.
+           */
+          const refusesPermission = () =>
+            ctx?.stopped === true || ctx?.openTurn?.interrupted === true;
           const handlePermission = (params: EffectAcpSchema.RequestPermissionRequest) =>
             Effect.gen(function* () {
               yield* logNative(input.threadId, "session/request_permission", params);
               const autoApproval = bobAutoApproval(input.runtimeMode, params.toolCall.kind);
-              if (autoApproval !== undefined && !ctx?.stopped) {
+              if (autoApproval !== undefined && !refusesPermission()) {
                 const optionId = selectPermissionOptionId(params, autoApproval);
                 if (optionId !== undefined) {
                   return { outcome: { outcome: "selected" as const, optionId } };
@@ -639,7 +645,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               const decision = yield* Deferred.make<ProviderApprovalDecision>();
               // Nothing yields between this check and the set, so a stop that cancels the
               // pending approvals either sees this one or has already refused it here.
-              if (ctx?.stopped) return { outcome: { outcome: "cancelled" as const } };
+              if (refusesPermission()) return { outcome: { outcome: "cancelled" as const } };
               pendingApprovals.set(requestId, { decision });
               yield* offerRuntimeEvent(
                 makeAcpRequestOpenedEvent({
