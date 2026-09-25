@@ -35,8 +35,12 @@ export function formatUsageSpend(costUsd: number, credits: ThreadUsageCost | und
   return costUsd > 0 ? `${formatUsd(costUsd)} · ${spent}` : spent;
 }
 
-/** A credit amount without its unit, for columns that name the unit once. */
+/**
+ * A credit amount without its unit, for columns that name the unit once. Spend too small
+ * to show reads `<0.0001`, so it never looks like none.
+ */
 export function formatUsageCredits(amount: number): string {
+  if (amount > 0 && amount < 0.0001) return "<0.0001";
   return amount.toFixed(amount >= 1 || amount === 0 ? 2 : amount >= 0.01 ? 3 : 4);
 }
 

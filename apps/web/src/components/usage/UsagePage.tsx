@@ -171,7 +171,8 @@ export function UsagePage() {
     [breakdown, merged.models, metric],
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
-  // Providers that bill in their own credits, by unit, such as Bob's Bobcoins.
+  // Providers that bill in their own credits, by unit, such as Bob's Bobcoins. Their day and
+  // hour columns show credits, with the unit under the name; custom-priced dollars are in Total.
   const creditUnitByProvider = useMemo(
     () =>
       new Map(
@@ -656,12 +657,16 @@ export function UsagePage() {
                         <col style={{ width: timeValueColumnWidth }} />
                       </colgroup>
                       <thead>
-                        <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                        <tr className="border-b border-border text-left text-xs text-muted-foreground align-top">
                           <th className="py-2 font-normal">{isPast24Hours ? "Hour" : "Day"}</th>
                           {activeProviders.map((provider) => (
                             <th key={provider} className="py-2 text-right font-normal">
-                              {creditUnitByProvider.get(provider) ??
-                                PROVIDER_PRESENTATION[provider].label}
+                              {PROVIDER_PRESENTATION[provider].label}
+                              {creditUnitByProvider.has(provider) ? (
+                                <span className="block text-2xs">
+                                  {creditUnitByProvider.get(provider)}
+                                </span>
+                              ) : null}
                             </th>
                           ))}
                           <th className="py-2 text-right font-normal">Total</th>
@@ -689,22 +694,18 @@ export function UsagePage() {
                                   ? formatHourShort(period.hourStart, window.timeZone)
                                   : formatDayShort(period.day)}
                               </td>
-                              {activeProviders.map((provider) => {
-                                const entry = period.byProvider.get(provider);
-                                // A credits column names its unit in the header; cells stay short.
-                                const creditsOnly =
-                                  creditUnitByProvider.has(provider) && !(entry?.costUsd ?? 0);
-                                return (
-                                  <td
-                                    key={provider}
-                                    className="py-2 text-right text-muted-foreground tabular-nums"
-                                  >
-                                    {creditsOnly
-                                      ? formatUsageCredits(entry?.credits?.amount ?? 0)
-                                      : formatUsageSpend(entry?.costUsd ?? 0, entry?.credits)}
-                                  </td>
-                                );
-                              })}
+                              {activeProviders.map((provider) => (
+                                <td
+                                  key={provider}
+                                  className="py-2 text-right text-muted-foreground tabular-nums"
+                                >
+                                  {creditUnitByProvider.has(provider)
+                                    ? formatUsageCredits(
+                                        period.byProvider.get(provider)?.credits?.amount ?? 0,
+                                      )
+                                    : formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
+                                </td>
+                              ))}
                               <td className="py-2 text-right text-foreground tabular-nums">
                                 {formatUsd(period.costUsd)}
                               </td>
