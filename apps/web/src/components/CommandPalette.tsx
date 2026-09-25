@@ -46,6 +46,7 @@ import {
   CornerLeftUpIcon,
   FileSearchIcon,
   FolderIcon,
+  FolderInputIcon,
   FolderPlusIcon,
   LinkIcon,
   MessageSquareIcon,
@@ -1899,6 +1900,29 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:import-projects",
+    searchTerms: [
+      "import",
+      "projects",
+      "history",
+      "conversations",
+      "sessions",
+      "claude",
+      "codex",
+      "bob",
+      "onboarding",
+      "welcome",
+      "setup",
+    ],
+    title: "Import projects and history…",
+    icon: <FolderInputIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/welcome", search: { step: "import" } });
+    },
+  });
 
   const changeThemeItem: CommandPaletteSubmenuItem = {
     kind: "submenu",

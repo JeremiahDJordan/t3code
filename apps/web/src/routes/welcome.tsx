@@ -5,8 +5,13 @@ import { NoProjectsHero } from "../components/NoProjectsHero";
 import { WelcomeWizard } from "../components/onboarding/WelcomeWizard";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 
-/** Onboarding overlays the workspace. Visiting /welcome reopens setup. */
+/**
+ * Onboarding overlays the workspace. Visiting /welcome reopens setup, and
+ * `?step=import` opens it on project import.
+ */
 export const Route = createFileRoute("/welcome")({
+  validateSearch: (raw: Record<string, unknown>): { step?: "import" } =>
+    raw.step === "import" ? { step: "import" } : {},
   beforeLoad: ({ context }) => {
     const { authGateState } = context;
     if (authGateState.status !== "authenticated" && authGateState.status !== "hosted-static") {
@@ -18,6 +23,7 @@ export const Route = createFileRoute("/welcome")({
 
 function WelcomeRouteView() {
   const { authGateState } = Route.useRouteContext();
+  const { step } = Route.useSearch();
   const navigate = useNavigate();
   // The root shell can remount this pending outlet after the location changes.
   // Never reopen setup while the destination route is still loading.
@@ -34,6 +40,7 @@ function WelcomeRouteView() {
       <NoProjectsHero />
       {isWelcomeRoute && !dismissed ? (
         <WelcomeWizard
+          initialStep={step}
           localAvailable={localAvailable}
           onDone={async (projectRef) => {
             setDismissed(true);
