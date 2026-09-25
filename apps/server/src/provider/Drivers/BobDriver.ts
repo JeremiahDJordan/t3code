@@ -15,7 +15,6 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import * as Semaphore from "effect/Semaphore";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -30,6 +29,7 @@ import {
   checkBobProviderStatus,
   enrichBobSnapshot,
   makeBobCommandCatalog,
+  makeBobUsageLimitsRefresh,
 } from "../Layers/BobProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import {
@@ -158,31 +158,21 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         setWorkspaceUsageLimits,
         snapshotForCwd,
       } = yield* makeBobCommandCatalog(managedSnapshot);
-      // One gateway read at a time, so turns that end together don't race their bars.
-      const usageRefreshLock = yield* Semaphore.make(1);
-      /**
-       * Re-reads Bob's budgets for work in `cwd`: the instance's monthly bar and the bar of the
-       * team `cwd` pins, whose limits then show for threads there. A session start only needs
-       * the gateway when the folder pins a team; a turn that spent Bobcoins always does.
-       */
-      const refreshUsageLimits = (cwd: string, spent: boolean) =>
-        Effect.gen(function* () {
-          const pinnedTeams = yield* readBobPinnedTeams(cwd);
-          if (!spent && pinnedTeams.length === 0) {
-            return yield* setWorkspaceUsageLimits(cwd, undefined);
-          }
-          const profile = yield* readBobUsageProfile(effectiveConfig.authMethod, processEnv);
-          const { checkedAt, windows, unavailable } = profile.usage.usageLimits;
-          if (!unavailable && windows.length > 0) {
-            yield* snapshot.applyUsageLimits({ checkedAt, windows });
-          }
-          yield* setWorkspaceUsageLimits(cwd, profile.pinnedTeamUsage(pinnedTeams)?.usageLimits);
-        }).pipe(
-          usageRefreshLock.withPermit,
+      const refreshUsageLimits = yield* makeBobUsageLimitsRefresh({
+        readProfile: readBobUsageProfile(effectiveConfig.authMethod, processEnv).pipe(
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
-        );
+        ),
+        readPinnedTeams: (cwd) =>
+          readBobPinnedTeams(cwd).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
+        applyUsageLimits: snapshot.applyUsageLimits,
+        setWorkspaceUsageLimits,
+      });
+      const driverScope = yield* Effect.scope;
       const adapter = yield* makeBobAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
@@ -200,9 +190,18 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        /** A workspace sees the commands Bob's latest session there reported. */
+        /**
+         * A workspace sees the commands Bob's latest session there reported. Opening one also
+         * reads the budget of a team it pins, so its bar is right before Bob first runs there.
+         */
         snapshotForCwd: (cwd) =>
-          effectiveConfig.enabled ? snapshotForCwd(cwd) : snapshot.getSnapshot,
+          effectiveConfig.enabled
+            ? snapshotForCwd(cwd).pipe(
+                Effect.tap(() =>
+                  refreshUsageLimits(cwd, false).pipe(Effect.forkIn(driverScope), Effect.asVoid),
+                ),
+              )
+            : snapshot.getSnapshot,
         adapter,
         textGeneration,
       } satisfies ProviderInstance;
