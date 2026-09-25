@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
@@ -7,6 +8,7 @@ import {
   bobAcpSpawnArgs,
   buildBobAcpSpawnInput,
   describeBobAcpSetupError,
+  moveBobTask,
 } from "./BobAcpSupport.ts";
 
 describe("bobAcpSpawnArgs", () => {
@@ -129,4 +131,56 @@ describe("describeBobAcpSetupError", () => {
       describeBobAcpSetupError(new EffectAcpErrors.AcpProcessExitedError({ code: 1 }), "sso"),
     ).toBeUndefined();
   });
+});
+
+describe("moveBobTask", () => {
+  const exported = {
+    version: 1,
+    tasks: [{ task: { id: "old" }, messages: [] }],
+  };
+
+  /** A Bob that answers each method from `answers` and records every request it gets. */
+  const fakeBob = (answers: Record<string, unknown>) => {
+    const requests: Array<string> = [];
+    return {
+      requests,
+      runtime: {
+        request: (method: string) =>
+          Effect.suspend(() => {
+            requests.push(method);
+            return method in answers
+              ? Effect.succeed(answers[method])
+              : Effect.fail(EffectAcpErrors.AcpRequestError.methodNotFound(method));
+          }),
+      },
+    };
+  };
+
+  it.effect("keeps the original task when Bob cannot export it", () =>
+    Effect.gen(function* () {
+      const bob = fakeBob({});
+      expect(yield* moveBobTask(bob.runtime, "old", "/new")).toBeUndefined();
+      expect(bob.requests).toEqual(["_bob/task/export"]);
+    }),
+  );
+
+  it.effect("keeps the original task when the import does not return a new one", () =>
+    Effect.gen(function* () {
+      const bob = fakeBob({ "_bob/task/export": exported, "_bob/task/import": { sessionIds: [] } });
+      expect(yield* moveBobTask(bob.runtime, "old", "/new")).toBeUndefined();
+      expect(bob.requests).toEqual(["_bob/task/export", "_bob/task/import"]);
+    }),
+  );
+
+  it.effect("deletes the original only once the copy exists", () =>
+    Effect.gen(function* () {
+      const bob = fakeBob({
+        "_bob/task/export": exported,
+        "_bob/task/import": { sessionIds: ["copy"] },
+        "session/delete": {},
+      });
+      expect(yield* moveBobTask(bob.runtime, "old", "/new")).toBe("copy");
+      expect(bob.requests).toEqual(["_bob/task/export", "_bob/task/import", "session/delete"]);
+    }),
+  );
 });
