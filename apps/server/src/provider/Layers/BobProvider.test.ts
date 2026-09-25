@@ -338,6 +338,47 @@ describe("Bob command catalog", () => {
       );
     }),
   );
+
+  it.effect("offers Bob's modes, other than Plan, as the model's Mode option", () =>
+    Effect.gen(function* () {
+      const base = yield* makeReadyBobSnapshot;
+      const catalog = yield* makeBobCommandCatalog({
+        getSnapshot: Effect.succeed(base),
+        refresh: Effect.succeed(base),
+        streamChanges: Stream.empty,
+        resolveMaintenance: () => Effect.die("Not used"),
+        applyUsageLimits: () => Effect.void,
+      });
+      /** The Mode option's choices on Bob's model, if it has the option. */
+      const modeChoices = catalog.snapshot.getSnapshot.pipe(
+        Effect.map((snapshot) => {
+          const descriptor = snapshot.models[0]?.capabilities?.optionDescriptors?.find(
+            (candidate) => candidate.id === "mode",
+          );
+          return descriptor?.type === "select"
+            ? descriptor.options.map((choice) => choice.id)
+            : undefined;
+        }),
+      );
+      const agent = { id: "agent", name: "Agent" };
+      const plan = { id: "plan", name: "Plan" };
+
+      // Plan belongs to T3's Plan toggle, so Agent alone is no choice.
+      yield* catalog.onAvailableModes([agent, plan], "/one");
+      expect(yield* modeChoices).toBeUndefined();
+
+      // Custom modes can belong to one project; the option lists every project's.
+      yield* catalog.onAvailableModes(
+        [agent, plan, { id: "ask", name: "Ask" }, { id: "reviewer", name: "Reviewer" }],
+        "/one",
+      );
+      yield* catalog.onAvailableModes([agent, plan, { id: "docs-writer", name: "Docs" }], "/two");
+      expect(yield* modeChoices).toEqual(["agent", "ask", "reviewer", "docs-writer"]);
+      const descriptor = (yield* catalog.snapshot.getSnapshot).models[0]?.capabilities
+        ?.optionDescriptors?.[0];
+      expect(descriptor?.type === "select" && descriptor.currentValue).toBe("agent");
+    }),
+  );
 });
 
 describe("enrichBobSnapshot", () => {
