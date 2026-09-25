@@ -782,6 +782,43 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("ends the tool Bob leaves running when Stop cancels its prompt", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-interrupt-open-tool");
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const working = yield* nextEvent(adapter, (event) => event.type === "item.updated");
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        const turnFiber = yield* adapter
+          .sendTurn({ threadId, input: "run the long command" })
+          .pipe(Effect.forkChild);
+        yield* working;
+        yield* adapter.interruptTurn(threadId);
+        const turn = yield* Fiber.join(turnFiber);
+
+        // Bob sends nothing more for the tool, so its last event before the turn ends is T3's.
+        const toolEvents = Array.from(yield* events).filter(
+          (event) =>
+            (event.type === "item.updated" || event.type === "item.completed") &&
+            event.itemId === "tool-call-long-running-1",
+        );
+        const last = toolEvents.at(-1);
+        assert.deepStrictEqual(
+          last &&
+            (last.type === "item.updated" || last.type === "item.completed") && [
+              last.type,
+              last.turnId,
+              last.payload.status,
+            ],
+          ["item.completed", turn.turnId, "failed"],
+        );
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
   it.effect("shows the running turn on Bob's session until the turn ends", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1" }, ({ adapter }) =>
       Effect.gen(function* () {
