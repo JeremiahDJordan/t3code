@@ -1096,6 +1096,44 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("refuses Bob's permission prompts once Stop interrupts the turn", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1", T3_ACP_BOB_ASK_ON_CANCEL: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-interrupt-refuses-permissions");
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+          });
+          const opened = yield* nextEvent(adapter, (event) => event.type === "request.opened");
+          const working = yield* nextEvent(adapter, (event) => event.type === "item.updated");
+
+          const turnFiber = yield* adapter
+            .sendTurn({ threadId, input: "run the long command" })
+            .pipe(Effect.forkChild);
+          yield* working;
+          // Bob asks about its next tool before it acts on the cancel. A card for the turn the
+          // user just stopped would hold the cancel until the runtime killed Bob.
+          yield* adapter.interruptTurn(threadId);
+          assert.equal(
+            yield* Effect.raceFirst(
+              Fiber.join(turnFiber).pipe(Effect.as("stopped")),
+              opened.pipe(Effect.as("asked the user")),
+            ),
+            "stopped",
+          );
+
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          assert.deepStrictEqual(permissionOutcomes(requests), [{ outcome: "cancelled" }]);
+          assert.isTrue(yield* adapter.hasSession(threadId));
+
+          yield* adapter.stopSession(threadId);
+        }),
+    ),
+  );
+
   it.effect("drops a follow-up still waiting behind the prompt that Stop cancels", () =>
     withMockBob(
       { T3_ACP_BOB: "1", T3_ACP_EMIT_ACTIVE_TOOL_THEN_HANG: "1" },
