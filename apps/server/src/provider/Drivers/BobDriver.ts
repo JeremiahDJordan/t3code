@@ -145,13 +145,14 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         ),
       );
 
-      const { snapshot, onAvailableCommands, snapshotForCwd } =
+      const { snapshot, onAvailableCommands, onAvailableModes, snapshotForCwd } =
         yield* makeBobCommandCatalog(managedSnapshot);
       const adapter = yield* makeBobAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
         onAvailableCommands,
+        onAvailableModes,
       });
 
       return {

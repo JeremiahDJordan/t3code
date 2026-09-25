@@ -37,7 +37,11 @@ its skills and MCP prompts appear in the composer's `/` menu. When a thread move
 to another folder, such as picking a branch that lives in another worktree, Bob
 moves the conversation with it.
 
-T3 Code's Plan mode uses Bob's plan mode. Tool approvals follow
+T3 Code's Plan mode uses Bob's plan mode. After Bob has run, the model picker's
+**Mode** option also offers Bob's Ask mode and your custom modes
+(`custom_modes.yaml`); turns use Agent mode unless you pick another. A custom mode
+from one project runs as Agent mode in projects that don't define it. Tool
+approvals follow
 [Permission modes](./permission-modes.md): **Full access** approves every Bob tool
 call, and **Auto-accept edits** approves file edits. **Supervised** asks before Bob
 acts, and so does **Auto**, since Bob has no automatic reviewer.
