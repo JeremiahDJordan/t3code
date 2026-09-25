@@ -30,6 +30,12 @@ describe("formatUsageSpend", () => {
     expect(formatUsageCredits(0.2143)).toBe("0.214");
     expect(formatUsageCredits(0)).toBe("0.00");
   });
+
+  it("keeps spend too small to show distinct from none", () => {
+    expect(formatUsageCredits(0.00004)).toBe("<0.0001");
+    expect(formatUsageCredits(0.0001)).toBe("0.0001");
+    expect(formatUsageSpend(0, { amount: 0.00004, unit: "Bobcoins" })).toBe("<0.0001 Bobcoins");
+  });
 });
 
 describe("formatPercent", () => {
