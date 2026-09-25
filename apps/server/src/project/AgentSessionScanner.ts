@@ -2,8 +2,9 @@
  * AgentSessionScanner - discovery of projects a user already works on.
  *
  * Claude Code and Codex both keep a per-session transcript on disk, and each
- * transcript records the directory the session ran in. Reading those `cwd`
- * values gives us the set of directories worth offering as projects during
+ * transcript records the directory the session ran in. Bob Shell keeps its
+ * tasks in a SQLite database instead, each with the folder it ran in. Reading
+ * those directories gives us the set worth offering as projects during
  * onboarding, without asking the user to browse the filesystem.
  *
  * The scan is read-only and best-effort: an unreadable home, a malformed
@@ -17,6 +18,7 @@ import * as NodeOS from "node:os";
 
 import {
   AgentSessionScanError,
+  BobSettings,
   ClaudeSettings,
   CodexSettings,
   ProviderDriverKind,
@@ -50,6 +52,9 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { listBobTasks, readBobTaskHistory } from "../provider/Layers/bobTaskHistory.ts";
+import { resolveBobTaskDatabasePath } from "../provider/Layers/bobTaskUsage.ts";
+import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -135,6 +140,7 @@ const TranscriptRecord = Schema.Struct({
   ),
 });
 
+const decodeBobSettings = Schema.decodeUnknownOption(BobSettings);
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
@@ -183,15 +189,22 @@ export class AgentSessionScanner extends Context.Service<
   AgentSessionScanner,
   {
     /**
-     * Discover every directory the configured Claude and Codex homes have run
-     * a session in. Candidates are returned newest-first; the client decides
-     * which ones to import and how far back to look. Fails with the contract
-     * error directly — there is no server-local context worth wrapping.
+     * Discover every directory the configured Claude and Codex homes and Bob
+     * task databases have run a session in. Candidates are returned
+     * newest-first; the client decides which ones to import and how far back
+     * to look. Fails with the contract error directly — there is no
+     * server-local context worth wrapping.
      */
     readonly scan: Effect.Effect<AgentSessionScanResult, AgentSessionScanError>;
+    /**
+     * Stream the recent sessions of one project, newest first. Sessions in
+     * `completedSources` are reported as already imported while unchanged.
+     * Bob tasks in `boundBobTaskIds` already back a T3 thread and are left out.
+     */
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      boundBobTaskIds?: ReadonlySet<string>,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -208,6 +221,8 @@ interface RawCandidate {
   readonly transcripts: ReadonlyArray<{
     readonly filePath: string;
     readonly mtimeMs: number | null;
+    /** Bob keeps history in its task database, so its entries name a task instead of a file. */
+    readonly bobTask?: { readonly databasePath: string; readonly taskId: string };
   }>;
 }
 
@@ -1082,6 +1097,57 @@ export const make = Effect.gen(function* () {
     }));
   });
 
+  /**
+   * Group each Bob database's importable tasks by folder. Instances that run
+   * Bob with the same HOME share one database, owned by the first instance.
+   */
+  const collectBobCandidates = Effect.fn("AgentSessionScanner.collectBobCandidates")(function* (
+    instances: ReadonlyArray<{
+      readonly instanceId: ProviderInstanceId;
+      readonly config: ProviderInstanceConfig;
+    }>,
+  ) {
+    const raw: Array<RawCandidate> = [];
+    let truncated = false;
+    const seenDatabases = new Set<string>();
+    for (const { instanceId, config: instance } of instances) {
+      if (Option.isNone(decodeBobSettings(instance.config ?? {}))) continue;
+      // Bob opens the database under the HOME it runs with, as the adapter's usage reads do.
+      const databasePath = resolveBobTaskDatabasePath(
+        mergeProviderInstanceEnvironment(instance.environment, hostEnvironment),
+        path,
+      );
+      const databaseKey = yield* directoryIdentity(databasePath);
+      if (seenDatabases.has(databaseKey)) continue;
+      seenDatabases.add(databaseKey);
+
+      const tasks = yield* listBobTasks(databasePath, MAX_TRANSCRIPTS_PER_SOURCE + 1).pipe(
+        Effect.provideService(Path.Path, path),
+      );
+      if (tasks.length > MAX_TRANSCRIPTS_PER_SOURCE) truncated = true;
+      const tasksByCwd = Map.groupBy(
+        tasks.slice(0, MAX_TRANSCRIPTS_PER_SOURCE),
+        (task) => task.cwd,
+      );
+      for (const [cwd, cwdTasks] of tasksByCwd) {
+        raw.push({
+          cwd,
+          source: "bob",
+          providerInstanceId: instanceId,
+          threadCount: cwdTasks.length,
+          lastActiveAtMs: Math.max(...cwdTasks.map((task) => task.updatedAtMs)),
+          transcripts: cwdTasks.map((task) => ({
+            // Bob keeps no transcript file. The task stands in for one in import records.
+            filePath: `${databasePath}#${task.id}`,
+            mtimeMs: task.updatedAtMs,
+            bobTask: { databasePath, taskId: task.id },
+          })),
+        });
+      }
+    }
+    return { candidates: raw, truncated };
+  });
+
   const collectCandidates = Effect.fn("AgentSessionScanner.collectCandidates")(function* () {
     const settings = yield* serverSettings.getSettings.pipe(
       Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-settings", cause })),
@@ -1090,7 +1156,7 @@ export const make = Effect.gen(function* () {
     const raw: Array<RawCandidate> = [];
     let truncated = false;
 
-    for (const source of ["claudeAgent", "codex"] as const) {
+    const enabledInstances = (source: AgentSessionSource) => {
       const instances: Array<{
         readonly instanceId: ProviderInstanceId;
         readonly config: ProviderInstanceConfig;
@@ -1122,6 +1188,11 @@ export const make = Effect.gen(function* () {
         const rightDefault = right.instanceId === source ? 0 : 1;
         return leftDefault - rightDefault;
       });
+      return instances;
+    };
+
+    for (const source of ["claudeAgent", "codex"] as const) {
+      const instances = enabledInstances(source);
       const homes: Array<{ homePath: string; providerInstanceId: ProviderInstanceId }> = [];
       const seenHomes = new Set<string>();
       for (const { instanceId, config: instance } of instances) {
@@ -1192,6 +1263,10 @@ export const make = Effect.gen(function* () {
       raw.push(...(yield* groupTranscriptsByCwd(source, selectedTranscripts, metadataBudget)));
       truncated ||= metadataBudget.truncated;
     }
+
+    const bob = yield* collectBobCandidates(enabledInstances("bob"));
+    raw.push(...bob.candidates);
+    truncated ||= bob.truncated;
 
     return { candidates: raw, truncated };
   });
@@ -1328,6 +1403,7 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    boundBobTaskIds: ReadonlySet<string>,
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1379,12 +1455,97 @@ export const make = Effect.gen(function* () {
     let bytesRemaining = MAX_IMPORT_BYTES;
     let transcriptsRemaining = MAX_IMPORT_TRANSCRIPTS;
     let recordsRemaining = MAX_IMPORT_RECORDS;
+
+    /** Report a completed session once, however many copies of it remain. */
+    const alreadyImported = (source: AgentSessionImportSource) => {
+      const sessionKey = `${source.providerInstanceId}\0${source.providerSessionId}`;
+      if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
+      importedSessions.add(sessionKey);
+      return Option.some<AgentSessionRecentThread>({ _tag: "AlreadyImported", source });
+    };
+    /** The first copy of a session is importable and later copies are duplicates. */
+    const importable = (thread: AgentSessionThread, source: AgentSessionImportSource) => {
+      const sessionKey = `${thread.providerInstanceId}\0${thread.providerSessionId}`;
+      if (importedSessions.has(sessionKey)) {
+        return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
+      }
+      importedSessions.add(sessionKey);
+      return Option.some<AgentSessionRecentThread>({ _tag: "Importable", thread, source });
+    };
+
+    const recentBobThread = Effect.fnUntraced(function* (
+      candidate: RawCandidate,
+      filePath: string,
+      bobTask: { readonly databasePath: string; readonly taskId: string },
+      completed: ReadonlyArray<AgentSessionImportSource> | undefined,
+    ) {
+      // T3 started or continued this task in a thread of its own.
+      if (boundBobTaskIds.has(bobTask.taskId)) return Option.none<AgentSessionRecentThread>();
+      if (completed === undefined && transcriptsRemaining === 0) {
+        return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+      }
+      const databaseStats = yield* statOption(bobTask.databasePath);
+      const history = Option.isNone(databaseStats)
+        ? undefined
+        : yield* readBobTaskHistory(
+            bobTask.databasePath,
+            bobTask.taskId,
+            MAX_IMPORTED_MESSAGES,
+          ).pipe(Effect.provideService(Path.Path, path));
+      if (Option.isNone(databaseStats) || history === undefined) {
+        return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+      }
+      // The task row stands in for a transcript file: Bob moves its update time and message
+      // count whenever it adds to the task.
+      const source: AgentSessionImportSource = {
+        provider: "bob",
+        providerInstanceId: candidate.providerInstanceId,
+        providerSessionId: history.task.id,
+        filePath,
+        size: history.task.messageCount,
+        mtimeMs: history.task.updatedAtMs,
+        device: databaseStats.value.dev,
+        inode: Option.getOrNull(databaseStats.value.ino),
+        birthtimeMs: history.task.createdAtMs,
+      };
+      const completedSource = completed?.find(
+        (entry) => entry.provider === "bob" && sameTranscriptIdentity(entry, source),
+      );
+      if (completedSource !== undefined) return alreadyImported(completedSource);
+      if (transcriptsRemaining === 0) {
+        return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+      }
+      transcriptsRemaining -= 1;
+      return importable(
+        {
+          source: "bob",
+          providerInstanceId: candidate.providerInstanceId,
+          providerSessionId: history.task.id,
+          title: history.title,
+          // Bob picks its own model, so the thread starts from Bob's default selection.
+          model: null,
+          createdAt: DateTime.formatIso(DateTime.makeUnsafe(history.task.createdAtMs)),
+          updatedAt: DateTime.formatIso(DateTime.makeUnsafe(history.task.updatedAtMs)),
+          messages: history.messages,
+        },
+        source,
+      );
+    });
+
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
       Stream.mapEffect(({ candidate, transcript }) =>
         Effect.gen(function* () {
           const completed = completedByFile.get(
             `${candidate.providerInstanceId}\0${transcript.filePath}`,
           );
+          if (transcript.bobTask !== undefined) {
+            return yield* recentBobThread(
+              candidate,
+              transcript.filePath,
+              transcript.bobTask,
+              completed,
+            );
+          }
           if (
             completed === undefined &&
             (transcriptsRemaining === 0 || bytesRemaining === 0 || recordsRemaining === 0)
@@ -1400,15 +1561,7 @@ export const make = Effect.gen(function* () {
             (source) =>
               source.provider === candidate.source && sameTranscriptIdentity(source, identity),
           );
-          if (completedSource !== undefined) {
-            const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
-            if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
-            importedSessions.add(sessionKey);
-            return Option.some<AgentSessionRecentThread>({
-              _tag: "AlreadyImported",
-              source: completedSource,
-            });
-          }
+          if (completedSource !== undefined) return alreadyImported(completedSource);
           if (
             transcriptsRemaining === 0 ||
             recordsRemaining === 0 ||
@@ -1461,21 +1614,11 @@ export const make = Effect.gen(function* () {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
 
-          const source: AgentSessionImportSource = {
+          return importable(parsedThread, {
             ...identity,
             provider: parsedThread.source,
             providerInstanceId: parsedThread.providerInstanceId,
             providerSessionId: parsedThread.providerSessionId,
-          };
-          const sessionKey = `${parsedThread.providerInstanceId}\0${parsedThread.providerSessionId}`;
-          if (importedSessions.has(sessionKey)) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Duplicate", source });
-          }
-          importedSessions.add(sessionKey);
-          return Option.some<AgentSessionRecentThread>({
-            _tag: "Importable",
-            thread: parsedThread,
-            source,
           });
         }).pipe(importReadLock.withPermits(1)),
       ),
@@ -1487,7 +1630,8 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    boundBobTaskIds = new Set(),
+  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, boundBobTaskIds));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

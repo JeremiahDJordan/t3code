@@ -1,7 +1,9 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+import * as NodeSqlite from "node:sqlite";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  type AgentSessionImportSource,
   type OrchestrationProjectShell,
   ProjectId,
   ProviderDriverKind,
@@ -20,6 +22,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { resolveBobTaskDatabasePath } from "../provider/Layers/bobTaskUsage.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
@@ -108,13 +111,21 @@ const runScan = (input: ScannerTestInput) =>
     return yield* scanner.scan;
   }).pipe(Effect.provide(makeScannerTestLayer(input)));
 
-const runRecentThreadOutcomes = (input: ScannerTestInput & { readonly workspaceRoot: string }) =>
+const runRecentThreadOutcomes = (
+  input: ScannerTestInput & {
+    readonly workspaceRoot: string;
+    readonly completedSources?: ReadonlyArray<AgentSessionImportSource>;
+    readonly boundBobTaskIds?: ReadonlySet<string>;
+  },
+) =>
   Effect.gen(function* () {
     const scanner = yield* AgentSessionScanner.AgentSessionScanner;
-    return yield* scanner.recentThreads(input.workspaceRoot).pipe(
-      Stream.runCollect,
-      Effect.map((outcomes) => Array.from(outcomes)),
-    );
+    return yield* scanner
+      .recentThreads(input.workspaceRoot, input.completedSources, input.boundBobTaskIds)
+      .pipe(
+        Stream.runCollect,
+        Effect.map((outcomes) => Array.from(outcomes)),
+      );
   }).pipe(Effect.provide(makeScannerTestLayer(input)));
 
 const runRecentThreads = (input: ScannerTestInput & { readonly workspaceRoot: string }) =>
@@ -153,6 +164,83 @@ const codexRolloutLine = (cwd: string) =>
   `${JSON.stringify({ timestamp: "2026-01-01T00:00:00.000Z", type: "session_meta", payload: { id: "r1", cwd } })}\n`;
 
 const encodeTranscriptRecord = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+
+interface BobFixtureTask {
+  readonly id: string;
+  readonly cwd: string;
+  readonly createdAtMs: number;
+  readonly updatedAtMs: number;
+  readonly parentId?: string;
+  readonly messages: ReadonlyArray<{
+    readonly role: "user" | "assistant";
+    readonly text: string;
+    readonly timestamp: number;
+  }>;
+}
+
+/** A Bob instance whose `bob` runs with HOME at `home`, where its task database lives. */
+const bobInstance = (home: string) => ({
+  driver: ProviderDriverKind.make("bob"),
+  enabled: true,
+  environment: [{ name: "HOME", value: home, sensitive: false }],
+  config: {},
+});
+
+/** Write tasks to the database Bob opens with HOME at `home`, replacing tasks with the same id. */
+const writeBobTasks = Effect.fn("AgentSessionScanner.test.writeBobTasks")(function* (
+  home: string,
+  tasks: ReadonlyArray<BobFixtureTask>,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const databasePath = resolveBobTaskDatabasePath({ ...process.env, HOME: home }, path);
+  yield* fileSystem.makeDirectory(path.dirname(databasePath), { recursive: true });
+  const database = new NodeSqlite.DatabaseSync(databasePath);
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS tasks (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL DEFAULT '',
+      first_message TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      time_archived INTEGER, task_type TEXT NOT NULL DEFAULT 'normal'
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY, task_id TEXT NOT NULL, role TEXT NOT NULL, data TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+  `);
+  for (const task of tasks) {
+    database
+      .prepare(
+        "INSERT OR REPLACE INTO tasks (id, project_id, parent_id, task_type, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        task.id,
+        `file:${task.cwd}`,
+        task.parentId ?? null,
+        task.parentId === undefined ? "normal" : "subtask",
+        task.createdAtMs,
+        task.updatedAtMs,
+      );
+    database.prepare("DELETE FROM messages WHERE task_id = ?").run(task.id);
+    for (const [index, message] of task.messages.entries()) {
+      database
+        .prepare(
+          "INSERT INTO messages (id, task_id, role, data, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          `${task.id}-${index}`,
+          task.id,
+          message.role,
+          encodeTranscriptRecord({
+            content: message.text,
+            _meta: { timestamp: message.timestamp },
+          }),
+          message.timestamp,
+        );
+    }
+  }
+  database.close();
+  return databasePath;
+});
 
 function makeRecordLimitTranscript(cwd: string, overflow: boolean): string {
   const records =
@@ -2608,6 +2696,213 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
             outcome._tag === "Importable" ? [outcome.thread.providerSessionId] : [],
           ),
         ).toEqual(["recent-session"]);
+      }),
+    );
+  });
+
+  describe("Bob tasks", () => {
+    it.effect("offers the folders of Bob tasks alongside other agents' projects", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const bobHome = yield* makeTempDir("t3code-bob-home-");
+        const sharedWorkspace = yield* makeTempDir("t3code-workspace-shared-");
+        const bobWorkspace = yield* makeTempDir("t3code-workspace-bob-");
+        const at = (iso: string) => Date.parse(iso);
+        const prompt = (timestamp: number) => [
+          { role: "user" as const, text: "Fix it", timestamp },
+        ];
+
+        yield* writeTranscript({
+          filePath: path.join(claudeHomePath, "projects", "-shared", "a.jsonl"),
+          contents: claudeSessionLine(sharedWorkspace),
+          mtimeMs: at("2026-01-01T00:00:00.000Z"),
+        });
+        yield* writeBobTasks(bobHome, [
+          {
+            id: "shared",
+            cwd: sharedWorkspace,
+            createdAtMs: at("2026-02-01T00:00:00.000Z"),
+            updatedAtMs: at("2026-02-01T00:00:00.000Z"),
+            messages: prompt(at("2026-02-01T00:00:00.000Z")),
+          },
+          {
+            id: "bob-older",
+            cwd: bobWorkspace,
+            createdAtMs: at("2026-01-15T00:00:00.000Z"),
+            updatedAtMs: at("2026-01-15T00:00:00.000Z"),
+            messages: prompt(at("2026-01-15T00:00:00.000Z")),
+          },
+          {
+            id: "bob-newer",
+            cwd: bobWorkspace,
+            createdAtMs: at("2026-03-01T00:00:00.000Z"),
+            updatedAtMs: at("2026-03-01T00:00:00.000Z"),
+            messages: prompt(at("2026-03-01T00:00:00.000Z")),
+          },
+          // Bob cannot resume a subtask on its own.
+          {
+            id: "subtask",
+            cwd: bobWorkspace,
+            parentId: "bob-newer",
+            createdAtMs: at("2026-04-01T00:00:00.000Z"),
+            updatedAtMs: at("2026-04-01T00:00:00.000Z"),
+            messages: prompt(at("2026-04-01T00:00:00.000Z")),
+          },
+          {
+            id: "home",
+            cwd: NodeOS.homedir(),
+            createdAtMs: at("2026-04-01T00:00:00.000Z"),
+            updatedAtMs: at("2026-04-01T00:00:00.000Z"),
+            messages: prompt(at("2026-04-01T00:00:00.000Z")),
+          },
+        ]);
+
+        const result = yield* runScan({
+          claudeHomePath,
+          codexHomePath,
+          // Two instances that run Bob with one HOME share its database.
+          providerInstances: {
+            [ProviderInstanceId.make("bob")]: bobInstance(bobHome),
+            [ProviderInstanceId.make("bob-work")]: bobInstance(bobHome),
+          },
+        });
+
+        expect(result.candidates).toEqual([
+          {
+            path: bobWorkspace,
+            title: path.basename(bobWorkspace),
+            sources: ["bob"],
+            threadCount: 2,
+            lastActiveAt: "2026-03-01T00:00:00.000Z",
+            alreadyImported: false,
+            git: null,
+          },
+          {
+            path: sharedWorkspace,
+            title: path.basename(sharedWorkspace),
+            sources: ["claudeAgent", "bob"],
+            threadCount: 2,
+            lastActiveAt: "2026-02-01T00:00:00.000Z",
+            alreadyImported: false,
+            git: null,
+          },
+        ]);
+      }),
+    );
+
+    it.effect("imports recent Bob tasks of the selected project that T3 does not run", () =>
+      Effect.gen(function* () {
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const bobHome = yield* makeTempDir("t3code-bob-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const otherWorkspace = yield* makeTempDir("t3code-workspace-other-");
+        const task = (id: string, cwd: string, updatedAtMs: number): BobFixtureTask => ({
+          id,
+          cwd,
+          createdAtMs: updatedAtMs - 60_000,
+          updatedAtMs,
+          messages: [
+            { role: "user", text: `Fix ${id}`, timestamp: updatedAtMs - 60_000 },
+            { role: "assistant", text: "Done", timestamp: updatedAtMs },
+          ],
+        });
+        const databasePath = yield* writeBobTasks(bobHome, [
+          task("recent", workspace, nowMs - 60 * 60 * 1000),
+          task("old", workspace, nowMs - 31 * 24 * 60 * 60 * 1000),
+          task("other", otherWorkspace, nowMs - 60 * 60 * 1000),
+          task("in-t3", workspace, nowMs - 30 * 60 * 1000),
+        ]);
+
+        const outcomes = yield* runRecentThreadOutcomes({
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          providerInstances: {
+            [ProviderInstanceId.make("bob-work")]: bobInstance(bobHome),
+            [ProviderInstanceId.make("bob")]: bobInstance(bobHome),
+          },
+          boundBobTaskIds: new Set(["in-t3"]),
+        });
+
+        expect(outcomes).toEqual([
+          {
+            _tag: "Importable",
+            thread: {
+              source: "bob",
+              providerInstanceId: "bob",
+              providerSessionId: "recent",
+              title: "Fix recent",
+              model: null,
+              createdAt: "2026-08-24T10:59:00.000Z",
+              updatedAt: "2026-08-24T11:00:00.000Z",
+              messages: [
+                { role: "user", text: "Fix recent", createdAt: "2026-08-24T10:59:00.000Z" },
+                { role: "assistant", text: "Done", createdAt: "2026-08-24T11:00:00.000Z" },
+              ],
+            },
+            source: expect.objectContaining({
+              provider: "bob",
+              providerInstanceId: "bob",
+              providerSessionId: "recent",
+              filePath: `${databasePath}#recent`,
+              size: 2,
+              mtimeMs: nowMs - 60 * 60 * 1000,
+              birthtimeMs: nowMs - 61 * 60 * 1000,
+            }),
+          },
+        ]);
+      }),
+    );
+
+    it.effect("reports an unchanged Bob task as imported until Bob adds to it", () =>
+      Effect.gen(function* () {
+        const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+        yield* TestClock.setTime(nowMs);
+        const claudeHomePath = yield* makeTempDir("t3code-claude-home-");
+        const codexHomePath = yield* makeTempDir("t3code-codex-home-");
+        const bobHome = yield* makeTempDir("t3code-bob-home-");
+        const workspace = yield* makeTempDir("t3code-workspace-");
+        const firstTurn = {
+          id: "task",
+          cwd: workspace,
+          createdAtMs: nowMs - 2_000,
+          updatedAtMs: nowMs - 1_000,
+          messages: [{ role: "user" as const, text: "Start", timestamp: nowMs - 2_000 }],
+        };
+        yield* writeBobTasks(bobHome, [firstTurn]);
+        const input = {
+          claudeHomePath,
+          codexHomePath,
+          workspaceRoot: workspace,
+          providerInstances: { [ProviderInstanceId.make("bob")]: bobInstance(bobHome) },
+        };
+
+        const initial = yield* runRecentThreadOutcomes(input);
+        const imported = initial[0];
+        expect(imported?._tag).toBe("Importable");
+        if (imported?._tag !== "Importable") return;
+        expect(
+          yield* runRecentThreadOutcomes({ ...input, completedSources: [imported.source] }),
+        ).toEqual([{ _tag: "AlreadyImported", source: imported.source }]);
+
+        yield* writeBobTasks(bobHome, [
+          {
+            ...firstTurn,
+            updatedAtMs: nowMs,
+            messages: [
+              ...firstTurn.messages,
+              { role: "assistant", text: "Continued", timestamp: nowMs },
+            ],
+          },
+        ]);
+        expect(
+          yield* runRecentThreadOutcomes({ ...input, completedSources: [imported.source] }),
+        ).toMatchObject([{ _tag: "Importable", source: { size: 2, mtimeMs: nowMs } }]);
       }),
     );
   });
