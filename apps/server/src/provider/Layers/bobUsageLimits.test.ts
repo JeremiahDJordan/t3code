@@ -10,7 +10,10 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   readBobConfiguredModel,
   BOB_SSO_REFRESH_MESSAGE,
+  BOB_SSO_RENEWS_MESSAGE,
+  bobPinnedTeamUsage,
   bobProfileToUsage,
+  readBobPinnedTeams,
   readBobUsageLimits,
 } from "./bobUsageLimits.ts";
 
@@ -37,6 +40,7 @@ const profile = {
     { instance_id: "empty", plan_name: "no teams", teams: [] },
     {
       instance_id: "instance-1",
+      subscription_id: "subscription-1",
       plan_id: "ibm_bob_trial",
       plan_name: "trial plan",
       teams: [
@@ -83,6 +87,42 @@ describe("bobProfileToUsage", () => {
       usageLimits: { checkedAt, windows: [], unavailable: { reason: "unsupported" } },
     });
   });
+});
+
+describe("bobPinnedTeamUsage", () => {
+  it("follows the first pinned team the user belongs to, named by its subscription", () => {
+    expect(
+      bobPinnedTeamUsage(
+        profile,
+        ["subscription-9:team-1", "subscription-1:team-2", "subscription-1:team-1"],
+        checkedAt,
+      )?.usageLimits.windows[0]?.usedPercent,
+    ).toBe(75);
+    // Pins name the subscription, not the instance id Bob's last pick uses.
+    expect(bobPinnedTeamUsage(profile, ["instance-1:team-2"], checkedAt)).toBeUndefined();
+    expect(bobPinnedTeamUsage(profile, [], checkedAt)).toBeUndefined();
+  });
+});
+
+it.layer(NodeServices.layer)("readBobPinnedTeams", (it) => {
+  it.effect("reads the teams a folder pins in its Bob settings", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const folder = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-bob-pins-" });
+      expect(yield* readBobPinnedTeams(folder)).toEqual([]);
+
+      yield* fs.makeDirectory(NodePath.join(folder, ".bob"));
+      const settings = NodePath.join(folder, ".bob", "settings.json");
+      yield* fs.writeFileString(
+        settings,
+        JSON.stringify({ session: { pinnedTeams: ["sub-1:team-1", 7, " sub-2:team-2 "] } }),
+      );
+      expect(yield* readBobPinnedTeams(folder)).toEqual(["sub-1:team-1", "sub-2:team-2"]);
+
+      yield* fs.writeFileString(settings, "not json");
+      expect(yield* readBobPinnedTeams(folder)).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
 });
 
 it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
@@ -236,7 +276,17 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
     ),
   );
 
-  it.effect("leaves a missing, unreadable or expired SSO login to Bob without a request", () =>
+  const expiredLogin = (refreshToken: string | undefined) => ({
+    "auth-secrets.json": bobAuthSecrets({
+      "bob.auth.tokens-https://api.us-east.bob.ibm.com": {
+        ...login("expired-jwt"),
+        refreshToken,
+        expiresAt: 1,
+      },
+    }),
+  });
+
+  it.effect("asks the user to sign in to Bob, without a request, when Bob can't renew", () =>
     Effect.gen(function* () {
       for (const files of [
         {},
@@ -247,14 +297,8 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
             "bob.auth.tokens-https://api.us-east.bob.ibm.com": { accessToken: "jwt" },
           }),
         },
-        {
-          "auth-secrets.json": bobAuthSecrets({
-            "bob.auth.tokens-https://api.us-east.bob.ibm.com": {
-              ...login("expired-jwt"),
-              expiresAt: 1,
-            },
-          }),
-        },
+        // A SAML login has no refresh token.
+        expiredLogin(undefined),
       ]) {
         const home = yield* makeBobHome(files);
         const usage = yield* readBobUsageLimits("sso", { HOME: home }).pipe(
@@ -265,6 +309,19 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
           message: BOB_SSO_REFRESH_MESSAGE,
         });
       }
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("leaves an expired login Bob can renew to its next turn, without a request", () =>
+    Effect.gen(function* () {
+      const home = yield* makeBobHome(expiredLogin("refresh"));
+      const usage = yield* readBobUsageLimits("sso", { HOME: home }).pipe(
+        Effect.provideService(HttpClient.HttpClient, noRequests),
+      );
+      expect(usage.usageLimits.unavailable).toEqual({
+        reason: "probeFailed",
+        message: BOB_SSO_RENEWS_MESSAGE,
+      });
     }).pipe(Effect.scoped),
   );
 
