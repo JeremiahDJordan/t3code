@@ -1,4 +1,4 @@
-import type { EnvironmentId, UnifiedSettings } from "@t3tools/contracts";
+import type { BobUsageInUpstreamClients, EnvironmentId, UnifiedSettings } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
@@ -16,10 +16,25 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { AddUsageLimitSourceDialog } from "./AddUsageLimitSourceDialog";
 import { searchableSetting } from "./settingsSearch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+
+/** How clients without Bob support can show Bob's usage, in the order they list providers. */
+const BOB_USAGE_IN_UPSTREAM_CLIENTS: ReadonlyArray<{
+  readonly value: BobUsageInUpstreamClients;
+  readonly label: string;
+}> = [
+  { value: "hidden", label: "Hidden" },
+  { value: "antigravity", label: "As Antigravity" },
+  { value: "opencode", label: "As OpenCode" },
+  { value: "cursor", label: "As Cursor" },
+  { value: "grok", label: "As Grok Build" },
+  { value: "codex", label: "As Codex" },
+  { value: "claude", label: "As Claude Code" },
+];
 
 /** Hub management follows the selected device and access rules of provider settings. */
 export function UsageProviderSettings({
@@ -27,12 +42,15 @@ export function UsageProviderSettings({
   environmentLabel,
   sources,
   cursorKeychainUsageEnabled,
+  bobUsageInUpstreamClients,
   readOnly,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly sources: UnifiedSettings["usageLimitSources"];
   readonly cursorKeychainUsageEnabled: boolean;
+  /** Undefined when this environment has no Bob to show. */
+  readonly bobUsageInUpstreamClients: BobUsageInUpstreamClients | undefined;
   readonly readOnly: boolean;
 }) {
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
@@ -88,6 +106,43 @@ export function UsageProviderSettings({
                 disabled={readOnly || updatingCursor}
                 onCheckedChange={(enabled) => void setCursorUsageEnabled(enabled)}
               />
+            }
+          />
+        ) : null}
+        {bobUsageInUpstreamClients !== undefined ? (
+          <SettingsRow
+            id="bob-usage-in-upstream-clients"
+            title="Bob usage in other T3 Code apps"
+            description="Apps without Bob support, such as the App Store app, cannot show Bob. Show its history there as a provider you don't use instead, with Bobcoins as that provider's dollars."
+            control={
+              <Select
+                value={bobUsageInUpstreamClients}
+                onValueChange={(value) =>
+                  updateSettings({ bobUsageInUpstreamClients: value as BobUsageInUpstreamClients })
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-40"
+                  aria-label="Bob usage in other T3 Code apps"
+                  disabled={readOnly}
+                >
+                  <SelectValue>
+                    {
+                      BOB_USAGE_IN_UPSTREAM_CLIENTS.find(
+                        (choice) => choice.value === bobUsageInUpstreamClients,
+                      )?.label
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {BOB_USAGE_IN_UPSTREAM_CLIENTS.map((choice) => (
+                    <SelectItem hideIndicator key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
             }
           />
         ) : null}

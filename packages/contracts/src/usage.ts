@@ -19,13 +19,13 @@ import { ThreadUsageCost } from "./providerRuntime.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 7 as const;
+export const USAGE_CONTRACT_VERSION = 6 as const;
 
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * v5-v7 add providers, optional source attribution, and optional bucket
- * `credits`; v4 Claude/Codex buckets remain valid in mixed-version environments.
+ * v5/v6 add providers and optional source attribution; v4 Claude/Codex
+ * buckets remain valid in mixed-version environments.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
@@ -36,6 +36,8 @@ export const UsageProviderKind = Schema.Literals([
   "cursor",
   "opencode",
   "antigravity",
+  // This fork's Bob, with bucket `credits`: servers send both only to clients that announce
+  // Bob support (`upstreamClientCompatibility`), so the version stays upstream's.
   "bob",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;

@@ -557,6 +557,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     macProviderSettingsOnly: true,
   },
   {
+    id: "bob-usage-in-upstream-clients",
+    title: "Bob usage in other T3 Code apps",
+    to: "/settings/providers",
+    searchTerms: ["bob bobcoins usage history app store mobile upstream show as provider"],
+    providerSettingsOnly: true,
+  },
+  {
     id: "provider-health-check-interval",
     title: "Health check interval",
     to: "/settings/providers",

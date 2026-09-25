@@ -144,6 +144,10 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
+import {
+  agentSessionScanForUpstreamClient,
+  usageSummaryForUpstreamClient,
+} from "./upstreamClientCompatibility.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -448,6 +452,15 @@ function readClientConnectionOrigin(
   };
 }
 
+/**
+ * Whether the client knows Bob, which only this fork's clients announce. Other clients get
+ * Bob's entries adapted by `upstreamClientCompatibility`.
+ */
+function readClientSupportsBob(request: HttpServerRequest.HttpServerRequest): boolean {
+  const url = HttpServerRequest.toURL(request);
+  return Option.isSome(url) && url.value.searchParams.get("clientBobSupport") === "1";
+}
+
 // Client telemetry stays in this socket's RPC layer. It must not become a
 // server-global "current client" because several client types can connect at once.
 function readClientAnalyticsProps(request: HttpServerRequest.HttpServerRequest) {
@@ -499,6 +512,7 @@ const makeWsRpcLayer = (
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  clientSupportsBob: boolean,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -2670,9 +2684,21 @@ const makeWsRpcLayer = (
             },
           ),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
-          observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
-            "rpc.aggregate": "server",
-          }),
+          observeRpcEffect(
+            WS_METHODS.serverGetUsageSummary,
+            clientSupportsBob
+              ? usage.readSummary(input)
+              : Effect.all([
+                  usage.readSummary(input),
+                  serverSettings.getSettings.pipe(
+                    Effect.map((settings) => settings.bobUsageInUpstreamClients),
+                    Effect.orElseSucceed(() => "hidden" as const),
+                  ),
+                ]).pipe(
+                  Effect.map(([summary, bobAs]) => usageSummaryForUpstreamClient(summary, bobAs)),
+                ),
+            { "rpc.aggregate": "server" },
+          ),
         [WS_METHODS.serverRefreshUsageRates]: (_input) =>
           observeRpcEffect(WS_METHODS.serverRefreshUsageRates, usage.refreshRates, {
             "rpc.aggregate": "server",
@@ -3155,9 +3181,13 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.agentSessionsScan]: () =>
-          observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
-            "rpc.aggregate": "workspace",
-          }),
+          observeRpcEffect(
+            WS_METHODS.agentSessionsScan,
+            clientSupportsBob
+              ? agentSessionScanner.scan
+              : agentSessionScanner.scan.pipe(Effect.map(agentSessionScanForUpstreamClient)),
+            { "rpc.aggregate": "workspace" },
+          ),
         [WS_METHODS.agentSessionsImport]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentSessionsImport,
@@ -3851,6 +3881,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientOrigin,
               clientAnalyticsProps,
               previewAutomationBroker,
+              readClientSupportsBob(request),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
