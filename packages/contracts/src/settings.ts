@@ -12,6 +12,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import { UsageProviderKind } from "./usage.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -1128,20 +1129,17 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/** The usage providers T3 Code clients built without Bob support know: every one but `bob`. */
+export const UPSTREAM_USAGE_PROVIDERS = UsageProviderKind.literals.filter(
+  (provider): provider is Exclude<UsageProviderKind, "bob"> => provider !== "bob",
+);
+
 /**
  * How this server shows Bob's usage history to T3 Code clients built without Bob support,
  * which cannot read Bob's entries: not at all, or as one of the providers they know, with
  * Bobcoins in that provider's cost.
  */
-export const BobUsageInUpstreamClients = Schema.Literals([
-  "hidden",
-  "claude",
-  "codex",
-  "grok",
-  "cursor",
-  "opencode",
-  "antigravity",
-]);
+export const BobUsageInUpstreamClients = Schema.Literals(["hidden", ...UPSTREAM_USAGE_PROVIDERS]);
 export type BobUsageInUpstreamClients = typeof BobUsageInUpstreamClients.Type;
 
 export const ServerSettings = Schema.Struct({
