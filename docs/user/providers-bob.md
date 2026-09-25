@@ -45,9 +45,10 @@ acts, and so does **Auto**, since Bob has no automatic reviewer.
 Bobcoin allowance. If you belong to several teams, T3 Code shows the one last
 selected in Bob. On web and desktop, a thread's context meter shows the tokens and
 Bobcoins that thread has used; turn it on with **Settings > General > Legacy
-features > Context window indicator**. Commit messages, pull request text, branch
-names, and thread titles that Bob writes count toward the monthly allowance but not
-toward any thread. See [Usage and limits](./usage.md#track-subscription-limits).
+features > Context window indicator**. Bob does not report which model it runs, so
+the meter's limit assumes the context window of Bob's default model. Commit
+messages, pull request text, branch names, and thread titles that Bob writes count
+toward the monthly allowance but not toward any thread. See [Usage and limits](./usage.md#track-subscription-limits).
 
 ## Limits
 

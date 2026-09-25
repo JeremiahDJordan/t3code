@@ -169,6 +169,8 @@ describe.runIf(process.env.T3_BOB_ACP_PROBE === "1")("Bob adapter against a real
           const usage = completedTurnUsage(events);
           assert.isAbove(usage?.usedTokens ?? 0, 0, "the context tokens after the turn");
           assert.isAbove(usage?.cost?.amount ?? 0, 0, "the Bobcoins the turn spent");
+          // T3 assumes a known Bob model's context window; ACP does not report one.
+          assert.isAbove(usage?.maxTokens ?? 0, 0, "the context window T3 assumes");
           const toolTitles = events.flatMap((event) =>
             (event.type === "item.started" ||
               event.type === "item.updated" ||
