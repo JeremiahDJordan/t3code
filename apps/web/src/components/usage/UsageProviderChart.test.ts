@@ -92,7 +92,40 @@ describe("buildPeriodColumns", () => {
       { provider: "cursor", value: 0 },
       { provider: "opencode", value: 0 },
       { provider: "antigravity", value: 0 },
+      { provider: "bob", value: 0 },
     ]);
+  });
+
+  it("carries Bobcoins beside the dollar axis and plots Bob's tokens", () => {
+    const bobcoins = { amount: 12.3, unit: "Bobcoins" };
+    const byBobDay = new Map([
+      [
+        "2026-08-01",
+        {
+          day: "2026-08-01",
+          costUsd: 10,
+          totalTokens: 400,
+          byProvider: new Map([
+            ["codex" as const, { costUsd: 10, totalTokens: 100 }],
+            ["bob" as const, { costUsd: 0, totalTokens: 300, credits: bobcoins }],
+          ]),
+        },
+      ],
+    ]);
+    const [cost] = buildPeriodColumns(["2026-08-01"], byBobDay, "cost");
+    const [tokens] = buildPeriodColumns(["2026-08-01"], byBobDay, "tokens");
+
+    expect(cost?.total).toBe(10);
+    expect(cost?.bands.find((band) => band.provider === "bob")).toEqual({
+      provider: "bob",
+      value: 0,
+      credits: bobcoins,
+    });
+    expect(tokens?.total).toBe(400);
+    expect(tokens?.bands.find((band) => band.provider === "bob")).toEqual({
+      provider: "bob",
+      value: 300,
+    });
   });
 
   it("reports the total as the sum of its bands", () => {
@@ -111,6 +144,14 @@ describe("providersWithUsage", () => {
         { provider: "claude", costUsd: 0, totalTokens: 200 },
       ]),
     ).toEqual(["claude"]);
+  });
+
+  it("keeps a provider that spent only its own credits", () => {
+    expect(
+      providersWithUsage([
+        { provider: "bob", costUsd: 0, totalTokens: 0, credits: { amount: 0.4, unit: "Bobcoins" } },
+      ]),
+    ).toEqual(["bob"]);
   });
 });
 
