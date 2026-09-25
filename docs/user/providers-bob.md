@@ -11,7 +11,7 @@ On the environment's machine, install Bob Shell 2.0.5 or later with
 terminal. An older Bob still runs, but the provider shows a warning, and moving a
 thread's conversation between folders does not work. The first run asks you to accept IBM's license agreement, which Bob
 requires before T3 Code can start it. Then enable Bob Shell in
-**Settings > Providers**.
+**Settings → Providers**.
 
 ### Choose a sign-in method
 
@@ -54,12 +54,20 @@ Code shows the one last selected in Bob. In a project that pins a team in its
 `.bob/settings.json`, `/usage-limits` shows that team's allowance instead.
 **Usage → Usage** charts Bob's daily tokens and Bobcoins with your other
 providers. On web and desktop, a thread's context meter shows the tokens and
-Bobcoins that thread has used; turn it on with **Settings > General > Legacy
-features > Context window indicator**. Bob does not report which model it runs,
+Bobcoins that thread has used; turn it on with **Settings → General → Legacy
+features → Context window indicator**. Bob does not report which model it runs,
 so the meter's limit assumes the context window of Bob's default model. Commit
 messages, pull request text, branch names, and thread titles that Bob writes
 count toward the monthly allowance but not toward any thread. See
 [Usage and limits](./usage.md#track-subscription-limits).
+
+### Other T3 Code apps
+
+T3 Code apps without Bob support, such as the App Store app and app.t3.codes, still
+work with this server, but their Usage page leaves Bob out by default. To see Bob
+there, choose a provider you don't use in **Settings → Providers → Usage providers →
+Bob usage in other T3 Code apps**. Bob's history then appears as that provider, and
+its dollar totals include Bobcoins, each counted as $1.
 
 ## Limits
 

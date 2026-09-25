@@ -12,6 +12,7 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 import { UsageLimitSourceId } from "./usageLimitSourceId.ts";
+import { UsageProviderKind } from "./usage.ts";
 import { EnvironmentMachineKind, ThreadEnvMode, WorktreeSubmodules } from "./environment.ts";
 import { KeybindingShortcut } from "./keybindings.ts";
 import {
@@ -1146,6 +1147,19 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+/** The usage providers T3 Code clients built without Bob support know: every one but `bob`. */
+export const UPSTREAM_USAGE_PROVIDERS = UsageProviderKind.literals.filter(
+  (provider): provider is Exclude<UsageProviderKind, "bob"> => provider !== "bob",
+);
+
+/**
+ * How this server shows Bob's usage history to T3 Code clients built without Bob support,
+ * which cannot read Bob's entries: not at all, or as one of the providers they know, with
+ * Bobcoins in that provider's cost.
+ */
+export const BobUsageInUpstreamClients = Schema.Literals(["hidden", ...UPSTREAM_USAGE_PROVIDERS]);
+export type BobUsageInUpstreamClients = typeof BobUsageInUpstreamClients.Type;
+
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
@@ -1349,6 +1363,10 @@ export const ServerSettings = Schema.Struct({
   /** Allows this server to read the Cursor CLI's macOS Keychain login for account usage. */
   cursorKeychainUsageEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
+  /** How clients without Bob support see Bob's usage history. */
+  bobUsageInUpstreamClients: BobUsageInUpstreamClients.pipe(
+    Schema.withDecodingDefault(Effect.succeed("hidden" as const)),
   ),
   /** Exact model IDs, applied to past and future usage on this environment. */
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
@@ -1640,6 +1658,7 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
+  bobUsageInUpstreamClients: Schema.optionalKey(BobUsageInUpstreamClients),
   /** Each entry replaces one model's rates; `null` restores automatic pricing. */
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),
