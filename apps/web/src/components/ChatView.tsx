@@ -3106,7 +3106,8 @@ export default function ChatView(props: ChatViewProps) {
   // during a reconnect; the panel then stays hidden rather than being dropped.
   // A pending approval or question is part of the key: once it is answered,
   // from this client or any other, the agent resumes and spends quota.
-  const gitCwd = activeProject
+  // The thread's folder, where Bob can bill another team (the project's pinned one).
+  const usageLimitsCwd = activeProject
     ? projectScriptCwd({
         project: { cwd: activeProject.workspaceRoot },
         worktreePath: activeThread?.worktreePath ?? null,
@@ -3141,14 +3142,14 @@ export default function ChatView(props: ChatViewProps) {
             providerStatuses,
             usageLimitSources,
             usageLimitsPanel.now,
-            gitCwd,
+            usageLimitsCwd,
           )
         : null,
     [
       activeProviderInstanceId,
-      gitCwd,
       providerStatuses,
       usageLimitSources,
+      usageLimitsCwd,
       usageLimitsKey,
       usageLimitsPanel,
     ],
@@ -3181,7 +3182,7 @@ export default function ChatView(props: ChatViewProps) {
             providerStatuses,
             usageLimitSources,
             now,
-            gitCwd,
+            usageLimitsCwd,
           )
         : null;
     if (report && usageLimitsKey !== null) {
@@ -3193,10 +3194,10 @@ export default function ChatView(props: ChatViewProps) {
     return false;
   }, [
     activeProviderInstanceId,
-    gitCwd,
     providerStatuses,
     routeThreadKey,
     usageLimitSources,
+    usageLimitsCwd,
     usageLimitsKey,
   ]);
   // Responses can resolve after navigating away; only the originating thread's panel clears.
@@ -3652,6 +3653,12 @@ export default function ChatView(props: ChatViewProps) {
     panelAnimationDurationMs,
   );
 
+  const gitCwd = activeProject
+    ? projectScriptCwd({
+        project: { cwd: activeProject.workspaceRoot },
+        worktreePath: activeThread?.worktreePath ?? null,
+      })
+    : null;
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null
