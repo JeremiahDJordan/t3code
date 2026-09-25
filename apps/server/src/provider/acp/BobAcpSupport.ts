@@ -131,10 +131,12 @@ export function describeBobAcpSetupError(
   if (!isAcpRequestError(error)) return undefined;
   if (error.code === -32000) return bobSignInMessage(authMethod);
   if (error.code !== -32600) return undefined;
-  // Keep Bob's own text, which names its flags, minus the generic JSON-RPC label.
+  // Keep Bob's own text, which names its flags, minus the generic JSON-RPC label. Bob can
+  // translate these messages (its `locale` setting, 2.0.5+), but never the flag names, so the
+  // flag each message tells the user to pass identifies it.
   const bobMessage = error.errorMessage.replace(/^Invalid request:\s*/, "");
-  if (/license agreement/i.test(bobMessage)) return `${bobMessage} ${BOB_LICENSE_HINT}`;
-  if (/not trusted/i.test(bobMessage)) return `${bobMessage} ${BOB_UNTRUSTED_WORKSPACE_HINT}`;
+  if (/--accept-license\b/.test(bobMessage)) return `${bobMessage} ${BOB_LICENSE_HINT}`;
+  if (/--trust\b/.test(bobMessage)) return `${bobMessage} ${BOB_UNTRUSTED_WORKSPACE_HINT}`;
   return undefined;
 }
 
