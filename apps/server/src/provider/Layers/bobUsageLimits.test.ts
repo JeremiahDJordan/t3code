@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import {
+  readBobConfiguredModel,
   BOB_SSO_REFRESH_MESSAGE,
   bobProfileToUsage,
   readBobUsageLimits,
@@ -142,6 +143,22 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
 
   // Bob applies its `gatewayUrl` setting over the environment when it starts, keying the
   // login by the setting as written and normalizing it only for requests.
+  it.effect("reads the model Bob's settings pin, ignoring an unset or malformed one", () =>
+    Effect.gen(function* () {
+      const pinned = yield* makeBobHome({
+        "settings.json": JSON.stringify({ session: { model: " wxO-model " } }),
+      });
+      expect(yield* readBobConfiguredModel({ HOME: pinned })).toBe("wxO-model");
+      for (const settings of [{}, { session: {} }, { session: { model: 7 } }, { session: "x" }]) {
+        const home = yield* makeBobHome({ "settings.json": JSON.stringify(settings) });
+        expect(yield* readBobConfiguredModel({ HOME: home })).toBeUndefined();
+      }
+      const broken = yield* makeBobHome({ "settings.json": "not json" });
+      expect(yield* readBobConfiguredModel({ HOME: broken })).toBeUndefined();
+      expect(yield* readBobConfiguredModel({ HOME: "/nonexistent" })).toBeUndefined();
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("prefers the gateway in Bob's settings over BOB_GATEWAY_URL", () =>
     Effect.gen(function* () {
       const home = yield* makeBobHome({
