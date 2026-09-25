@@ -20,6 +20,8 @@ import {
 
 import * as DateTime from "effect/DateTime";
 
+import { normalizeProjectPathForComparison } from "./path.ts";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -581,8 +583,9 @@ export function withUsageLimitsCommands(
  * folder that pins another team.
  */
 function withWorkspaceUsageLimits(provider: ServerProvider, cwd: string): ServerProvider {
+  const folder = normalizeProjectPathForComparison(cwd);
   const usageLimits = provider.workspaceSnapshots?.find(
-    (snapshot) => snapshot.cwd === cwd,
+    (snapshot) => normalizeProjectPathForComparison(snapshot.cwd) === folder,
   )?.usageLimits;
   return usageLimits ? { ...provider, usageLimits } : provider;
 }
