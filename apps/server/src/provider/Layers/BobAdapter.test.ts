@@ -1048,73 +1048,79 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
   );
 
   it.effect("reports Bob's token and Bobcoin totals after a turn", () =>
-    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, taskDatabasePath }) =>
-      Effect.gen(function* () {
-        const threadId = ThreadId.make("bob-usage");
-        // A resumed task already has spend; the turn is measured from here.
-        writeBobTaskCosts(taskDatabasePath, "mock-session-1", {
-          input: 10_000,
-          output: 500,
-          cacheRead: 8_000,
-          cacheWrite: 1_000,
-          cost: 0.05,
-          contextTokens: 10_500,
-        });
-        const eventsFiber = yield* adapter.streamEvents.pipe(
-          Stream.filter(
-            (event) =>
-              event.type === "thread.token-usage.updated" || event.type === "turn.completed",
-          ),
-          Stream.take(2),
-          Stream.runCollect,
-          Effect.forkChild,
-        );
+    withMockBob(
+      { T3_ACP_BOB: "1" },
+      ({ adapter, taskDatabasePath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-usage");
+          // A resumed task already has spend; the turn is measured from here.
+          writeBobTaskCosts(taskDatabasePath, "mock-session-1", {
+            input: 10_000,
+            output: 500,
+            cacheRead: 8_000,
+            cacheWrite: 1_000,
+            cost: 0.05,
+            contextTokens: 10_500,
+          });
+          const eventsFiber = yield* adapter.streamEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "thread.token-usage.updated" || event.type === "turn.completed",
+            ),
+            Stream.take(2),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
 
-        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
-        writeBobTaskCosts(taskDatabasePath, "mock-session-1", {
-          input: 25_000,
-          output: 1_200,
-          cacheRead: 20_000,
-          cacheWrite: 1_500,
-          cost: 0.118,
-          contextTokens: 15_700,
-        });
-        const turn = yield* adapter.sendTurn({ threadId, input: "hello" });
+          yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+          writeBobTaskCosts(taskDatabasePath, "mock-session-1", {
+            input: 25_000,
+            output: 1_200,
+            cacheRead: 20_000,
+            cacheWrite: 1_500,
+            cost: 0.118,
+            contextTokens: 15_700,
+          });
+          const turn = yield* adapter.sendTurn({ threadId, input: "hello" });
 
-        const [usage, completed] = Array.from(yield* Fiber.join(eventsFiber));
-        assert.deepStrictEqual(
-          usage?.type === "thread.token-usage.updated" && usage.turnId,
-          turn.turnId,
-        );
-        assert.deepStrictEqual(
-          usage?.type === "thread.token-usage.updated" && usage.payload.usage,
-          {
-            usedTokens: 15_700,
-            totalProcessedTokens: 26_200,
-            inputTokens: 25_000,
-            cachedInputTokens: 20_000,
-            outputTokens: 1_200,
-            lastInputTokens: 15_000,
-            lastCachedInputTokens: 12_000,
-            lastOutputTokens: 700,
-            cost: { amount: 0.118, unit: "Bobcoins" },
-          },
-        );
-        assert.deepStrictEqual(
-          completed?.type === "turn.completed" && completed.payload.tokenUsage,
-          {
-            usageStatus: "complete",
-            usageScope: "main_agent",
-            inputTokens: 15_000,
-            cachedInputTokens: 12_000,
-            cacheCreationTokens: 500,
-            outputTokens: 700,
-            hasSubagents: false,
-          },
-        );
+          const [usage, completed] = Array.from(yield* Fiber.join(eventsFiber));
+          assert.deepStrictEqual(
+            usage?.type === "thread.token-usage.updated" && usage.turnId,
+            turn.turnId,
+          );
+          assert.deepStrictEqual(
+            usage?.type === "thread.token-usage.updated" && usage.payload.usage,
+            {
+              usedTokens: 15_700,
+              // No model pinned in Bob's settings: the router's usual `premium-ide` window.
+              maxTokens: 270_000,
+              totalProcessedTokens: 26_200,
+              inputTokens: 25_000,
+              cachedInputTokens: 20_000,
+              outputTokens: 1_200,
+              lastInputTokens: 15_000,
+              lastCachedInputTokens: 12_000,
+              lastOutputTokens: 700,
+              cost: { amount: 0.118, unit: "Bobcoins" },
+            },
+          );
+          assert.deepStrictEqual(
+            completed?.type === "turn.completed" && completed.payload.tokenUsage,
+            {
+              usageStatus: "complete",
+              usageScope: "main_agent",
+              inputTokens: 15_000,
+              cachedInputTokens: 12_000,
+              cacheCreationTokens: 500,
+              outputTokens: 700,
+              hasSubagents: false,
+            },
+          );
 
-        yield* adapter.stopSession(threadId);
-      }),
+          yield* adapter.stopSession(threadId);
+        }),
+      // A home without Bob settings, so the test never reads the developer's `~/.bob`.
+      { authMethod: "sso", environment: { ...process.env, HOME: "/nonexistent-t3code-bob-home" } },
     ),
   );
 });

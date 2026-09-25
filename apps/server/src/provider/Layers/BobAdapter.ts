@@ -79,12 +79,14 @@ import {
 import { type BobAdapterShape } from "../Services/BobAdapter.ts";
 import {
   type BobTaskCosts,
+  bobContextWindow,
   bobThreadTokenUsage,
   bobTurnTokenUsage,
   readBobTaskCosts,
   resolveBobTaskDatabasePath,
   sameBobTaskCosts,
 } from "./bobTaskUsage.ts";
+import { readBobConfiguredModel } from "./bobUsageLimits.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const isAcpError = Schema.is(EffectAcpErrors.AcpError);
@@ -164,6 +166,8 @@ interface BobSessionContext {
   /** The latest reading of the task's running totals, and the one when the turn began. */
   taskCosts: BobTaskCosts | undefined;
   turnStartTaskCosts: BobTaskCosts | undefined;
+  /** The session's likely context window, fixed at start as Bob fixes its model. */
+  readonly contextWindow: number | undefined;
   stopped: boolean;
 }
 
@@ -703,6 +707,13 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
           // The baseline for the first turn's usage, which matters on resume.
           const taskCosts = yield* readBobTaskCosts(taskDatabasePath, started.sessionId);
+          // Bob reads its model setting when a session starts, so the window is fixed per session.
+          const contextWindow = bobContextWindow(
+            yield* readBobConfiguredModel(options?.environment ?? process.env).pipe(
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+            ),
+          );
           const now = yield* nowIso;
           const session: ProviderSession = {
             provider: PROVIDER,
@@ -737,6 +748,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             interrupts: 0,
             taskCosts,
             turnStartTaskCosts: taskCosts,
+            contextWindow,
             stopped: false,
           };
 
@@ -1043,7 +1055,9 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 provider: PROVIDER,
                 threadId: input.threadId,
                 turnId,
-                payload: { usage: bobThreadTokenUsage(taskCosts, previousTaskCosts) },
+                payload: {
+                  usage: bobThreadTokenUsage(taskCosts, previousTaskCosts, ctx.contextWindow),
+                },
               });
             }
           }
