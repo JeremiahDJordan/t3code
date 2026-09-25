@@ -187,8 +187,6 @@ interface BobSessionContext {
   /** The latest reading of the task's running totals, and the one when the turn began. */
   taskCosts: BobTaskCosts | undefined;
   turnStartTaskCosts: BobTaskCosts | undefined;
-  /** The session's likely context window, fixed at start as Bob fixes its model. */
-  readonly contextWindow: number | undefined;
   /** Whether this Bob closes sessions with `session/close` (Bob 2.0.5). */
   readonly canCloseSessions: boolean;
   stopped: boolean;
@@ -853,13 +851,6 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
           // The baseline for the first turn's usage, which matters on resume.
           const taskCosts = yield* readBobTaskCosts(taskDatabasePath, started.sessionId);
-          // Bob reads its model setting when a session starts, so the window is fixed per session.
-          const contextWindow = bobContextWindow(
-            yield* readBobConfiguredModel(options?.environment ?? process.env).pipe(
-              Effect.provideService(FileSystem.FileSystem, fileSystem),
-              Effect.provideService(Path.Path, path),
-            ),
-          );
           const now = yield* nowIso;
           const session: ProviderSession = {
             provider: PROVIDER,
@@ -895,7 +886,6 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             interrupts: 0,
             taskCosts,
             turnStartTaskCosts: taskCosts,
-            contextWindow,
             canCloseSessions:
               started.initializeResult.agentCapabilities?.sessionCapabilities?.close != null,
             stopped: false,
@@ -1236,7 +1226,17 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 threadId: input.threadId,
                 turnId,
                 payload: {
-                  usage: bobThreadTokenUsage(taskCosts, previousTaskCosts, ctx.contextWindow),
+                  usage: bobThreadTokenUsage(
+                    taskCosts,
+                    previousTaskCosts,
+                    // Bob reads its model setting on every turn, so the window follows it.
+                    bobContextWindow(
+                      yield* readBobConfiguredModel(options?.environment ?? process.env).pipe(
+                        Effect.provideService(FileSystem.FileSystem, fileSystem),
+                        Effect.provideService(Path.Path, path),
+                      ),
+                    ),
+                  ),
                 },
               });
               yield* refreshUsageLimitsInBackground(ctx.cwd, true);
