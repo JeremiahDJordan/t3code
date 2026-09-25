@@ -28,8 +28,8 @@ don't reopen them without new information. Add to it when a decision changes.
 
 ## Decisions
 
-Owner decisions, with the review that prompted them. "Review 1" and "review 2" are
-the adversarial reviews of 2026-09-24 and 2026-09-25.
+Owner decisions, with the review that prompted them. Reviews 1, 2 and 3 are the
+adversarial reviews of 2026-09-24, and of the morning and afternoon of 2026-09-25.
 
 ### Keep Bob out of the marketing site (`apps/marketing`)
 
@@ -114,6 +114,21 @@ The row also shows when this fork's client views an upstream server. Upstream
 servers ignore the unknown settings key, so the row does nothing there; gating it
 would need a server capability check for one row.
 
+### Keep workspace keys as the server gives them (review 3)
+
+Bob's catalog keys a workspace by the exact folder string, while clients compare
+folders normalized. Normalizing the catalog's keys would break the registry's
+exact-match check for a folder it already refreshed, so it would refresh that
+folder, and read the gateway for a pinned team, on every turn start. Server-side
+folders are already resolved, so the duplicate-slot case does not occur today.
+Revisit if the registry starts passing unnormalized folders.
+
+### Accept one turn at the router's window after an unreadable settings file (review 3)
+
+If Bob's settings file cannot be read when a turn's usage is reported, that turn's
+meter uses the router default's window. It corrects itself on the next turn, and
+the outgrown-window guard prevents a false red ring.
+
 ### Leave the remaining nits
 
 A project-only custom mode appears in every project's Mode list (it warns and runs
@@ -146,7 +161,11 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   the Bob candidate and thread branches, and `bobTasksInThreads`.
 - Registration: `builtInDrivers.ts`, `providerStatusCache.ts`, `serverSettings.ts`,
   `model-manifest.json`, and in contracts `settings.ts` (`BobSettings`,
-  `bobUsageInUpstreamClients`) and `model.ts`.
+  `bobUsageInUpstreamClients`, and `UPSTREAM_USAGE_PROVIDERS`, which the settings
+  choices and the compatibility test derive from) and `model.ts`.
+- `apps/server/src/provider/Layers/bobDatabase.ts`: the one read-only helper all three
+  Bob readers share. Dropping its busy timeout degrades usage, import and the Usage
+  page at once.
 - Clients: web `providerDriverMeta.ts`, `Icons.tsx`, `providerIconUtils.ts`,
   `usageProviders.ts`, `WelcomeWizard.tsx` (the Bob icon column); mobile
   `ProviderIcon.tsx`, `usageProviders.ts`, `UsageLimitsPooled.tsx` (`DRIVER_LABEL`).
@@ -154,7 +173,7 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
 **Conflict hazards:** `ws.ts` around `makeWsRpcLayer`'s parameters; the scanner's
 already-imported/duplicate helpers, which both the transcript and Bob paths use (port
 an upstream change there into both); `ContextWindowMeter.tsx`; the `UsagePage.tsx` day
-table.
+table; `UsageProviderSettings.tsx`, whose Bob row always renders among upstream's rows.
 
 **After each rebase:**
 
