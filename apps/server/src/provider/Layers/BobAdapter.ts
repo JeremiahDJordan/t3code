@@ -243,6 +243,11 @@ function resolveBobModeId(
  * with an agent that does not advertise it, the only `session/resume` error it raises without
  * an `operation`. A resume that times out or breaks off may still have a task behind it, so it
  * fails the start rather than replacing the task.
+ *
+ * The transport-error check relies on those two error sites: the refusal in
+ * `AcpSessionRuntime.ts` (`sessionCapabilities?.resume` missing, no `operation`) and the
+ * timeout from effect-acp's call, which carries `operation: "call-rpc"`. Recheck both when
+ * either changes upstream.
  */
 function isBobResumeUnavailable(error: EffectAcpErrors.AcpError): boolean {
   return (
@@ -717,6 +722,17 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               ),
             );
 
+          // Every Bob for this thread, including one that moves its task, runs with the same
+          // environment, so a device environment that sets HOME opens the same Bob.
+          const bobEnvironment =
+            options?.environment || mcpSession?.agentDeviceEnvironment
+              ? {
+                  environment: McpProviderSession.withAgentDeviceEnvironment(
+                    options?.environment ?? process.env,
+                    mcpSession,
+                  ),
+                }
+              : {};
           // Each attempt owns its Bob process, which stops unless the session takes it.
           let transferredScope: Scope.Closeable | undefined;
           const openBob = (resumeSessionId: string | undefined) =>
@@ -727,14 +743,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               );
               const acp = yield* makeBobAcpRuntime({
                 bobSettings,
-                ...(options?.environment || mcpSession?.agentDeviceEnvironment
-                  ? {
-                      environment: McpProviderSession.withAgentDeviceEnvironment(
-                        options?.environment ?? process.env,
-                        mcpSession,
-                      ),
-                    }
-                  : {}),
+                ...bobEnvironment,
                 childProcessSpawner,
                 cwd,
                 runtimeMode: input.runtimeMode,
@@ -790,7 +799,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               Effect.gen(function* () {
                 const mover = yield* makeBobAcpRuntime({
                   bobSettings,
-                  ...(options?.environment ? { environment: options.environment } : {}),
+                  ...bobEnvironment,
                   childProcessSpawner,
                   cwd,
                   clientInfo: { name: "t3-code", version: "0.0.0" },
