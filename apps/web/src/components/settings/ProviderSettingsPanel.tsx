@@ -1123,14 +1123,7 @@ export function EnvironmentProviderSettings({
         environmentLabel={environmentLabel}
         sources={settings.usageLimitSources}
         cursorKeychainUsageEnabled={settings.cursorKeychainUsageEnabled}
-        bobUsageInUpstreamClients={
-          settings.providers.bob.enabled ||
-          Object.values(settings.providerInstances ?? {}).some(
-            (instance) => instance.driver === "bob",
-          )
-            ? settings.bobUsageInUpstreamClients
-            : undefined
-        }
+        bobUsageInUpstreamClients={settings.bobUsageInUpstreamClients}
         readOnly={readOnly}
       />
 

@@ -1,6 +1,7 @@
 import {
   type AgentSessionScanResult,
   type EnvironmentId,
+  UPSTREAM_USAGE_PROVIDERS,
   USAGE_CONTRACT_VERSION,
   UsageBucket,
   type UsageDay,
@@ -20,14 +21,7 @@ import {
 } from "./upstreamClientCompatibility.ts";
 
 /** The summary as upstream clients decode it: their provider lists end before Bob. */
-const UpstreamProvider = Schema.Literals([
-  "claude",
-  "codex",
-  "grok",
-  "cursor",
-  "opencode",
-  "antigravity",
-]);
+const UpstreamProvider = Schema.Literals(UPSTREAM_USAGE_PROVIDERS);
 const decodeInUpstreamClient = Schema.decodeUnknownExit(
   Schema.Struct({
     ...UsageSummary.fields,
