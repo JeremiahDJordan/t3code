@@ -26,6 +26,7 @@ import * as Stream from "effect/Stream";
 
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { bobResumeCursorTaskId, makeBobResumeCursor } from "../provider/Layers/bobTaskHistory.ts";
 import * as ProviderSessionDirectory from "../provider/Services/ProviderSessionDirectory.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 
@@ -64,6 +65,35 @@ class AgentSessionThreadModifiedError extends Schema.TaggedError<AgentSessionThr
   override get message(): string {
     return `Imported thread '${this.threadId}' changed before its history import completed.`;
   }
+}
+
+/** The cursor each provider resumes an imported session from. */
+function importedResumeCursor(thread: AgentSessionScanner.AgentSessionThread, threadId: ThreadId) {
+  switch (thread.source) {
+    case "codex":
+      return { threadId: thread.providerSessionId };
+    case "claudeAgent":
+      return { threadId, resume: thread.providerSessionId };
+    case "bob":
+      return makeBobResumeCursor(thread.providerSessionId);
+  }
+}
+
+/**
+ * Bob tasks that back a T3 thread other than their own import. T3 started or
+ * continued them there, so importing them would duplicate that thread.
+ */
+function bobTasksInThreads(
+  bindings: ReadonlyArray<ProviderSessionDirectory.ProviderRuntimeBinding>,
+): ReadonlySet<string> {
+  const taskIds = new Set<string>();
+  for (const binding of bindings) {
+    const taskId = binding.provider === "bob" ? bobResumeCursorTaskId(binding.resumeCursor) : "";
+    if (taskId && binding.threadId !== `import:${binding.providerInstanceId}:${taskId}`) {
+      taskIds.add(taskId);
+    }
+  }
+  return taskIds;
 }
 
 function hasImportedHistory(thread: OrchestrationThread): boolean {
@@ -129,9 +159,15 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
     .pipe(
       Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
     );
+  const bindings = yield* directory
+    .listBindings()
+    .pipe(
+      Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
+    );
   const threads = scanner.recentThreads(
     workspaceRoot,
     completedSources.map((entry) => entry.source),
+    bobTasksInThreads(bindings),
   );
   const importedThreadIds = new Set<ThreadId>();
   let importedCount = 0;
@@ -231,10 +267,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
               providerInstanceId: thread.providerInstanceId,
               status: "stopped",
               runtimeMode: DEFAULT_RUNTIME_MODE,
-              resumeCursor:
-                thread.source === "codex"
-                  ? { threadId: thread.providerSessionId }
-                  : { threadId, resume: thread.providerSessionId },
+              resumeCursor: importedResumeCursor(thread, threadId),
               runtimePayload: { cwd: workspaceRoot },
             },
             { onConflict: "ignore" },
