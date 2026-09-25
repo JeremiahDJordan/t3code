@@ -3106,6 +3106,12 @@ export default function ChatView(props: ChatViewProps) {
   // during a reconnect; the panel then stays hidden rather than being dropped.
   // A pending approval or question is part of the key: once it is answered,
   // from this client or any other, the agent resumes and spends quota.
+  const gitCwd = activeProject
+    ? projectScriptCwd({
+        project: { cwd: activeProject.workspaceRoot },
+        worktreePath: activeThread?.worktreePath ?? null,
+      })
+    : null;
   const usageLimitsKey =
     activeProviderInstanceId === null || (isServerThread && activeThread === undefined)
       ? null
@@ -3135,10 +3141,12 @@ export default function ChatView(props: ChatViewProps) {
             providerStatuses,
             usageLimitSources,
             usageLimitsPanel.now,
+            gitCwd,
           )
         : null,
     [
       activeProviderInstanceId,
+      gitCwd,
       providerStatuses,
       usageLimitSources,
       usageLimitsKey,
@@ -3173,6 +3181,7 @@ export default function ChatView(props: ChatViewProps) {
             providerStatuses,
             usageLimitSources,
             now,
+            gitCwd,
           )
         : null;
     if (report && usageLimitsKey !== null) {
@@ -3184,6 +3193,7 @@ export default function ChatView(props: ChatViewProps) {
     return false;
   }, [
     activeProviderInstanceId,
+    gitCwd,
     providerStatuses,
     routeThreadKey,
     usageLimitSources,
@@ -3642,12 +3652,6 @@ export default function ChatView(props: ChatViewProps) {
     panelAnimationDurationMs,
   );
 
-  const gitCwd = activeProject
-    ? projectScriptCwd({
-        project: { cwd: activeProject.workspaceRoot },
-        worktreePath: activeThread?.worktreePath ?? null,
-      })
-    : null;
   const gitStatusCwd = activeThread?.worktreePath ?? gitCwd;
   const gitStatusQuery = useEnvironmentQuery(
     gitStatusCwd === null

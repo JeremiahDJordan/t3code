@@ -10,7 +10,9 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import {
   readBobConfiguredModel,
   BOB_SSO_REFRESH_MESSAGE,
+  bobPinnedTeamUsage,
   bobProfileToUsage,
+  readBobPinnedTeams,
   readBobUsageLimits,
 } from "./bobUsageLimits.ts";
 
@@ -37,6 +39,7 @@ const profile = {
     { instance_id: "empty", plan_name: "no teams", teams: [] },
     {
       instance_id: "instance-1",
+      subscription_id: "subscription-1",
       plan_id: "ibm_bob_trial",
       plan_name: "trial plan",
       teams: [
@@ -83,6 +86,42 @@ describe("bobProfileToUsage", () => {
       usageLimits: { checkedAt, windows: [], unavailable: { reason: "unsupported" } },
     });
   });
+});
+
+describe("bobPinnedTeamUsage", () => {
+  it("follows the first pinned team the user belongs to, named by its subscription", () => {
+    expect(
+      bobPinnedTeamUsage(
+        profile,
+        ["subscription-9:team-1", "subscription-1:team-2", "subscription-1:team-1"],
+        checkedAt,
+      )?.usageLimits.windows[0]?.usedPercent,
+    ).toBe(75);
+    // Pins name the subscription, not the instance id Bob's last pick uses.
+    expect(bobPinnedTeamUsage(profile, ["instance-1:team-2"], checkedAt)).toBeUndefined();
+    expect(bobPinnedTeamUsage(profile, [], checkedAt)).toBeUndefined();
+  });
+});
+
+it.layer(NodeServices.layer)("readBobPinnedTeams", (it) => {
+  it.effect("reads the teams a folder pins in its Bob settings", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const folder = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-bob-pins-" });
+      expect(yield* readBobPinnedTeams(folder)).toEqual([]);
+
+      yield* fs.makeDirectory(NodePath.join(folder, ".bob"));
+      const settings = NodePath.join(folder, ".bob", "settings.json");
+      yield* fs.writeFileString(
+        settings,
+        JSON.stringify({ session: { pinnedTeams: ["sub-1:team-1", 7, " sub-2:team-2 "] } }),
+      );
+      expect(yield* readBobPinnedTeams(folder)).toEqual(["sub-1:team-1", "sub-2:team-2"]);
+
+      yield* fs.writeFileString(settings, "not json");
+      expect(yield* readBobPinnedTeams(folder)).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
 });
 
 it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {

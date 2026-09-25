@@ -135,6 +135,8 @@ const BobProfile = Schema.Struct({
       Schema.Array(
         Schema.Struct({
           instance_id: OptionalString,
+          /** Pinned teams name the instance by its subscription. */
+          subscription_id: OptionalString,
           plan_id: OptionalString,
           plan_name: OptionalString,
           teams: Schema.optional(
@@ -162,23 +164,32 @@ export interface BobUsage {
   readonly plan?: string;
 }
 
-/**
- * Maps `/admin/v1/profile` to the monthly Bobcoin window of the profile Bob
- * uses: the one last picked in Bob, else the first team of the first instance.
- */
-export function bobProfileToUsage(
-  profile: typeof BobProfile.Type,
-  activeProfileId: string | undefined,
+type BobProfileInstance = NonNullable<(typeof BobProfile.Type)["instances"]>[number];
+type BobProfileTeam = NonNullable<BobProfileInstance["teams"]>[number];
+
+/** Each team in `/admin/v1/profile`, with the ids Bob picks it by. */
+function bobProfileTeams(profile: typeof BobProfile.Type) {
+  return (profile.instances ?? []).flatMap((instance) =>
+    (instance.teams ?? []).map((team) => {
+      const teamId = team.id?.trim() || "default";
+      const subscriptionId = instance.subscription_id?.trim();
+      return {
+        /** How Bob names the team it last picked: `<instance>:<team>`. */
+        profileId: `${instance.instance_id?.trim() || "default"}:${teamId}`,
+        /** How a folder pins the team: `<subscription>:<team>`. */
+        pinId: subscriptionId ? `${subscriptionId}:${teamId}` : undefined,
+        instance,
+        team,
+      };
+    }),
+  );
+}
+
+/** The monthly Bobcoin window of one team, and its instance's plan. */
+function bobTeamUsage(
+  selected: { readonly instance: BobProfileInstance; readonly team: BobProfileTeam } | undefined,
   checkedAt: string,
 ): BobUsage {
-  const profiles = (profile.instances ?? []).flatMap((instance) =>
-    (instance.teams ?? []).map((team) => ({
-      id: `${instance.instance_id?.trim() || "default"}:${team.id?.trim() || "default"}`,
-      instance,
-      team,
-    })),
-  );
-  const selected = profiles.find((entry) => entry.id === activeProfileId) ?? profiles[0];
   if (!selected) {
     return { usageLimits: makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" }) };
   }
@@ -211,14 +222,89 @@ export function bobProfileToUsage(
 }
 
 /**
- * Reads the monthly Bobcoin budget from Bob's gateway with the credential the
+ * Maps `/admin/v1/profile` to the monthly Bobcoin window of the profile Bob
+ * uses: the one last picked in Bob, else the first team of the first instance.
+ */
+export function bobProfileToUsage(
+  profile: typeof BobProfile.Type,
+  activeProfileId: string | undefined,
+  checkedAt: string,
+): BobUsage {
+  const teams = bobProfileTeams(profile);
+  return bobTeamUsage(
+    teams.find((entry) => entry.profileId === activeProfileId) ?? teams[0],
+    checkedAt,
+  );
+}
+
+/**
+ * The monthly Bobcoin window of the first of a folder's pinned teams (`<subscription>:<team>`)
+ * the profile lists, which is the team Bob bills work in that folder to. Undefined when the
+ * folder pins none of the user's teams.
+ */
+export function bobPinnedTeamUsage(
+  profile: typeof BobProfile.Type,
+  pinnedTeams: ReadonlyArray<string>,
+  checkedAt: string,
+): BobUsage | undefined {
+  const teams = bobProfileTeams(profile);
+  for (const pinned of pinnedTeams) {
+    const team = teams.find((entry) => entry.pinId === pinned);
+    if (team) return bobTeamUsage(team, checkedAt);
+  }
+  return undefined;
+}
+
+/** Bob's usage as its gateway reported it, for the default team and any pinned one. */
+export interface BobUsageProfile {
+  /** The team Bob uses where a folder pins none. */
+  readonly usage: BobUsage;
+  /** The team a folder's pins select, or undefined to use `usage`. */
+  readonly pinnedTeamUsage: (pinnedTeams: ReadonlyArray<string>) => BobUsage | undefined;
+}
+
+// A folder's `.bob/settings.json` is a JSON object; only `session.pinnedTeams` is read.
+const decodeBobWorkspaceSettings = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      session: Schema.optional(
+        Schema.Struct({ pinnedTeams: Schema.optional(Schema.Array(Schema.Unknown)) }),
+      ),
+    }),
+  ),
+);
+
+/**
+ * The teams a folder pins in its Bob settings (`<folder>/.bob/settings.json`,
+ * `session.pinnedTeams`), in Bob's order. Bob IDE writes these; Bob Shell honours them in
+ * trusted folders, which T3's folders are. Empty when none are pinned or the file is unreadable.
+ */
+export const readBobPinnedTeams = Effect.fn("readBobPinnedTeams")(function* (cwd: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const text = yield* fs
+    .readFileString(path.join(cwd, ".bob", "settings.json"))
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const settings = text === undefined ? Option.none() : decodeBobWorkspaceSettings(text);
+  if (Option.isNone(settings)) return [];
+  return (settings.value.session?.pinnedTeams ?? []).flatMap((team) =>
+    typeof team === "string" && team.trim() ? [team.trim()] : [],
+  );
+});
+
+/**
+ * Reads the monthly Bobcoin budgets from Bob's gateway with the credential the
  * instance signs in with. An expired SSO token is reported without a request,
  * because only Bob may renew it.
  */
-export const readBobUsageLimits = Effect.fn("readBobUsageLimits")(function* (
+export const readBobUsageProfile = Effect.fn("readBobUsageProfile")(function* (
   authMethod: BobAuthMethod,
   environment: NodeJS.ProcessEnv = process.env,
-): Effect.fn.Return<BobUsage, never, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path> {
+): Effect.fn.Return<
+  BobUsageProfile,
+  never,
+  FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+> {
   const now = yield* DateTime.now;
   const checkedAt = DateTime.formatIso(now);
   return yield* Effect.gen(function* () {
@@ -235,13 +321,13 @@ export const readBobUsageLimits = Effect.fn("readBobUsageLimits")(function* (
       }
     }
     if (!authorization) {
-      return {
+      return withoutPinnedTeams({
         usageLimits: makeUnavailableUsageLimits({
           checkedAt,
           reason: "probeFailed",
           message: authMethod === "apiKey" ? BOB_API_KEY_REQUIRED_MESSAGE : BOB_SSO_REFRESH_MESSAGE,
         }),
-      } satisfies BobUsage;
+      });
     }
     const gatewayUrl = normalizeBobGatewayUrl(yield* resolveBobGatewayUrl(environment));
     const client = yield* HttpClient.HttpClient;
@@ -253,15 +339,31 @@ export const readBobUsageLimits = Effect.fn("readBobUsageLimits")(function* (
     const body = yield* HttpClientResponse.schemaBodyJson(BobProfile)(
       yield* HttpClientResponse.filterStatusOk(response),
     );
-    return bobProfileToUsage(body, activeProfileId, checkedAt);
+    return {
+      usage: bobProfileToUsage(body, activeProfileId, checkedAt),
+      pinnedTeamUsage: (pinnedTeams) => bobPinnedTeamUsage(body, pinnedTeams, checkedAt),
+    } satisfies BobUsageProfile;
   }).pipe(
     Effect.timeout("10 seconds"),
-    Effect.orElseSucceed(() => ({
-      usageLimits: makeUnavailableUsageLimits({
-        checkedAt,
-        reason: "probeFailed",
-        message: "Bob could not read usage limits.",
+    Effect.orElseSucceed(() =>
+      withoutPinnedTeams({
+        usageLimits: makeUnavailableUsageLimits({
+          checkedAt,
+          reason: "probeFailed",
+          message: "Bob could not read usage limits.",
+        }),
       }),
-    })),
+    ),
   );
 });
+
+/** Usage read without a profile, which says nothing about pinned teams. */
+function withoutPinnedTeams(usage: BobUsage): BobUsageProfile {
+  return { usage, pinnedTeamUsage: () => undefined };
+}
+
+/** The monthly Bobcoin budget of the team Bob uses where a folder pins none. */
+export const readBobUsageLimits = (
+  authMethod: BobAuthMethod,
+  environment: NodeJS.ProcessEnv = process.env,
+) => readBobUsageProfile(authMethod, environment).pipe(Effect.map((profile) => profile.usage));

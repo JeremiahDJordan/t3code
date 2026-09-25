@@ -140,6 +140,7 @@ const withMockBob = <A, E, R>(
     readonly environment?: NodeJS.ProcessEnv;
     readonly onAvailableCommands?: BobAdapterLiveOptions["onAvailableCommands"];
     readonly onAvailableModes?: BobAdapterLiveOptions["onAvailableModes"];
+    readonly refreshUsageLimits?: BobAdapterLiveOptions["refreshUsageLimits"];
     readonly nativeEventLogger?: EventNdjsonLogger;
   },
 ) =>
@@ -163,6 +164,9 @@ const withMockBob = <A, E, R>(
           ? { onAvailableCommands: instance.onAvailableCommands }
           : {}),
         ...(instance?.onAvailableModes ? { onAvailableModes: instance.onAvailableModes } : {}),
+        ...(instance?.refreshUsageLimits
+          ? { refreshUsageLimits: instance.refreshUsageLimits }
+          : {}),
         ...(instance?.nativeEventLogger ? { nativeEventLogger: instance.nativeEventLogger } : {}),
       },
     );
@@ -1252,6 +1256,37 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         environment: { ...process.env, BOB_API_KEY: "", BOBSHELL_API_KEY: "" },
       },
     ),
+  );
+
+  it.effect("refreshes Bob's budgets when a session starts and after a turn that spends", () =>
+    Effect.gen(function* () {
+      const refreshes = yield* Queue.unbounded<readonly [string, boolean]>();
+      yield* withMockBob(
+        { T3_ACP_BOB: "1" },
+        ({ adapter, taskDatabasePath }) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make("bob-usage-refresh");
+            const cwd = process.cwd();
+            writeBobTaskCosts(taskDatabasePath, "mock-session-1", { cost: 0.05 });
+            yield* adapter.startSession({ threadId, cwd, runtimeMode: "full-access" });
+            // A pinned team's bar is known before the first turn.
+            assert.deepStrictEqual(yield* Queue.take(refreshes), [cwd, false]);
+
+            // A turn that spends nothing leaves the bars alone.
+            yield* adapter.sendTurn({ threadId, input: "free" });
+            writeBobTaskCosts(taskDatabasePath, "mock-session-1", { cost: 0.07 });
+            yield* adapter.sendTurn({ threadId, input: "paid" });
+            assert.deepStrictEqual(yield* Queue.take(refreshes), [cwd, true]);
+            assert.equal(yield* Queue.size(refreshes), 0);
+
+            yield* adapter.stopSession(threadId);
+          }),
+        {
+          refreshUsageLimits: (cwd, spent) =>
+            Queue.offer(refreshes, [cwd, spent]).pipe(Effect.asVoid),
+        },
+      );
+    }),
   );
 
   it.effect("reports Bob's token and Bobcoin totals after a turn", () =>

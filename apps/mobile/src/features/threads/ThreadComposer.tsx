@@ -360,13 +360,14 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       props.serverConfig?.providers ?? [],
       props.serverConfig?.usageLimitSources ?? [],
       Date.now(),
+      props.projectCwd,
     );
     onShowUsageLimits(report);
     if (!report) {
       Alert.alert("Usage limits unavailable", "This provider does not currently report limits.");
     }
     return report !== null;
-  }, [currentModelSelection.instanceId, onShowUsageLimits, props.serverConfig]);
+  }, [currentModelSelection.instanceId, onShowUsageLimits, props.projectCwd, props.serverConfig]);
 
   const composerMenu = useComposerCommandMenu({
     draftMessage: props.draftMessage,
