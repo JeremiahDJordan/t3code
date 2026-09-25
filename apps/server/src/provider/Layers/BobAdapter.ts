@@ -13,6 +13,7 @@ import {
   type BobSettings,
   EventId,
   type ProviderApprovalDecision,
+  type ProviderApprovalOption,
   type ProviderInteractionMode,
   type ProviderRuntimeEvent,
   type ProviderSession,
@@ -343,6 +344,26 @@ function selectPermissionOptionId(
 }
 
 /**
+ * The answers an approval card offers for Bob's request: only the ones Bob can take, so
+ * "Always allow this session" appears only when Bob offers to remember the tool. Labels and
+ * order are the card's defaults.
+ */
+export function bobApprovalOptions(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): ReadonlyArray<ProviderApprovalOption> {
+  const offers = (kind: EffectAcpSchema.PermissionOptionKind) =>
+    request.options.some((option) => option.kind === kind && option.optionId.trim());
+  return [
+    { decision: "cancel", label: "Cancel" },
+    ...(offers("reject_once") ? [{ decision: "decline" as const, label: "Decline" }] : []),
+    ...(offers("allow_always")
+      ? [{ decision: "acceptForSession" as const, label: "Always allow this session" }]
+      : []),
+    ...(offers("allow_once") ? [{ decision: "accept" as const, label: "Approve" }] : []),
+  ];
+}
+
+/**
  * Builds the adapter for one Bob instance. Each thread gets its own `bob acp` process, whose
  * ACP events become T3's runtime events.
  */
@@ -655,6 +676,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                   turnId: ctx?.activeTurnId,
                   requestId: runtimeRequestId,
                   permissionRequest,
+                  approvalOptions: bobApprovalOptions(params),
                   detail:
                     bobPermissionDetail(params, permissionRequest.detail) ??
                     encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
