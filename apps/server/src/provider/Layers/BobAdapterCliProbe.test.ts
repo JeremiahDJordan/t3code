@@ -153,6 +153,13 @@ describe.runIf(process.env.T3_BOB_ACP_PROBE === "1")("Bob adapter against a real
           });
           const request = yield* Fiber.join(yield* opened);
           assert.isTrue(request._tag === "Some" && request.value.type === "request.opened");
+          // Bob offers to remember a tool, so the card's "Always allow this session" is real.
+          assert.include(
+            request._tag === "Some" && request.value.type === "request.opened"
+              ? (request.value.payload.options ?? []).map((option) => option.decision)
+              : [],
+            "acceptForSession",
+          );
           if (request._tag === "Some" && request.value.requestId) {
             yield* adapter.respondToRequest(
               threadId,
