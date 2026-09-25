@@ -26,6 +26,42 @@ don't reopen them without new information. Add to it when a decision changes.
   That is also why the usage contract keeps upstream's version number instead of
   bumping it: `bob` and `credits` only reach clients that asked for them.
 
+## Install from source
+
+The fork publishes no builds, so everyone builds this branch. You need git, Node 24,
+[Vite+](README.md#install-vp), and Bob Shell 2.0.5 or later on the machine that runs
+the server. The desktop app also needs stable Rust (`rustup`, or `mise install
+rust@stable` and prefix the build with `mise exec rust@stable --`).
+
+```bash
+git clone -b bob-shell https://github.com/JeremiahDJordan/t3code.git
+cd t3code
+cp .env.example .env  # T3 Connect's public configuration; skip it to leave T3 Connect off
+vp i
+```
+
+**Desktop app (macOS, Apple silicon).** `vp run dist:desktop:dmg:arm64` builds
+`release/T3-Code-<version>-arm64.dmg` in a few minutes. Open it and drag T3 Code
+(Alpha) to Applications. The app is ad-hoc signed; on the Mac that built it, macOS
+opens it without a prompt. A copy downloaded or sent to another Mac is quarantined and
+needs **Open Anyway** in System Settings → Privacy & Security the first time.
+
+**Server only (Linux, or a Mac without the desktop app).** `vp run --filter t3 build`,
+then start `node apps/server/dist/bin.mjs serve` in a project folder; it prints a
+pairing link. Add `--host 0.0.0.0 --port 3773` to reach it from other machines. For T3
+Connect, run `node apps/server/dist/bin.mjs connect link --headless` once, approve its
+code, and restart `serve`.
+
+On a machine where Bob has never run, the first turn reports Bob's license. Run `bob`
+once in a terminal, or `bob --accept-license -p "hi"` on a headless machine.
+
+**Updating.** `git pull --rebase` (the branch is force-pushed after each upstream
+rebase), `vp i`, and rebuild. Don't use upstream's updaters: `t3 update`, the
+background service that `t3 connect` and `t3 service install` offer, and a server
+update started from a client all download upstream's release, which has no Bob. Run
+`serve` yourself, for example from your own systemd unit or launchd agent. A
+source-built desktop app has no update feed, so it never replaces itself.
+
 ## Decisions
 
 Owner decisions, with the review that prompted them. Reviews 1, 2 and 3 are the
@@ -79,6 +115,14 @@ Candidates, kept in the fork for now: the meter's count when the limit is unknow
 optional ACP `authMethodId`, and `supportsCustomModels`. Already open:
 pingdotgg/t3code#13451 (effect-acp bare JSON-RPC errors). Revisit when the owner
 decides to upstream.
+
+### Ship from source only
+
+Upstream's release workflow signs and notarizes with upstream's Apple certificate and
+publishes `t3` to npm under upstream's name, so the fork cannot reuse it, and a
+pipeline of its own costs a certificate and a package name for a few users. Everyone
+builds from this branch, as [Install from source](#install-from-source) describes.
+Revisit when people outside the owner's team use the fork.
 
 ### Keep the usage contract at upstream's version (not v7, not "6.0.1")
 
@@ -175,7 +219,8 @@ already-imported/duplicate helpers, which both the transcript and Bob paths use 
 an upstream change there into both); `ContextWindowMeter.tsx`; the `UsagePage.tsx` day
 table; `UsageProviderSettings.tsx`, whose Bob row always renders among upstream's rows.
 
-**After each rebase:**
+**After each rebase:** run `vp check` (seconds; upstream adds lint rules, and one
+flagged Bob's icon after a rebase), then the Bob tests:
 
 ```bash
 cd apps/server && vp test run src/provider/Layers/Bob src/provider/Layers/bob \
@@ -191,6 +236,16 @@ cd apps/server && vp test run src/provider/Layers/Bob src/provider/Layers/bob \
 - Live checks against a real Bob, which spend a few Bobcoins:
   `T3_BOB_ACP_PROBE=1 vp test run BobAdapterCliProbe BobAcpCliProbe`.
 
-**Known environmental failure:** `AgentSessionScanner.test.ts` "excludes sandboxes
-reached through a symlink into the worktrees dir" fails on macOS on upstream `main`
-too (`/var` resolves to `/private/var`); it is not a Bob regression.
+**Known environmental failures on macOS.** The macOS temp folder is a symlink (`/var`
+→ `/private/var`), and some upstream tests compare a temp path with its resolved
+form. In the full server suite that is 48 tests in 8 files (`ThreadSettlementReactor`,
+`AgentSessionScanner`, `CursorProvider`, `AntigravityAdapter`,
+`AntigravityInstallation`, `providerMaintenance`, `CodexDriver`, `entrypoint`), none of
+them Bob code. They pass with a resolved temp folder, and CI runs on Linux:
+
+```bash
+TMPDIR=$(cd "$TMPDIR" && pwd -P) vp test run <files>
+```
+
+`apps/desktop/scripts/verify-preload-bundle.mjs` also fails on macOS: the preload's
+macOS-only branch touches `window`, which the verifier's sandbox does not provide.
