@@ -663,6 +663,25 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("closes Bob's session with session/close when the session stops", () =>
+    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-close");
+        const session = yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.stopSession(threadId);
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.deepStrictEqual(paramsOf(requests, "session/close"), [
+          { sessionId: (session.resumeCursor as { readonly sessionId: string }).sessionId },
+        ]);
+      }),
+    ),
+  );
+
   it.effect("continues in a new Bob task when this Bob cannot resume at all", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_NO_RESUME: "1" }, ({ adapter, requestLogPath }) =>
       Effect.gen(function* () {

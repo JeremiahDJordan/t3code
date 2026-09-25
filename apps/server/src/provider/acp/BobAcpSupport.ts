@@ -28,6 +28,8 @@ const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
 /** Deleting a session only tidies Bob's history, so a stuck delete must not hold up the caller. */
 const BOB_SESSION_DELETE_TIMEOUT = "5 seconds";
+/** Closing only lets Bob tidy up before it stops, so a stuck close must not hold up the stop. */
+const BOB_SESSION_CLOSE_TIMEOUT = "5 seconds";
 
 type BobAcpRuntimeBobSettings = Pick<BobSettings, "binaryPath" | "authMethod">;
 
@@ -166,6 +168,19 @@ export const deleteBobSession = (
   runtime
     .request("session/delete", { sessionId })
     .pipe(Effect.timeoutOption(BOB_SESSION_DELETE_TIMEOUT), Effect.ignore);
+
+/**
+ * Closes a session with ACP `session/close` before its Bob stops. Bob cancels the running
+ * prompt, marks the task idle and shuts down the session's MCP servers and terminals; the task
+ * stays in Bob's history. Best effort, since a Bob that exits cleanly does the same.
+ */
+export const closeBobSession = (
+  runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
+  sessionId: string,
+): Effect.Effect<void> =>
+  runtime
+    .request("session/close", { sessionId })
+    .pipe(Effect.timeoutOption(BOB_SESSION_CLOSE_TIMEOUT), Effect.ignore);
 
 /** Starts `bob acp` in the caller's scope and returns its ACP session runtime. */
 export const makeBobAcpRuntime = (

@@ -1609,6 +1609,10 @@ const program = Effect.gen(function* () {
 
   yield* agent.handlePrompt((request) => (bobProfile ? runBobPrompt(request) : runPrompt(request)));
 
+  if (bobProfile) {
+    yield* agent.handleCloseSession(() => Effect.succeed({}));
+  }
+
   yield* agent.handleUnknownExtRequest((method, params) => {
     if (method === "_test/environment") {
       return Effect.succeed({
