@@ -471,11 +471,14 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             props.serverConfig?.providers ?? [],
             props.serverConfig?.usageLimitSources ?? [],
             usageLimitsPanel.now,
+            props.threadCwd ?? props.projectWorkspaceRoot,
           )
         : null,
     [
       props.selectedThread.modelSelection.instanceId,
+      props.projectWorkspaceRoot,
       props.serverConfig,
+      props.threadCwd,
       usageLimitsKey,
       usageLimitsPanel,
     ],

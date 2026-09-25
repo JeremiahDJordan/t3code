@@ -2,9 +2,10 @@
  * BobDriver — `ProviderDriver` for IBM Bob Shell (`bob acp`).
  *
  * Bob manages its own model and login. The status check runs `bob --version`,
- * reads the sign-in the instance uses, and then the monthly Bobcoin budget. Slash
- * commands come from Bob's sessions, per workspace, and the version notice from
- * the release IBM publishes.
+ * reads the sign-in the instance uses, and then the monthly Bobcoin budget, which
+ * is also re-read after each turn that spends Bobcoins. Slash commands, modes and
+ * a pinned team's budget come from Bob's sessions, per workspace, and the version
+ * notice from the release IBM publishes.
  *
  * @module provider/Drivers/BobDriver
  */
@@ -14,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -30,7 +32,11 @@ import {
   makeBobCommandCatalog,
 } from "../Layers/BobProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
-import { readBobUsageLimits } from "../Layers/bobUsageLimits.ts";
+import {
+  readBobPinnedTeams,
+  readBobUsageLimits,
+  readBobUsageProfile,
+} from "../Layers/bobUsageLimits.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -145,14 +151,45 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         ),
       );
 
-      const { snapshot, onAvailableCommands, onAvailableModes, snapshotForCwd } =
-        yield* makeBobCommandCatalog(managedSnapshot);
+      const {
+        snapshot,
+        onAvailableCommands,
+        onAvailableModes,
+        setWorkspaceUsageLimits,
+        snapshotForCwd,
+      } = yield* makeBobCommandCatalog(managedSnapshot);
+      // One gateway read at a time, so turns that end together don't race their bars.
+      const usageRefreshLock = yield* Semaphore.make(1);
+      /**
+       * Re-reads Bob's budgets for work in `cwd`: the instance's monthly bar and the bar of the
+       * team `cwd` pins, whose limits then show for threads there. A session start only needs
+       * the gateway when the folder pins a team; a turn that spent Bobcoins always does.
+       */
+      const refreshUsageLimits = (cwd: string, spent: boolean) =>
+        Effect.gen(function* () {
+          const pinnedTeams = yield* readBobPinnedTeams(cwd);
+          if (!spent && pinnedTeams.length === 0) {
+            return yield* setWorkspaceUsageLimits(cwd, undefined);
+          }
+          const profile = yield* readBobUsageProfile(effectiveConfig.authMethod, processEnv);
+          const { checkedAt, windows, unavailable } = profile.usage.usageLimits;
+          if (!unavailable && windows.length > 0) {
+            yield* snapshot.applyUsageLimits({ checkedAt, windows });
+          }
+          yield* setWorkspaceUsageLimits(cwd, profile.pinnedTeamUsage(pinnedTeams)?.usageLimits);
+        }).pipe(
+          usageRefreshLock.withPermit,
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
       const adapter = yield* makeBobAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
         onAvailableCommands,
         onAvailableModes,
+        refreshUsageLimits,
       });
 
       return {
