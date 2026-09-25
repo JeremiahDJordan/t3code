@@ -4,6 +4,7 @@ import {
   type ProviderOptionDescriptor,
   type ServerProvider,
   type ServerProviderAuth,
+  type ServerProviderUsageLimits,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
@@ -20,6 +21,7 @@ import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import * as Result from "effect/Result";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -34,7 +36,7 @@ import {
   bobSpawnEnvironment,
   readBobApiKey,
 } from "../acp/BobAcpSupport.ts";
-import { isBobSsoLoginExpired, readBobSsoLogin } from "./bobUsageLimits.ts";
+import { type BobUsageProfile, isBobSsoLoginExpired, readBobSsoLogin } from "./bobUsageLimits.ts";
 import { createProviderVersionAdvisory, ProviderVersionCache } from "../providerMaintenance.ts";
 import {
   COMPACT_SLASH_COMMAND,
@@ -375,6 +377,7 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
           checkedAt: DateTime.formatIso(now),
           slashCommands: slashCommands ?? existing?.slashCommands ?? [],
           skills: [],
+          ...(existing?.usageLimits ? { usageLimits: existing.usageLimits } : {}),
         };
         return [
           entry,
@@ -425,6 +428,32 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
     /** Replaces a workspace's commands with the ones a Bob session there just reported. */
     onAvailableCommands: (commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>, cwd: string) =>
       recordWorkspace(cwd, bobSlashCommands(commands)).pipe(Effect.asVoid),
+    /**
+     * Sets the limits of the team a workspace pins, or clears them so the instance's apply.
+     * Keeps the workspace like a session there would.
+     */
+    setWorkspaceUsageLimits: (cwd: string, usageLimits: ServerProviderUsageLimits | undefined) =>
+      Effect.flatMap(DateTime.now, (now) =>
+        SubscriptionRef.modifySome(workspaces, (entries) => {
+          const existing = entries.find((entry) => entry.cwd === cwd);
+          if (existing ? Equal.equals(existing.usageLimits, usageLimits) : !usageLimits) {
+            return [undefined, Option.none()] as const;
+          }
+          const entry = {
+            cwd,
+            checkedAt: existing?.checkedAt ?? DateTime.formatIso(now),
+            slashCommands: existing?.slashCommands ?? [],
+            skills: [],
+            ...(usageLimits ? { usageLimits } : {}),
+          };
+          return [
+            undefined,
+            Option.some(
+              [...entries.filter((other) => other.cwd !== cwd), entry].slice(-MAX_BOB_WORKSPACES),
+            ),
+          ] as const;
+        }),
+      ),
     /** Replaces a workspace's modes with the ones a Bob session there just offered. */
     onAvailableModes: (modes: ReadonlyArray<AcpSessionMode>, cwd: string) =>
       SubscriptionRef.modifySome(modesByWorkspace, (current) => {
@@ -434,6 +463,58 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
         return [undefined, Option.some(new Map([...next].slice(-MAX_BOB_WORKSPACES)))] as const;
       }),
   };
+});
+
+/**
+ * Re-reads Bob's budgets for folders, when a session starts in one and after a turn there
+ * spends Bobcoins (`spent`): the instance's monthly bar, and the bar of the team a folder
+ * pins. A start in a folder without a pin needs no read. Folders queue, and each read takes
+ * every folder queued so far, so turns that end together share one read. A failed read
+ * leaves every bar as it was.
+ */
+export const makeBobUsageLimitsRefresh = Effect.fn("makeBobUsageLimitsRefresh")(function* (input: {
+  readonly readProfile: Effect.Effect<BobUsageProfile>;
+  readonly readPinnedTeams: (cwd: string) => Effect.Effect<ReadonlyArray<string>>;
+  readonly applyUsageLimits: ServerProviderShape["applyUsageLimits"];
+  readonly setWorkspaceUsageLimits: (
+    cwd: string,
+    usageLimits: ServerProviderUsageLimits | undefined,
+  ) => Effect.Effect<void>;
+}) {
+  const lock = yield* Semaphore.make(1);
+  const queued = new Map<string, boolean>();
+  const readQueued = Effect.gen(function* () {
+    // Taken before the first yield, so a folder queued meanwhile waits for the next read.
+    const batch = [...queued];
+    queued.clear();
+    const folders = yield* Effect.forEach(batch, ([cwd, spent]) =>
+      input.readPinnedTeams(cwd).pipe(Effect.map((pinnedTeams) => ({ cwd, spent, pinnedTeams }))),
+    );
+    for (const folder of folders) {
+      if (!folder.spent && folder.pinnedTeams.length === 0) {
+        yield* input.setWorkspaceUsageLimits(folder.cwd, undefined);
+      }
+    }
+    const needed = folders.filter((folder) => folder.spent || folder.pinnedTeams.length > 0);
+    if (needed.length === 0) return;
+    const profile = yield* input.readProfile;
+    const { checkedAt, windows, unavailable } = profile.usage.usageLimits;
+    if (unavailable?.reason === "probeFailed") return;
+    if (!unavailable && windows.length > 0) {
+      yield* input.applyUsageLimits({ checkedAt, windows });
+    }
+    for (const folder of needed) {
+      yield* input.setWorkspaceUsageLimits(
+        folder.cwd,
+        profile.pinnedTeamUsage(folder.pinnedTeams)?.usageLimits,
+      );
+    }
+  });
+  return (cwd: string, spent: boolean) =>
+    Effect.suspend(() => {
+      queued.set(cwd, spent || queued.get(cwd) === true);
+      return lock.withPermit(readQueued);
+    });
 });
 
 /**
