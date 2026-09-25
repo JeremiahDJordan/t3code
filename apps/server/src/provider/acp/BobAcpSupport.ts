@@ -223,6 +223,11 @@ function exportedTaskInFolder(task: Record<string, unknown>, cwd: string): Recor
  * in, so a thread that moved to another folder, such as a worktree, would otherwise lose its
  * conversation. Bob copies the task with `_bob/task/export` and `_bob/task/import`; the original
  * is then deleted, so Bob's history and Bobcoin totals count the conversation once.
+ *
+ * Best effort, with two accepted gaps. The original is deleted before T3 stores the new id, so
+ * a crash in between leaves the thread pointing at a deleted task, and its next turn starts a
+ * new conversation with a warning. The timeout covers all three requests, so one that fires
+ * after the import leaves two copies of the task in Bob's history.
  */
 export const moveBobTask = (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
