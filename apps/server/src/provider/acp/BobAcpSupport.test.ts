@@ -105,6 +105,22 @@ describe("describeBobAcpSetupError", () => {
     );
   });
 
+  it("recognizes Bob's license and trust errors in another language by the flag they name", () => {
+    // Bob 2.0.5's German and Japanese translations; the flag names stay untranslated.
+    const german = EffectAcpErrors.AcpRequestError.invalidRequest(
+      "Invalid request: Eine Lizenzvereinbarung ist erforderlich. Überprüfen Sie diese mit --show-license und akzeptieren Sie sie mit --accept-license.",
+    );
+    expect(describeBobAcpSetupError(german, "sso")).toMatch(/--accept-license\. Run `bob` once/);
+    const japanese = EffectAcpErrors.AcpRequestError.invalidRequest(
+      "Invalid request: ワークスペース「/tmp/project」は信頼されていません。このACPサーバーで開かれる各ワークスペースを信頼するには --trust を渡すか、このフォルダーでBob Shellを対話的に実行して信頼レベルを選択してから、ACPチャット・セッションを再度開いてください。",
+    );
+    expect(describeBobAcpSetupError(japanese, "sso")).toMatch(/choose a trust level\.$/);
+    const japaneseLicense = EffectAcpErrors.AcpRequestError.invalidRequest(
+      "Invalid request: ライセンス契約が必要です。--show-licenseで確認し、--accept-licenseで同意してください。",
+    );
+    expect(describeBobAcpSetupError(japaneseLicense, "sso")).toMatch(/accept it\.$/);
+  });
+
   it("leaves other ACP failures to the generic mapping", () => {
     expect(
       describeBobAcpSetupError(EffectAcpErrors.AcpRequestError.invalidRequest("Bad prompt"), "sso"),
