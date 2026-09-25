@@ -68,6 +68,21 @@ const resolveBobGatewayUrl = Effect.fn("resolveBobGatewayUrl")(function* (
     : normalizeBobGatewayUrl(environment.BOB_GATEWAY_URL?.trim() || BOB_DEFAULT_GATEWAY_URL);
 });
 
+/**
+ * The model pinned by Bob's `session.model` user setting, which Bob reads when a session starts
+ * and sends instead of asking its router. Undefined when unset or unreadable.
+ */
+export const readBobConfiguredModel = Effect.fn("readBobConfiguredModel")(function* (
+  environment: NodeJS.ProcessEnv,
+) {
+  const session = (yield* readBobSettingsFile(environment, "settings.json"))?.session;
+  const model =
+    typeof session === "object" && session !== null && "model" in session
+      ? session.model
+      : undefined;
+  return typeof model === "string" && model.trim() ? model.trim() : undefined;
+});
+
 // The login is itself a JSON string in `auth-secrets.json`.
 const BobStoredLogin = Schema.Struct({
   token: Schema.String,
