@@ -46,6 +46,8 @@ import {
   formatPercent,
   formatTokens,
   formatUsageContractMismatch,
+  formatUsageCredits,
+  formatUsageSpend,
   formatUsd,
   makeWindow,
 } from "@t3tools/shared/usageFormat";
@@ -180,6 +182,17 @@ export function UsagePage() {
     [breakdown, merged.models, metric],
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
+  // Providers that bill in their own credits, by unit, such as Bob's Bobcoins. Their day and
+  // hour columns show credits, with the unit under the name; custom-priced dollars are in Total.
+  const creditUnitByProvider = useMemo(
+    () =>
+      new Map(
+        merged.providers.flatMap((totals) =>
+          totals.credits ? [[totals.provider, totals.credits.unit] as const] : [],
+        ),
+      ),
+    [merged.providers],
+  );
   const summaryRows: Array<
     | { readonly kind: "usage"; readonly provider: UsageProviderKind }
     | { readonly kind: "enable"; readonly environment: EnvironmentUsageStatus }
@@ -562,14 +575,14 @@ export function UsagePage() {
                             </span>
                             <span className="shrink-0 text-sm font-medium text-foreground tabular-nums">
                               {metric === "cost"
-                                ? formatUsd(totals?.costUsd ?? 0)
+                                ? formatUsageSpend(totals?.costUsd ?? 0, totals?.credits)
                                 : formatTokens(totals?.totalTokens ?? 0)}
                             </span>
                           </div>
                           <span className="text-xs text-muted-foreground">
                             {metric === "cost"
                               ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
-                              : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
+                              : `${formatPercent(share)} of tokens · ${formatUsageSpend(totals?.costUsd ?? 0, totals?.credits)}`}
                           </span>
                         </div>
                       );
@@ -673,7 +686,9 @@ export function UsagePage() {
                                 </span>
                               </td>
                               <td className="py-2 text-right text-foreground tabular-nums">
-                                {isModelCostUnknown(model) ? (
+                                {model.credits !== undefined ? (
+                                  formatUsageSpend(model.costUsd, model.credits)
+                                ) : isModelCostUnknown(model) ? (
                                   <span className="text-muted-foreground">Unpriced</span>
                                 ) : (
                                   formatUsd(model.costUsd)
@@ -701,11 +716,16 @@ export function UsagePage() {
                         <col style={{ width: timeValueColumnWidth }} />
                       </colgroup>
                       <thead>
-                        <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                        <tr className="border-b border-border text-left text-xs text-muted-foreground align-top">
                           <th className="py-2 font-normal">{isPast24Hours ? "Hour" : "Day"}</th>
                           {activeProviders.map((provider) => (
                             <th key={provider} className="py-2 text-right font-normal">
                               {PROVIDER_PRESENTATION[provider].label}
+                              {creditUnitByProvider.has(provider) ? (
+                                <span className="block text-2xs">
+                                  {creditUnitByProvider.get(provider)}
+                                </span>
+                              ) : null}
                             </th>
                           ))}
                           <th className="py-2 text-right font-normal">Total</th>
@@ -738,7 +758,11 @@ export function UsagePage() {
                                   key={provider}
                                   className="py-2 text-right text-muted-foreground tabular-nums"
                                 >
-                                  {formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
+                                  {creditUnitByProvider.has(provider)
+                                    ? formatUsageCredits(
+                                        period.byProvider.get(provider)?.credits?.amount ?? 0,
+                                      )
+                                    : formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
                                 </td>
                               ))}
                               <td className="py-2 text-right text-foreground tabular-nums">
