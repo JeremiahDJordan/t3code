@@ -81,6 +81,8 @@ export const appendClientConnectionParams = (
   if (connectionMethod) {
     url.searchParams.set("connectionMethod", connectionMethod);
   }
+  // This fork's clients know Bob; servers adapt Bob's entries for clients that don't say so.
+  url.searchParams.set("clientBobSupport", "1");
 };
 
 export const exchangeRemoteDpopAccessToken = Effect.fn(

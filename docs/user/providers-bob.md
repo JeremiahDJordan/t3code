@@ -60,6 +60,14 @@ messages, pull request text, branch names, and thread titles that Bob writes
 count toward the monthly allowance but not toward any thread. See
 [Usage and limits](./usage.md#track-subscription-limits).
 
+### Other T3 Code apps
+
+T3 Code apps without Bob support, such as the App Store app and app.t3.codes, still
+work with this server, but their Usage page leaves Bob out. To see Bob there, choose
+a provider you don't use in **Settings > Providers > Bob usage in other T3 Code
+apps**. Bob's history then appears as that provider, with Bobcoins shown as its
+dollars.
+
 ## Limits
 
 - Bob chooses its own model. The model picker has one Bob entry, and custom models
