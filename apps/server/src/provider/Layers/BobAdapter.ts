@@ -73,6 +73,7 @@ import {
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
+  closeBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
   setBobSessionMode,
@@ -171,6 +172,8 @@ interface BobSessionContext {
   turnStartTaskCosts: BobTaskCosts | undefined;
   /** The session's likely context window, fixed at start as Bob fixes its model. */
   readonly contextWindow: number | undefined;
+  /** Whether this Bob closes sessions with `session/close` (Bob 2.0.5). */
+  readonly canCloseSessions: boolean;
   stopped: boolean;
 }
 
@@ -545,6 +548,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         }
         // The session exit ends a turn that is still running.
         ctx.openTurn = undefined;
+        if (ctx.canCloseSessions) yield* closeBobSession(ctx.acp, ctx.sessionId);
         if (ctx.notificationFiber) {
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
@@ -780,6 +784,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             taskCosts,
             turnStartTaskCosts: taskCosts,
             contextWindow,
+            canCloseSessions:
+              started.initializeResult.agentCapabilities?.sessionCapabilities?.close != null,
             stopped: false,
           };
 
