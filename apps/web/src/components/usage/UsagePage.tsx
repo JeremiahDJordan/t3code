@@ -45,6 +45,7 @@ import {
   formatPercent,
   formatTokens,
   formatUsageContractMismatch,
+  formatUsageCredits,
   formatUsageSpend,
   formatUsd,
   makeWindow,
@@ -179,6 +180,16 @@ export function UsagePage() {
     [breakdown, merged.models, metric],
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
+  // Providers that bill in their own credits, by unit, such as Bob's Bobcoins.
+  const creditUnitByProvider = useMemo(
+    () =>
+      new Map(
+        merged.providers.flatMap((totals) =>
+          totals.credits ? [[totals.provider, totals.credits.unit] as const] : [],
+        ),
+      ),
+    [merged.providers],
+  );
   const summaryRows: Array<
     | { readonly kind: "usage"; readonly provider: UsageProviderKind }
     | { readonly kind: "enable"; readonly environment: EnvironmentUsageStatus }
@@ -688,7 +699,8 @@ export function UsagePage() {
                           <th className="py-2 font-normal">{isPast24Hours ? "Hour" : "Day"}</th>
                           {activeProviders.map((provider) => (
                             <th key={provider} className="py-2 text-right font-normal">
-                              {PROVIDER_PRESENTATION[provider].label}
+                              {creditUnitByProvider.get(provider) ??
+                                PROVIDER_PRESENTATION[provider].label}
                             </th>
                           ))}
                           <th className="py-2 text-right font-normal">Total</th>
@@ -718,12 +730,17 @@ export function UsagePage() {
                               </td>
                               {activeProviders.map((provider) => {
                                 const entry = period.byProvider.get(provider);
+                                // A credits column names its unit in the header; cells stay short.
+                                const creditsOnly =
+                                  creditUnitByProvider.has(provider) && !(entry?.costUsd ?? 0);
                                 return (
                                   <td
                                     key={provider}
                                     className="py-2 text-right text-muted-foreground tabular-nums"
                                   >
-                                    {formatUsageSpend(entry?.costUsd ?? 0, entry?.credits)}
+                                    {creditsOnly
+                                      ? formatUsageCredits(entry?.credits?.amount ?? 0)
+                                      : formatUsageSpend(entry?.costUsd ?? 0, entry?.credits)}
                                   </td>
                                 );
                               })}
