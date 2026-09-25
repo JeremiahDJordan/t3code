@@ -3028,6 +3028,19 @@ export function GeneralSettingsPanel() {
             />
           }
         />
+        <SettingsRow
+          title="Import projects and history"
+          description="Bring in projects and recent conversations from Claude Code, Codex, and Bob."
+          control={
+            <Button
+              render={<Link to="/welcome" search={{ step: "import" }} />}
+              size="sm"
+              variant="outline"
+            >
+              Import…
+            </Button>
+          }
+        />
       </SettingsSection>
 
       <SettingsSection id="confirmations" title="Confirmations">

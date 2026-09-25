@@ -10,8 +10,13 @@ import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 
 const decodeEnvironmentId = Schema.decodeOption(EnvironmentId);
 
-/** Onboarding overlays the workspace. Visiting /welcome reopens setup. */
+/**
+ * Onboarding overlays the workspace. Visiting /welcome reopens setup, and
+ * `?step=import` opens it on project import.
+ */
 export const Route = createFileRoute("/welcome")({
+  validateSearch: (raw: Record<string, unknown>): { step?: "import" } =>
+    raw.step === "import" ? { step: "import" } : {},
   beforeLoad: ({ context }) => {
     const { authGateState } = context;
     if (authGateState.status !== "authenticated" && authGateState.status !== "hosted-static") {
@@ -23,6 +28,7 @@ export const Route = createFileRoute("/welcome")({
 
 function WelcomeRouteView() {
   const { authGateState } = Route.useRouteContext();
+  const { step } = Route.useSearch();
   const navigate = useNavigate();
   const hash = useLocation({ select: (location) => location.hash });
   const resumeEnvironmentId = hash.startsWith("agents:")
@@ -43,6 +49,7 @@ function WelcomeRouteView() {
       <NoProjectsHero />
       {isWelcomeRoute && !dismissed ? (
         <WelcomeWizard
+          initialStep={step}
           localAvailable={localAvailable}
           resumeEnvironmentId={resumeEnvironmentId}
           onDone={async (projectRef) => {
