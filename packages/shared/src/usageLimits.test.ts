@@ -963,6 +963,8 @@ describe("/usage-limits", () => {
       collectProviderUsageLimits(selected.instanceId, [withFolder], [], now, cwd)?.accounts[0]
         ?.limits.windows[0]?.usedPercent;
     expect(usedIn("/pinned")).toBe(90);
+    // Clients send the folder as they have it, trailing separator included.
+    expect(usedIn("/pinned/")).toBe(90);
     expect(usedIn("/elsewhere")).toBe(window.usedPercent);
     expect(usedIn(null)).toBe(window.usedPercent);
   });
