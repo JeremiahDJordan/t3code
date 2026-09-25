@@ -67,6 +67,7 @@ import {
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import {
   type AcpSessionModeState,
+  type AcpToolCallState,
   canonicalItemTypeFromAcpToolKind,
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
@@ -151,6 +152,8 @@ interface BobSessionContext {
         interrupted: boolean;
         readonly plan: boolean;
         reply?: { readonly itemId: string | undefined; text: string };
+        /** The turn's tool calls Bob has not finished, by tool call id. */
+        readonly openTools: Map<string, AcpToolCallState>;
         /** Completes once the turn's `turn.completed` is out. */
         readonly settled: Deferred.Deferred<void>;
       }
@@ -416,13 +419,26 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
     /**
      * Emits the open turn's `turn.completed` once, whichever of its prompt or Bob's exit ends it,
-     * and returns the session to ready unless a new turn has already claimed it.
+     * and returns the session to ready unless a new turn has already claimed it. Bob leaves the
+     * tool it was running unfinished when Stop cancels it, so any tool still open ends failed.
      */
     const settleTurn = (ctx: BobSessionContext, payload: TurnCompletedPayload) =>
       Effect.gen(function* () {
         const turn = ctx.openTurn;
         if (!turn) return;
         ctx.openTurn = undefined;
+        for (const toolCall of turn.openTools.values()) {
+          yield* offerRuntimeEvent(
+            makeAcpToolCallEvent({
+              stamp: yield* makeEventStamp(),
+              provider: PROVIDER,
+              threadId: ctx.threadId,
+              turnId: turn.id,
+              toolCall: { ...toolCall, status: "failed" },
+              rawPayload: undefined,
+            }),
+          );
+        }
         if (ctx.activeTurnId === turn.id) ctx.activeTurnId = undefined;
         if (ctx.session.activeTurnId === turn.id) {
           const { activeTurnId: _settledTurnId, ...session } = ctx.session;
@@ -814,8 +830,17 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                       }),
                     );
                     return;
-                  case "ToolCallUpdated":
+                  case "ToolCallUpdated": {
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
+                    const openTools = ctx.openTurn?.openTools;
+                    if (
+                      event.toolCall.status === "completed" ||
+                      event.toolCall.status === "failed"
+                    ) {
+                      openTools?.delete(event.toolCall.toolCallId);
+                    } else {
+                      openTools?.set(event.toolCall.toolCallId, event.toolCall);
+                    }
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
                         stamp: yield* makeEventStamp(),
@@ -827,6 +852,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                       }),
                     );
                     return;
+                  }
                   case "ThoughtDelta":
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* offerRuntimeEvent(
@@ -959,6 +985,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               id: turnId,
               interrupted: false,
               plan: input.interactionMode === "plan",
+              openTools: new Map(),
               settled: yield* Deferred.make<void>(),
             };
             ctx.turnStartTaskCosts = ctx.taskCosts;
