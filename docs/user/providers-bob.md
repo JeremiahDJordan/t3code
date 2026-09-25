@@ -32,9 +32,15 @@ An IBM SSO instance ignores any `BOB_API_KEY` set in the server's own environmen
 
 T3 Code tells Bob to trust each project folder you open, and Bob remembers it, so
 you do not need to trust the folder in Bob first. After Bob has run in a project,
-its skills and MCP prompts appear in the composer's `/` menu.
+its skills and MCP prompts appear in the composer's `/` menu. When a thread moves
+to another folder, such as picking a branch that lives in another worktree, Bob
+Shell 2.0.5 or later moves the conversation with it.
 
-T3 Code's Plan mode uses Bob's plan mode. Tool approvals follow
+T3 Code's Plan mode uses Bob's plan mode. After Bob has run, the model picker's
+**Mode** option also offers Bob's Ask mode and your custom modes
+(`custom_modes.yaml`); turns use Agent mode unless you pick another. A custom mode
+from one project runs as Agent mode in projects that don't define it. Tool
+approvals follow
 [Permission modes](./permission-modes.md): **Full access** approves every Bob tool
 call, and **Auto-accept edits** approves file edits. **Supervised** asks before Bob
 acts, and so does **Auto**, since Bob has no automatic reviewer.
@@ -42,10 +48,12 @@ acts, and so does **Auto**, since Bob has no automatic reviewer.
 ## Usage
 
 **Usage → Limits** and `/usage-limits` in the composer show your Bob team's monthly
-Bobcoin allowance. If you belong to several teams, T3 Code shows the one last
-selected in Bob. On web and desktop, a thread's context meter shows the tokens and
-Bobcoins that thread has used; turn it on with **Settings > General > Legacy
-features > Context window indicator**. Bob does not report which model it runs, so
+Bobcoin allowance, updated after each turn. If you belong to several teams, T3
+Code shows the one last selected in Bob. In a project that pins a team in its
+`.bob/settings.json`, `/usage-limits` shows that team's allowance instead. On web
+and desktop, a thread's context meter shows the tokens and Bobcoins that thread
+has used; turn it on with **Settings > General > Legacy features > Context window
+indicator**. Bob does not report which model it runs, so
 the meter's limit assumes the context window of Bob's default model. Commit
 messages, pull request text, branch names, and thread titles that Bob writes count
 toward the monthly allowance but not toward any thread. See [Usage and limits](./usage.md#track-subscription-limits).
