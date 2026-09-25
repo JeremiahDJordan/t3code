@@ -339,6 +339,44 @@ describe("Bob command catalog", () => {
     }),
   );
 
+  it.effect("keeps a pinned team's limits for its workspace alongside the commands", () =>
+    Effect.gen(function* () {
+      const base = yield* makeReadyBobSnapshot;
+      const catalog = yield* makeBobCommandCatalog({
+        getSnapshot: Effect.succeed(base),
+        refresh: Effect.succeed(base),
+        streamChanges: Stream.empty,
+        resolveMaintenance: () => Effect.die("Not used"),
+        applyUsageLimits: () => Effect.void,
+      });
+      const pinned = {
+        checkedAt: "2026-09-24T10:00:00.000Z",
+        windows: [{ id: "monthly", kind: "monthly" as const, label: "Monthly", usedPercent: 75 }],
+      };
+      /** The limits the snapshot keeps for `cwd`. */
+      const limitsOf = (cwd: string) =>
+        catalog.snapshot.getSnapshot.pipe(
+          Effect.map(
+            (snapshot) =>
+              snapshot.workspaceSnapshots?.find((entry) => entry.cwd === cwd)?.usageLimits,
+          ),
+        );
+
+      // A folder without a pin adds nothing.
+      yield* catalog.setWorkspaceUsageLimits("/unpinned", undefined);
+      expect((yield* catalog.snapshot.getSnapshot).workspaceSnapshots).toBeUndefined();
+
+      yield* catalog.setWorkspaceUsageLimits("/pinned", pinned);
+      // New commands for the folder keep its limits.
+      yield* catalog.onAvailableCommands([{ name: "init", description: "" }], "/pinned");
+      expect(yield* limitsOf("/pinned")).toEqual(pinned);
+
+      // Removing the pin brings back the instance's limits.
+      yield* catalog.setWorkspaceUsageLimits("/pinned", undefined);
+      expect(yield* limitsOf("/pinned")).toBeUndefined();
+    }),
+  );
+
   it.effect("offers Bob's modes, other than Plan, as the model's Mode option", () =>
     Effect.gen(function* () {
       const base = yield* makeReadyBobSnapshot;

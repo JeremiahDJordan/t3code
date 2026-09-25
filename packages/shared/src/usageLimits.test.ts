@@ -944,6 +944,29 @@ describe("/usage-limits", () => {
     ).toBeNull();
   });
 
+  it("shows a folder's own limits, such as a pinned Bob team's, for a thread there", () => {
+    const pinnedLimits = { ...limits, windows: [{ ...window, usedPercent: 90 }] };
+    const withFolder = provider({
+      usageLimits: limits,
+      workspaceSnapshots: [
+        {
+          cwd: "/pinned",
+          checkedAt: limits.checkedAt,
+          slashCommands: [],
+          skills: [],
+          usageLimits: pinnedLimits,
+        },
+      ],
+    });
+    /** The first bar's use for a thread in `cwd`. */
+    const usedIn = (cwd: string | null) =>
+      collectProviderUsageLimits(selected.instanceId, [withFolder], [], now, cwd)?.accounts[0]
+        ?.limits.windows[0]?.usedPercent;
+    expect(usedIn("/pinned")).toBe(90);
+    expect(usedIn("/elsewhere")).toBe(window.usedPercent);
+    expect(usedIn(null)).toBe(window.usedPercent);
+  });
+
   it("surfaces source errors only for sources that carry the selected driver", () => {
     const failing = { ...sources[0]!, error: "token expired" };
     expect(

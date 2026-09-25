@@ -4,6 +4,7 @@ import {
   type ProviderOptionDescriptor,
   type ServerProvider,
   type ServerProviderAuth,
+  type ServerProviderUsageLimits,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
@@ -351,6 +352,7 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
           checkedAt: DateTime.formatIso(now),
           slashCommands: slashCommands ?? existing?.slashCommands ?? [],
           skills: [],
+          ...(existing?.usageLimits ? { usageLimits: existing.usageLimits } : {}),
         };
         return [
           entry,
@@ -401,6 +403,32 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
     /** Replaces a workspace's commands with the ones a Bob session there just reported. */
     onAvailableCommands: (commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>, cwd: string) =>
       recordWorkspace(cwd, bobSlashCommands(commands)).pipe(Effect.asVoid),
+    /**
+     * Sets the limits of the team a workspace pins, or clears them so the instance's apply.
+     * Keeps the workspace like a session there would.
+     */
+    setWorkspaceUsageLimits: (cwd: string, usageLimits: ServerProviderUsageLimits | undefined) =>
+      Effect.flatMap(DateTime.now, (now) =>
+        SubscriptionRef.modifySome(workspaces, (entries) => {
+          const existing = entries.find((entry) => entry.cwd === cwd);
+          if (existing ? Equal.equals(existing.usageLimits, usageLimits) : !usageLimits) {
+            return [undefined, Option.none()] as const;
+          }
+          const entry = {
+            cwd,
+            checkedAt: existing?.checkedAt ?? DateTime.formatIso(now),
+            slashCommands: existing?.slashCommands ?? [],
+            skills: [],
+            ...(usageLimits ? { usageLimits } : {}),
+          };
+          return [
+            undefined,
+            Option.some(
+              [...entries.filter((other) => other.cwd !== cwd), entry].slice(-MAX_BOB_WORKSPACES),
+            ),
+          ] as const;
+        }),
+      ),
     /** Replaces a workspace's modes with the ones a Bob session there just offered. */
     onAvailableModes: (modes: ReadonlyArray<AcpSessionMode>, cwd: string) =>
       SubscriptionRef.modifySome(modesByWorkspace, (current) => {
