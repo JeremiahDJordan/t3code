@@ -134,6 +134,11 @@ export interface BobAdapterLiveOptions {
     modes: ReadonlyArray<AcpSessionMode>,
     cwd: string,
   ) => Effect.Effect<void>;
+  /**
+   * Re-reads Bob's budgets for a workspace, when a session starts there and after a turn that
+   * spent Bobcoins (`spent`). Runs in the background, so a turn never waits for the gateway.
+   */
+  readonly refreshUsageLimits?: (cwd: string, spent: boolean) => Effect.Effect<void>;
 }
 
 interface PendingApproval {
@@ -142,6 +147,8 @@ interface PendingApproval {
 
 interface BobSessionContext {
   readonly threadId: ThreadId;
+  /** The folder Bob runs in. */
+  readonly cwd: string;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
@@ -382,6 +389,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
     const nativeEventLogger = options?.nativeEventLogger;
     const makeAcpNativeLoggers = yield* makeAcpNativeLoggerFactory();
     const adapterScope = yield* Effect.scope;
+    /** Starts `options.refreshUsageLimits` without waiting for the gateway. */
+    const refreshUsageLimitsInBackground = (cwd: string, spent: boolean) =>
+      options?.refreshUsageLimits
+        ? options.refreshUsageLimits(cwd, spent).pipe(Effect.forkIn(adapterScope), Effect.asVoid)
+        : Effect.void;
 
     const sessions = new Map<ThreadId, BobSessionContext>();
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
@@ -865,6 +877,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
           ctx = {
             threadId: input.threadId,
+            cwd,
             session,
             scope,
             acp,
@@ -1009,6 +1022,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           if (modeState) {
             yield* options?.onAvailableModes?.(modeState.availableModes, cwd) ?? Effect.void;
           }
+          yield* refreshUsageLimitsInBackground(cwd, false);
 
           yield* offerRuntimeEvent({
             type: "session.started",
@@ -1239,6 +1253,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                   ),
                 },
               });
+              yield* refreshUsageLimitsInBackground(ctx.cwd, true);
             }
           }
 

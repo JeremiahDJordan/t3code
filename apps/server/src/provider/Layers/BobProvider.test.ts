@@ -3,7 +3,9 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -28,6 +30,7 @@ import {
   checkBobProviderStatus,
   enrichBobSnapshot,
   makeBobCommandCatalog,
+  makeBobUsageLimitsRefresh,
   MINIMUM_BOB_VERSION,
 } from "./BobProvider.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
@@ -364,6 +367,44 @@ describe("Bob command catalog", () => {
     }),
   );
 
+  it.effect("keeps a pinned team's limits for its workspace alongside the commands", () =>
+    Effect.gen(function* () {
+      const base = yield* makeReadyBobSnapshot;
+      const catalog = yield* makeBobCommandCatalog({
+        getSnapshot: Effect.succeed(base),
+        refresh: Effect.succeed(base),
+        streamChanges: Stream.empty,
+        resolveMaintenance: () => Effect.die("Not used"),
+        applyUsageLimits: () => Effect.void,
+      });
+      const pinned = {
+        checkedAt: "2026-09-24T10:00:00.000Z",
+        windows: [{ id: "monthly", kind: "monthly" as const, label: "Monthly", usedPercent: 75 }],
+      };
+      /** The limits the snapshot keeps for `cwd`. */
+      const limitsOf = (cwd: string) =>
+        catalog.snapshot.getSnapshot.pipe(
+          Effect.map(
+            (snapshot) =>
+              snapshot.workspaceSnapshots?.find((entry) => entry.cwd === cwd)?.usageLimits,
+          ),
+        );
+
+      // A folder without a pin adds nothing.
+      yield* catalog.setWorkspaceUsageLimits("/unpinned", undefined);
+      expect((yield* catalog.snapshot.getSnapshot).workspaceSnapshots).toBeUndefined();
+
+      yield* catalog.setWorkspaceUsageLimits("/pinned", pinned);
+      // New commands for the folder keep its limits.
+      yield* catalog.onAvailableCommands([{ name: "init", description: "" }], "/pinned");
+      expect(yield* limitsOf("/pinned")).toEqual(pinned);
+
+      // Removing the pin brings back the instance's limits.
+      yield* catalog.setWorkspaceUsageLimits("/pinned", undefined);
+      expect(yield* limitsOf("/pinned")).toBeUndefined();
+    }),
+  );
+
   it.effect("offers Bob's modes, other than Plan, as the model's Mode option", () =>
     Effect.gen(function* () {
       const base = yield* makeReadyBobSnapshot;
@@ -501,5 +542,107 @@ describe("enrichBobSnapshot", () => {
           expect(requests.count).toBe(0);
         }),
     ),
+  );
+});
+
+describe("makeBobUsageLimitsRefresh", () => {
+  const checkedAt = "2026-09-25T10:00:00.000Z";
+  const monthly = (usedPercent: number) => ({
+    checkedAt,
+    windows: [{ id: "monthly", kind: "monthly" as const, label: "Monthly", usedPercent }],
+  });
+  /** A gateway answer: the default team at 10%, the pinned `sub:team` at 75%. */
+  const profile = {
+    usage: { usageLimits: monthly(10) },
+    pinnedTeamUsage: (pinnedTeams: ReadonlyArray<string>) =>
+      pinnedTeams.includes("sub:team") ? { usageLimits: monthly(75) } : undefined,
+  };
+
+  /** A refresher over fakes that records what it reads and sets. */
+  const makeHarness = (options: {
+    readonly pins: Record<string, ReadonlyArray<string>>;
+    readonly readProfile: Effect.Effect<typeof profile>;
+  }) =>
+    Effect.gen(function* () {
+      const reads: Array<string> = [];
+      const folderLimits = new Map<string, number | undefined>();
+      const instanceLimits: Array<number> = [];
+      const refresh = yield* makeBobUsageLimitsRefresh({
+        readProfile: Effect.sync(() => reads.push("profile")).pipe(
+          Effect.andThen(options.readProfile),
+        ),
+        readPinnedTeams: (cwd) => Effect.succeed(options.pins[cwd] ?? []),
+        applyUsageLimits: (update) =>
+          Effect.sync(() => {
+            instanceLimits.push(update.windows[0]?.usedPercent ?? -1);
+          }),
+        setWorkspaceUsageLimits: (cwd, usageLimits) =>
+          Effect.sync(() => {
+            folderLimits.set(cwd, usageLimits?.windows[0]?.usedPercent);
+          }),
+      });
+      return { refresh, reads, folderLimits, instanceLimits };
+    });
+
+  it.effect("shares one gateway read among turns that end together", () =>
+    Effect.gen(function* () {
+      const gate = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        pins: { "/pinned": ["sub:team"] },
+        readProfile: Deferred.await(gate).pipe(Effect.as(profile)),
+      });
+
+      const first = yield* harness.refresh("/one", true).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      const second = yield* harness.refresh("/two", true).pipe(Effect.forkChild);
+      const third = yield* harness.refresh("/pinned", true).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* Deferred.succeed(gate, undefined);
+      yield* Fiber.join(first);
+      yield* Fiber.join(second);
+      yield* Fiber.join(third);
+
+      // The first read was already out; the two queued behind it shared the next one.
+      expect(harness.reads).toEqual(["profile", "profile"]);
+      expect(harness.instanceLimits).toEqual([10, 10]);
+      expect([...harness.folderLimits]).toEqual([
+        ["/one", undefined],
+        ["/two", undefined],
+        ["/pinned", 75],
+      ]);
+    }),
+  );
+
+  it.effect("keeps every bar when the gateway read fails", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        pins: { "/pinned": ["sub:team"] },
+        readProfile: Effect.succeed({
+          usage: {
+            usageLimits: {
+              checkedAt,
+              windows: [],
+              unavailable: { reason: "probeFailed" as const },
+            },
+          },
+          pinnedTeamUsage: () => undefined,
+        }),
+      });
+      yield* harness.refresh("/pinned", true);
+
+      expect(harness.reads).toEqual(["profile"]);
+      expect(harness.instanceLimits).toEqual([]);
+      expect(harness.folderLimits.has("/pinned")).toBe(false);
+    }),
+  );
+
+  it.effect("needs no gateway read when Bob starts in a folder without a pin", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ pins: {}, readProfile: Effect.succeed(profile) });
+      yield* harness.refresh("/plain", false);
+
+      expect(harness.reads).toEqual([]);
+      expect([...harness.folderLimits]).toEqual([["/plain", undefined]]);
+    }),
   );
 });
