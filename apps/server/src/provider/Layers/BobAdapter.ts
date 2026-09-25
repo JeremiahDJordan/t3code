@@ -82,12 +82,14 @@ import {
 import { type BobAdapterShape } from "../Services/BobAdapter.ts";
 import {
   type BobTaskCosts,
+  bobContextWindow,
   bobThreadTokenUsage,
   bobTurnTokenUsage,
   readBobTaskCosts,
   resolveBobTaskDatabasePath,
   sameBobTaskCosts,
 } from "./bobTaskUsage.ts";
+import { readBobConfiguredModel } from "./bobUsageLimits.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const isAcpError = Schema.is(EffectAcpErrors.AcpError);
@@ -1132,7 +1134,19 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 provider: PROVIDER,
                 threadId: input.threadId,
                 turnId,
-                payload: { usage: bobThreadTokenUsage(taskCosts, previousTaskCosts) },
+                payload: {
+                  usage: bobThreadTokenUsage(
+                    taskCosts,
+                    previousTaskCosts,
+                    // Bob reads its model setting on every turn, so the window follows it.
+                    bobContextWindow(
+                      yield* readBobConfiguredModel(options?.environment ?? process.env).pipe(
+                        Effect.provideService(FileSystem.FileSystem, fileSystem),
+                        Effect.provideService(Path.Path, path),
+                      ),
+                    ),
+                  ),
+                },
               });
             }
           }

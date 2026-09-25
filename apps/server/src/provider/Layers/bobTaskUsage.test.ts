@@ -9,6 +9,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 import {
+  bobContextWindow,
   type BobTaskCosts,
   bobThreadTokenUsage,
   bobTurnTokenUsage,
@@ -82,6 +83,33 @@ describe("bobThreadTokenUsage", () => {
       usedTokens: 11_000,
       cost: { amount: 0.044, unit: "Bobcoins" },
     });
+  });
+});
+
+describe("bobContextWindow", () => {
+  it("assumes the router's usual model when Bob pins none", () => {
+    expect(bobContextWindow(undefined)).toBe(270_000);
+    expect(bobContextWindow("  ")).toBe(270_000);
+  });
+
+  it("uses the window of the model Bob's settings pin, and none for an unknown one", () => {
+    expect(bobContextWindow("wxO-model")).toBe(1_000_000);
+    expect(bobContextWindow("fast")).toBe(200_000);
+    expect(bobContextWindow("ultra")).toBeUndefined();
+  });
+});
+
+describe("bobThreadTokenUsage with a context window", () => {
+  it("reports the window with and without Bob's token counts", () => {
+    expect(bobThreadTokenUsage(secondTurn, firstTurn, 270_000).maxTokens).toBe(270_000);
+    expect(
+      bobThreadTokenUsage({ ...secondTurn, tokensRecorded: false }, firstTurn, 270_000),
+    ).toEqual({
+      usedTokens: 18_500,
+      maxTokens: 270_000,
+      cost: { amount: 0.118, unit: "Bobcoins" },
+    });
+    expect(bobThreadTokenUsage(secondTurn, firstTurn).maxTokens).toBeUndefined();
   });
 });
 
