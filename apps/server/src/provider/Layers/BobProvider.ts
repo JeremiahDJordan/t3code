@@ -1,6 +1,7 @@
 import {
   BOB_DEFAULT_MODEL,
   type BobSettings,
+  type ProviderOptionDescriptor,
   type ServerProvider,
   type ServerProviderAuth,
   type ServerProviderModel,
@@ -24,6 +25,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import type { AcpSessionMode } from "../acp/AcpRuntimeModel.ts";
 import {
   BOB_API_KEY_ALIAS_ENV,
   BOB_API_KEY_ENV,
@@ -224,6 +226,69 @@ export const checkBobProviderStatus = Effect.fn("checkBobProviderStatus")(functi
 /** The workspaces whose commands Bob's snapshot keeps, the registry's limit too. */
 const MAX_BOB_WORKSPACES = 16;
 
+/** The model option that picks the Bob mode a thread's turns run in. */
+export const BOB_MODE_OPTION_ID = "mode";
+/** Bob's default mode, and the one T3's Plan toggle uses, which the Mode option leaves out. */
+export const BOB_AGENT_MODE_ID = "agent";
+export const BOB_PLAN_MODE_ID = "plan";
+
+/**
+ * The Mode option for the modes Bob's sessions offered: Agent, Bob's other modes (Ask and any
+ * custom modes) but not Plan, which T3's Plan toggle selects. Undefined when there is no choice.
+ */
+function bobModeDescriptor(
+  modes: ReadonlyArray<AcpSessionMode>,
+): ProviderOptionDescriptor | undefined {
+  const agent = modes.find((mode) => mode.id === BOB_AGENT_MODE_ID);
+  const others = modes.filter(
+    (mode) => mode.id !== BOB_AGENT_MODE_ID && mode.id !== BOB_PLAN_MODE_ID,
+  );
+  if (!agent || others.length === 0) return undefined;
+  return {
+    id: BOB_MODE_OPTION_ID,
+    label: "Mode",
+    type: "select",
+    options: [agent, ...others].flatMap((mode) => {
+      const label = mode.name.trim() || mode.id;
+      const description = mode.description?.trim();
+      return [
+        {
+          id: mode.id,
+          label,
+          ...(description ? { description } : {}),
+          ...(mode.id === BOB_AGENT_MODE_ID ? { isDefault: true } : {}),
+        },
+      ];
+    }),
+    currentValue: BOB_AGENT_MODE_ID,
+  };
+}
+
+/** Each mode once, in the order the workspaces first offered them. */
+function mergeBobModes(
+  modesByWorkspace: ReadonlyMap<string, ReadonlyArray<AcpSessionMode>>,
+): ReadonlyArray<AcpSessionMode> {
+  const merged = new Map<string, AcpSessionMode>();
+  for (const modes of modesByWorkspace.values()) {
+    for (const mode of modes) if (!merged.has(mode.id)) merged.set(mode.id, mode);
+  }
+  return [...merged.values()];
+}
+
+/** Bob's models with the Mode option, when Bob's sessions offered a choice of modes. */
+function withBobModeOption(
+  models: ReadonlyArray<ServerProviderModel>,
+  modes: ReadonlyArray<AcpSessionMode>,
+): ReadonlyArray<ServerProviderModel> {
+  const descriptor = bobModeDescriptor(modes);
+  if (!descriptor) return models;
+  return models.map((model) =>
+    model.slug === BOB_DEFAULT_MODEL
+      ? { ...model, capabilities: createModelCapabilities({ optionDescriptors: [descriptor] }) }
+      : model,
+  );
+}
+
 /**
  * T3's slash commands for the ones Bob reported. Bob runs a command only when the whole prompt
  * is `/name args`, so a name that cannot be written that way is left out, and so is `/compact`,
@@ -251,9 +316,11 @@ function bobSlashCommands(
 
 /**
  * Bob reports its slash commands (the skills its current mode allows, and MCP prompts as
- * `server:command`) only inside a session, so each workspace keeps the list its latest session
- * reported, across health refreshes. Bob does not expand `$skill` mentions, so its skills are
- * offered only as these commands and the snapshot lists no skills.
+ * `server:command`) and its modes only inside a session, so each workspace keeps what its latest
+ * session reported, across health refreshes. Bob does not expand `$skill` mentions, so its skills
+ * are offered only as these commands and the snapshot lists no skills. Custom modes can belong to
+ * one project, but a model's options are the same everywhere, so the Mode option lists the modes
+ * of every workspace kept.
  */
 export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function* (
   provider: ServerProviderShape,
@@ -261,6 +328,9 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
   const workspaces = yield* SubscriptionRef.make<NonNullable<ServerProvider["workspaceSnapshots"]>>(
     [],
   );
+  const modesByWorkspace = yield* SubscriptionRef.make<
+    ReadonlyMap<string, ReadonlyArray<AcpSessionMode>>
+  >(new Map());
   /**
    * Records a workspace with new commands, or with the ones it has when none are given. Bob
    * re-sends its commands on every mode switch, so a list the workspace already has leaves
@@ -290,19 +360,31 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
         ] as const;
       }),
     );
-  const getSnapshot = Effect.all([provider.getSnapshot, SubscriptionRef.get(workspaces)]).pipe(
-    Effect.map(([snapshot, workspaceSnapshots]) =>
-      workspaceSnapshots.length > 0 ? { ...snapshot, workspaceSnapshots } : snapshot,
-    ),
+  const getSnapshot = Effect.all([
+    provider.getSnapshot,
+    SubscriptionRef.get(workspaces),
+    SubscriptionRef.get(modesByWorkspace),
+  ]).pipe(
+    Effect.map(([snapshot, workspaceSnapshots, modes]) => {
+      const withModes = {
+        ...snapshot,
+        models: withBobModeOption(snapshot.models, mergeBobModes(modes)),
+      };
+      return workspaceSnapshots.length > 0 ? { ...withModes, workspaceSnapshots } : withModes;
+    }),
   );
   return {
     snapshot: {
       ...provider,
       getSnapshot,
       refresh: provider.refresh.pipe(Effect.andThen(getSnapshot)),
-      streamChanges: Stream.merge(
-        provider.streamChanges.pipe(Stream.map(() => undefined)),
-        SubscriptionRef.changes(workspaces).pipe(Stream.map(() => undefined)),
+      streamChanges: Stream.mergeAll(
+        [
+          provider.streamChanges.pipe(Stream.map(() => undefined)),
+          SubscriptionRef.changes(workspaces).pipe(Stream.map(() => undefined)),
+          SubscriptionRef.changes(modesByWorkspace).pipe(Stream.map(() => undefined)),
+        ],
+        { concurrency: "unbounded" },
       ).pipe(Stream.mapEffect(() => getSnapshot)),
     } satisfies ServerProviderShape,
     /** The snapshot as a workspace sees it, which also starts keeping that workspace. */
@@ -319,6 +401,14 @@ export const makeBobCommandCatalog = Effect.fn("makeBobCommandCatalog")(function
     /** Replaces a workspace's commands with the ones a Bob session there just reported. */
     onAvailableCommands: (commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>, cwd: string) =>
       recordWorkspace(cwd, bobSlashCommands(commands)).pipe(Effect.asVoid),
+    /** Replaces a workspace's modes with the ones a Bob session there just offered. */
+    onAvailableModes: (modes: ReadonlyArray<AcpSessionMode>, cwd: string) =>
+      SubscriptionRef.modifySome(modesByWorkspace, (current) => {
+        if (Equal.equals(current.get(cwd), modes)) return [undefined, Option.none()] as const;
+        const next = new Map([...current].filter(([other]) => other !== cwd));
+        next.set(cwd, modes);
+        return [undefined, Option.some(new Map([...next].slice(-MAX_BOB_WORKSPACES)))] as const;
+      }),
   };
 });
 

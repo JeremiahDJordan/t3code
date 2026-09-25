@@ -25,6 +25,7 @@ import {
   TurnId,
   type TurnCompletedPayload,
 } from "@t3tools/contracts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -66,6 +67,7 @@ import {
   makeAcpToolCallEvent,
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import {
+  type AcpSessionMode,
   type AcpSessionModeState,
   type AcpToolCallState,
   canonicalItemTypeFromAcpToolKind,
@@ -90,6 +92,7 @@ import {
   sameBobTaskCosts,
 } from "./bobTaskUsage.ts";
 import { readBobConfiguredModel } from "./bobUsageLimits.ts";
+import { BOB_AGENT_MODE_ID, BOB_MODE_OPTION_ID, BOB_PLAN_MODE_ID } from "./BobProvider.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const isAcpError = Schema.is(EffectAcpErrors.AcpError);
@@ -123,6 +126,11 @@ export interface BobAdapterLiveOptions {
   /** Receives the slash commands a session reports, with the session's workspace. */
   readonly onAvailableCommands?: (
     commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+    cwd: string,
+  ) => Effect.Effect<void>;
+  /** Receives the modes a session offers, custom modes included, with the session's workspace. */
+  readonly onAvailableModes?: (
+    modes: ReadonlyArray<AcpSessionMode>,
     cwd: string,
   ) => Effect.Effect<void>;
 }
@@ -197,15 +205,28 @@ function parseBobResume(raw: unknown): { sessionId: string } | undefined {
 }
 
 /**
- * Plan turns run in Bob's `plan` mode and every other turn in `agent`. Bob's `ask` mode is
- * read-only Q&A, not "ask before editing", so T3 never selects it.
+ * Plan turns run in Bob's `plan` mode. Every other turn runs in the mode picked with the Mode
+ * option (Bob's `ask` or a custom mode), `agent` by default. A picked mode this session does not
+ * offer, such as another project's custom mode, runs in `agent` and is returned as `missing`.
  */
 function resolveBobModeId(
   modeState: AcpSessionModeState | undefined,
   interactionMode: ProviderInteractionMode | undefined,
-): string | undefined {
-  const modeId = interactionMode === "plan" ? "plan" : "agent";
-  return modeState?.availableModes.some((mode) => mode.id === modeId) ? modeId : undefined;
+  pickedModeId: string | undefined,
+): { readonly modeId: string | undefined; readonly missing?: string } {
+  const offers = (modeId: string) =>
+    modeState?.availableModes.some((mode) => mode.id === modeId) === true;
+  if (interactionMode === "plan") {
+    return { modeId: offers(BOB_PLAN_MODE_ID) ? BOB_PLAN_MODE_ID : undefined };
+  }
+  if (pickedModeId && pickedModeId !== BOB_AGENT_MODE_ID) {
+    if (offers(pickedModeId)) return { modeId: pickedModeId };
+    return {
+      modeId: offers(BOB_AGENT_MODE_ID) ? BOB_AGENT_MODE_ID : undefined,
+      missing: pickedModeId,
+    };
+  }
+  return { modeId: offers(BOB_AGENT_MODE_ID) ? BOB_AGENT_MODE_ID : undefined };
 }
 
 /**
@@ -949,6 +970,10 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           ctx.notificationFiber = nf;
           sessions.set(input.threadId, ctx);
           transferredScope = scope;
+          const modeState = yield* acp.getModeState;
+          if (modeState) {
+            yield* options?.onAvailableModes?.(modeState.availableModes, cwd) ?? Effect.void;
+          }
 
           yield* offerRuntimeEvent({
             type: "session.started",
@@ -1019,7 +1044,22 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           }
           if (ctx.openTurn?.id !== turnId) {
             // Switching modes under a running prompt is unsafe, so only a new turn picks its mode.
-            const modeId = resolveBobModeId(yield* ctx.acp.getModeState, input.interactionMode);
+            const { modeId, missing } = resolveBobModeId(
+              yield* ctx.acp.getModeState,
+              input.interactionMode,
+              getModelSelectionStringOptionValue(input.modelSelection, BOB_MODE_OPTION_ID),
+            );
+            if (missing !== undefined) {
+              yield* offerRuntimeEvent({
+                type: "runtime.warning",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                payload: {
+                  message: `Bob has no "${missing}" mode in this project, so this turn runs in Agent mode.`,
+                },
+              });
+            }
             if (modeId !== undefined && modeId !== ctx.currentModeId) {
               yield* setBobSessionMode(ctx.acp, ctx.sessionId, modeId).pipe(
                 Effect.mapError((cause) =>

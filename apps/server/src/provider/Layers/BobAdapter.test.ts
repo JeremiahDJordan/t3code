@@ -24,9 +24,11 @@ import {
   type BobAuthMethod,
   BobSettings,
   type ProviderApprovalDecision,
+  ProviderInstanceId,
   type ProviderRuntimeEvent,
   ThreadId,
 } from "@t3tools/contracts";
+import { createModelSelection } from "@t3tools/shared/model";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -137,6 +139,7 @@ const withMockBob = <A, E, R>(
     readonly authMethod?: BobAuthMethod;
     readonly environment?: NodeJS.ProcessEnv;
     readonly onAvailableCommands?: BobAdapterLiveOptions["onAvailableCommands"];
+    readonly onAvailableModes?: BobAdapterLiveOptions["onAvailableModes"];
     readonly nativeEventLogger?: EventNdjsonLogger;
   },
 ) =>
@@ -159,6 +162,7 @@ const withMockBob = <A, E, R>(
         ...(instance?.onAvailableCommands
           ? { onAvailableCommands: instance.onAvailableCommands }
           : {}),
+        ...(instance?.onAvailableModes ? { onAvailableModes: instance.onAvailableModes } : {}),
         ...(instance?.nativeEventLogger ? { nativeEventLogger: instance.nativeEventLogger } : {}),
       },
     );
@@ -218,6 +222,68 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         yield* adapter.stopSession(threadId);
       }),
     ),
+  );
+
+  it.effect("runs turns in the Bob mode picked for the thread, and plan turns in plan", () =>
+    Effect.gen(function* () {
+      const offered: Array<[ReadonlyArray<string>, string]> = [];
+      yield* withMockBob(
+        { T3_ACP_BOB: "1" },
+        ({ adapter, requestLogPath }) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make("bob-picked-mode");
+            const cwd = process.cwd();
+            /** A Build turn with the Mode option set to `modeId`. */
+            const turnIn = (modeId: string) =>
+              adapter.sendTurn({
+                threadId,
+                input: `work in ${modeId}`,
+                interactionMode: "default",
+                modelSelection: createModelSelection(
+                  ProviderInstanceId.make("bob"),
+                  BOB_DEFAULT_MODEL,
+                  [{ id: "mode", value: modeId }],
+                ),
+              });
+            yield* adapter.startSession({ threadId, cwd, runtimeMode: "full-access" });
+            const warning = yield* nextEvent(adapter, (event) => event.type === "runtime.warning");
+
+            yield* turnIn("ask");
+            yield* turnIn("reviewer");
+            const warned = yield* warning;
+            yield* adapter.sendTurn({
+              threadId,
+              input: "plan it",
+              interactionMode: "plan",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("bob"),
+                BOB_DEFAULT_MODEL,
+                [{ id: "mode", value: "ask" }],
+              ),
+            });
+
+            // A mode this project lacks, such as another project's custom mode, runs in agent.
+            assert.equal(
+              warned.type === "runtime.warning" && warned.payload.message,
+              'Bob has no "reviewer" mode in this project, so this turn runs in Agent mode.',
+            );
+            const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+            assert.deepStrictEqual(
+              paramsOf(requests, "session/set_mode").map((params) => params.modeId),
+              ["ask", "agent", "plan"],
+            );
+            assert.deepStrictEqual(offered, [[["agent", "plan", "ask"], cwd]]);
+
+            yield* adapter.stopSession(threadId);
+          }),
+        {
+          onAvailableModes: (modes, cwd) =>
+            Effect.sync(() => {
+              offered.push([modes.map((mode) => mode.id), cwd]);
+            }),
+        },
+      );
+    }),
   );
 
   it.effect("answers Bob's permission prompts with its own option ids", () =>
