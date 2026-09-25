@@ -7,7 +7,7 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -35,7 +35,7 @@ import { ServerConfig } from "../../config.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { BOB_API_KEY_REQUIRED_MESSAGE, BOB_SSO_SIGN_IN_MESSAGE } from "../acp/BobAcpSupport.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
-import { type BobAdapterLiveOptions, makeBobAdapter } from "./BobAdapter.ts";
+import { type BobAdapterLiveOptions, bobApprovalOptions, makeBobAdapter } from "./BobAdapter.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
@@ -176,6 +176,31 @@ const withMockBob = <A, E, R>(
 const bobAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-bob-adapter-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
+
+describe("bobApprovalOptions", () => {
+  it("offers to always allow only when Bob can remember the tool", () => {
+    const request = (kinds: ReadonlyArray<"allow_once" | "allow_always" | "reject_once">) => ({
+      sessionId: "task",
+      toolCall: {
+        toolCallId: "tool",
+        title: "ls",
+        kind: "execute" as const,
+        status: "pending" as const,
+      },
+      options: kinds.map((kind) => ({ optionId: kind, name: kind, kind })),
+    });
+    assert.deepStrictEqual(
+      bobApprovalOptions(request(["allow_once", "reject_once"])).map((option) => option.decision),
+      ["cancel", "decline", "accept"],
+    );
+    assert.deepStrictEqual(
+      bobApprovalOptions(request(["allow_once", "allow_always", "reject_once"])).map(
+        (option) => option.decision,
+      ),
+      ["cancel", "decline", "acceptForSession", "accept"],
+    );
+  });
+});
 
 it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
   it.effect("switches between Bob's plan and agent modes without unsupported requests", () =>
@@ -368,6 +393,12 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
               request.payload.detail,
             ],
             ["file_change_approval", "Edit README.md"],
+          );
+          // Bob offered to remember the tool, so the card offers it too.
+          assert.deepStrictEqual(
+            request.type === "request.opened" &&
+              request.payload.options?.map((option) => option.decision),
+            ["cancel", "decline", "acceptForSession", "accept"],
           );
 
           yield* adapter.stopSession(threadId);
