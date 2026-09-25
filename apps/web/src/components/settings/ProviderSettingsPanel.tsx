@@ -1169,6 +1169,7 @@ export function EnvironmentProviderSettings({
         environmentLabel={environmentLabel}
         sources={settings.usageLimitSources}
         cursorKeychainUsageEnabled={settings.cursorKeychainUsageEnabled}
+        bobUsageInUpstreamClients={settings.bobUsageInUpstreamClients}
         readOnly={readOnly}
       />
 
