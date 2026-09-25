@@ -7,6 +7,7 @@ import {
   formatHourShort,
   formatPercent,
   formatRelativeHourShort,
+  formatUsageCredits,
   formatUsageSpend,
   makeWindow,
 } from "./usageFormat.ts";
@@ -22,6 +23,12 @@ describe("formatUsageSpend", () => {
     expect(formatUsageSpend(1.5, { amount: 0.25, unit: "Bobcoins" })).toBe(
       "$1.50 · 0.250 Bobcoins",
     );
+  });
+
+  it("shows bare credit amounts for columns that name the unit, with zero like dollars", () => {
+    expect(formatUsageCredits(3.184)).toBe("3.18");
+    expect(formatUsageCredits(0.2143)).toBe("0.214");
+    expect(formatUsageCredits(0)).toBe("0.00");
   });
 });
 

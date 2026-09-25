@@ -31,9 +31,13 @@ export function formatUsd(value: number): string {
  */
 export function formatUsageSpend(costUsd: number, credits: ThreadUsageCost | undefined): string {
   if (credits === undefined) return formatUsd(costUsd);
-  const { amount } = credits;
-  const spent = `${amount.toFixed(amount >= 1 ? 2 : amount >= 0.01 ? 3 : 4)} ${credits.unit}`;
+  const spent = `${formatUsageCredits(credits.amount)} ${credits.unit}`;
   return costUsd > 0 ? `${formatUsd(costUsd)} · ${spent}` : spent;
+}
+
+/** A credit amount without its unit, for columns that name the unit once. */
+export function formatUsageCredits(amount: number): string {
+  return amount.toFixed(amount >= 1 || amount === 0 ? 2 : amount >= 0.01 ? 3 : 4);
 }
 
 export function formatCount(value: number): string {
