@@ -53,7 +53,7 @@ export function ContextWindowMeter(props: {
           <Button
             size="icon-sm"
             variant="ghost-muted"
-            className="size-7"
+            className="size-7 min-w-max"
             aria-label={
               usage.maxTokens !== null && usedPercentage
                 ? `Context window ${usedPercentage} used`
@@ -62,7 +62,8 @@ export function ContextWindowMeter(props: {
           >
             {usedPercentage === null ? (
               // Without the provider's limit there is no share to draw, and an empty ring would read as 0%.
-              <span className="font-medium text-[10px] tabular-nums">
+              // A count of 10m or more is wider than the button, which `min-w-max` lets grow to fit.
+              <span className="font-medium text-3xs tabular-nums">
                 {formatContextWindowTokens(usage.usedTokens)}
               </span>
             ) : (
@@ -149,7 +150,7 @@ export function ContextWindowMeter(props: {
             </div>
           ) : null}
           {usage.cost ? (
-            <div className="flex items-center justify-between gap-3 text-[11px] leading-4">
+            <div className="flex items-center justify-between gap-3 text-2xs leading-4">
               <span className="text-secondary-label">{usage.cost.unit}</span>
               <span className="font-medium tabular-nums text-secondary-label">
                 {formatContextWindowCost(usage.cost.amount)}
