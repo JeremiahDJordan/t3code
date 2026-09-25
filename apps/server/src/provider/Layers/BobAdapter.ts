@@ -77,6 +77,7 @@ import {
   closeBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
+  moveBobTask,
   setBobSessionMode,
 } from "../acp/BobAcpSupport.ts";
 import { type BobAdapterShape } from "../Services/BobAdapter.ts";
@@ -217,6 +218,11 @@ function resolveBobModeId(
  * with an agent that does not advertise it, the only `session/resume` error it raises without
  * an `operation`. A resume that times out or breaks off may still have a task behind it, so it
  * fails the start rather than replacing the task.
+ *
+ * The transport-error check relies on those two error sites: the refusal in
+ * `AcpSessionRuntime.ts` (`sessionCapabilities?.resume` missing, no `operation`) and the
+ * timeout from effect-acp's call, which carries `operation: "call-rpc"`. Recheck both when
+ * either changes upstream.
  */
 function isBobResumeUnavailable(error: EffectAcpErrors.AcpError): boolean {
   return (
@@ -687,6 +693,18 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               ),
             );
 
+          // Every Bob process for this thread, including one that moves its task, starts with the
+          // same environment. The device environment adds only a PATH shim, so Bob's home, which
+          // T3 reads usage, settings and limits from, is the instance's either way.
+          const bobEnvironment =
+            options?.environment || mcpSession?.agentDeviceEnvironment
+              ? {
+                  environment: McpProviderSession.withAgentDeviceEnvironment(
+                    options?.environment ?? process.env,
+                    mcpSession,
+                  ),
+                }
+              : {};
           // Each attempt owns its Bob process, which stops unless the session takes it.
           let transferredScope: Scope.Closeable | undefined;
           const openBob = (resumeSessionId: string | undefined) =>
@@ -697,14 +715,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               );
               const acp = yield* makeBobAcpRuntime({
                 bobSettings,
-                ...(options?.environment || mcpSession?.agentDeviceEnvironment
-                  ? {
-                      environment: McpProviderSession.withAgentDeviceEnvironment(
-                        options?.environment ?? process.env,
-                        mcpSession,
-                      ),
-                    }
-                  : {}),
+                ...bobEnvironment,
                 childProcessSpawner,
                 cwd,
                 runtimeMode: input.runtimeMode,
@@ -751,20 +762,60 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               return { scope, acp, started };
             });
 
-          // Bob cannot resume a task it deleted or that belongs to another folder. The thread
-          // then continues in a new Bob conversation rather than failing; sign-in, license and
-          // trust errors still fail, since a new conversation would hit them too, and so does a
-          // resume that times out, since its task may still be there.
+          /**
+           * Moves the thread's Bob task into this folder with a short-lived Bob here, and returns
+           * its new id there, or undefined when it cannot move.
+           */
+          const moveTaskHere = (sessionId: string) =>
+            Effect.scoped(
+              Effect.gen(function* () {
+                const mover = yield* makeBobAcpRuntime({
+                  bobSettings,
+                  ...bobEnvironment,
+                  childProcessSpawner,
+                  cwd,
+                  clientInfo: { name: "t3-code", version: "0.0.0" },
+                  ...makeAcpNativeLoggers({
+                    nativeEventLogger,
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                  }),
+                });
+                yield* mover.initialize();
+                return yield* moveBobTask(mover, sessionId, cwd);
+              }),
+            ).pipe(
+              Effect.provideService(Crypto.Crypto, crypto),
+              Effect.orElseSucceed(() => undefined),
+            );
+          const isResumeUnavailable = (error: unknown): error is EffectAcpErrors.AcpError =>
+            isAcpError(error) && isBobResumeUnavailable(error);
+          const openNewConversation = (error: EffectAcpErrors.AcpError) =>
+            Effect.suspend(() => {
+              lostResume = error;
+              return openBob(undefined);
+            });
+
+          // Bob resumes a task only in the folder it started in, and not one it deleted. A thread
+          // that moved to another folder, such as a worktree, takes its task along; otherwise it
+          // continues in a new Bob conversation rather than failing. Sign-in, license and trust
+          // errors still fail, since a new conversation would hit them too, and so does a resume
+          // that times out, since its task may still be there.
           const resumeSessionId = parseBobResume(input.resumeCursor)?.sessionId;
           let lostResume: EffectAcpErrors.AcpError | undefined;
           const { scope, acp, started } = yield* openBob(resumeSessionId).pipe(
             Effect.catchIf(
               (error): error is EffectAcpErrors.AcpError =>
-                resumeSessionId !== undefined && isAcpError(error) && isBobResumeUnavailable(error),
+                resumeSessionId !== undefined && isResumeUnavailable(error),
               (error) =>
-                Effect.suspend(() => {
-                  lostResume = error;
-                  return openBob(undefined);
+                Effect.gen(function* () {
+                  const movedSessionId = resumeSessionId
+                    ? yield* moveTaskHere(resumeSessionId)
+                    : undefined;
+                  if (movedSessionId === undefined) return yield* openNewConversation(error);
+                  return yield* openBob(movedSessionId).pipe(
+                    Effect.catchIf(isResumeUnavailable, openNewConversation),
+                  );
                 }),
             ),
             Effect.mapError((error) =>
