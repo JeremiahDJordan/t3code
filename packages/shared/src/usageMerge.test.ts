@@ -548,6 +548,61 @@ describe("mergeUsage", () => {
     expect(merged.providers).toEqual([]);
   });
 
+  it("sums Bobcoins per provider, model, and period without adding them to dollars", () => {
+    const database = "/a/.bob/db/bob.db";
+    const bob = (day: string, amount: number, hourStart?: string) =>
+      bucket({
+        day: day as UsageDay,
+        ...(hourStart === undefined ? {} : { hourStart }),
+        provider: "bob",
+        model: "premium-ide",
+        sourcePath: database,
+        costUsd: 0,
+        cacheSavingsUsd: 0,
+        costSource: "unpriced",
+        unpricedRecords: 5,
+        credits: { amount, unit: "Bobcoins" },
+      });
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [
+              bob("2026-08-06", 1.5),
+              bob("2026-08-07", 2, "2026-08-07T09:37:00.000Z"),
+              bob("2026-08-07", 0.25, "2026-08-07T09:37:00.000Z"),
+              bucket({ costUsd: 10 }),
+            ],
+            [
+              { provider: "bob", hostId: "mac", homePath: database },
+              { provider: "claude", hostId: "mac", homePath: "/a/.claude" },
+            ],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+    const bobcoins = (amount: number) => ({ amount, unit: "Bobcoins" });
+
+    expect(merged.costUsd).toBe(10);
+    expect(merged.providers.find((provider) => provider.provider === "bob")).toMatchObject({
+      costUsd: 0,
+      credits: bobcoins(3.75),
+    });
+    expect(merged.providers.find((provider) => provider.provider === "claude")).not.toHaveProperty(
+      "credits",
+    );
+    expect(merged.models.find((model) => model.provider === "bob")?.credits).toEqual(
+      bobcoins(3.75),
+    );
+    expect(merged.daily.map((day) => day.byProvider.get("bob")?.credits)).toEqual([
+      bobcoins(1.5),
+      bobcoins(2.25),
+    ]);
+    expect(merged.hourly[0]?.byProvider.get("bob")?.credits).toEqual(bobcoins(2.25));
+  });
+
   it("derives hourly totals without losing the daily rollup", () => {
     const merged = mergeUsage(
       [

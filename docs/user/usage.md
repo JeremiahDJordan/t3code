@@ -6,12 +6,12 @@ desktop when the terminal is not focused. Customize `usage.open` in
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, and Cursor history from your connected
-environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
-cost. These estimates are not your subscription bill.
+**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Cursor, and Bob Shell
+history from your connected environments. It shows token use, cache savings, model breakdowns, and
+estimated API-equivalent cost. These estimates are not your subscription bill.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
-record are missing from the totals.
+record, and Bob turns that stop or fail before Bob replies, are missing from the totals.
 
 OpenCode reads its SQLite database and older JSON history. Antigravity reads local conversation
 databases, including T3-managed profiles. Set `OPENCODE_DATA_DIR` or `ANTIGRAVITY_DATA_DIR` on the
@@ -25,11 +25,15 @@ On macOS, choose **Enable Cursor usage** on Usage to allow T3 to read your exist
 from Keychain. You can turn it off in **Settings → Providers → Usage providers**. macOS may ask
 you to allow access on the server Mac.
 
+Bob bills in Bobcoins, not dollars, so Bob shows its tokens and Bobcoins but adds nothing to the
+cost estimate. Bob 2.0.5 and later record each request's context size rather than separate input
+and output, so Bob's tokens count as uncached input.
+
 Usage includes each configured account's history, including disabled accounts. Custom homes follow
-the account's home setting or its `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `GROK_HOME` environment
-variable. Use absolute paths or `~/` paths in the account's environment settings; relative
-environment paths depend on each project's working directory and cannot be reliably discovered
-by Usage. Accounts sharing a history directory count once.
+the account's home setting or its `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, or, for Bob,
+`HOME` environment variable. Use absolute paths or `~/` paths in the account's environment
+settings; relative environment paths depend on each project's working directory and cannot be
+reliably discovered by Usage. Accounts sharing a history directory count once.
 
 On web and desktop, use the environment dropdown to filter costs, tokens, and limits. All
 environments are selected by default. The dropdown shows which environments are still scanning;

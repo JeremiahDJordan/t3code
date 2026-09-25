@@ -49,6 +49,48 @@ function claudeLine(id: number, outputTokens: number, model = "claude-fable-5"):
   })}\n`;
 }
 
+/** A Bob task database in `home`'s `.bob/db`, holding one task's assistant messages. */
+async function writeBobDatabase(
+  home: string,
+  messages: ReadonlyArray<{
+    readonly id: string;
+    readonly timestamp: string;
+    readonly cost: number;
+  }>,
+) {
+  await NodeFSP.mkdir(NodePath.join(home, ".bob", "db"), { recursive: true });
+  const database = new NodeSqlite.DatabaseSync(NodePath.join(home, ".bob", "db", "bob.db"));
+  try {
+    database.exec(`
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, parent_id TEXT, env TEXT, updated_at INTEGER NOT NULL);
+      CREATE TABLE messages (id TEXT PRIMARY KEY, task_id TEXT NOT NULL, role TEXT NOT NULL, data TEXT NOT NULL);
+    `);
+    database
+      .prepare("INSERT INTO tasks (id, env, updated_at) VALUES ('task-a', ?, ?)")
+      .run(
+        encodeUnknownJsonString({ model: { id: "premium-ide" } }),
+        Date.parse("2026-08-01T12:00:00Z"),
+      );
+    for (const message of messages) {
+      database
+        .prepare(
+          "INSERT INTO messages (id, task_id, role, data) VALUES (?, 'task-a', 'assistant', ?)",
+        )
+        .run(
+          message.id,
+          encodeUnknownJsonString({
+            _meta: {
+              timestamp: Date.parse(message.timestamp),
+              spend: { cost: message.cost, contextTokens: 10_000 },
+            },
+          }),
+        );
+    }
+  } finally {
+    database.close();
+  }
+}
+
 const WINDOW: UsageSummaryInput = {
   timeZone: "UTC",
   sinceDay: UsageDay.make("2026-07-31"),
@@ -304,6 +346,73 @@ describe("UsageService", () => {
       assert.strictEqual(
         sourcesFor("antigravity")[0]?.fingerprint.resolvedHomePath,
         yield* Effect.promise(() => NodeFSP.realpath(conversations)),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("reads Bobcoins from each Bob account's task database once", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const bobHome = NodePath.join(home, "bob-account");
+      const alias = NodePath.join(home, "bob-alias");
+      yield* Effect.promise(async () => {
+        await writeBobDatabase(bobHome, [
+          { id: "m-1", timestamp: "2026-08-01T10:00:00Z", cost: 0.25 },
+          { id: "m-2", timestamp: "2026-08-01T11:00:00Z", cost: 0.5 },
+          // The task was updated in the window, but this request was not.
+          { id: "m-3", timestamp: "2026-07-01T10:00:00Z", cost: 4 },
+        ]);
+        await NodeFSP.symlink(bobHome, alias, "junction");
+      });
+      const bobAccount = (accountHome: string) => ({
+        driver: ProviderDriverKind.make("bob"),
+        environment: [{ name: "HOME", value: accountHome, sensitive: false }],
+      });
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-bob-test",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("bob-work")]: { ...bobAccount(bobHome), enabled: false },
+                [ProviderInstanceId.make("bob-alias")]: bobAccount(alias),
+              },
+            },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      const databasePath = yield* Effect.promise(() =>
+        NodeFSP.realpath(NodePath.join(bobHome, ".bob", "db", "bob.db")),
+      );
+
+      const bobBuckets = summary.buckets.filter((bucket) => bucket.provider === "bob");
+      assert.strictEqual(bobBuckets.length, 1);
+      assert.deepInclude(bobBuckets[0], {
+        model: "premium-ide",
+        sourcePath: databasePath,
+        costUsd: 0,
+        costSource: "unpriced",
+        credits: { amount: 0.75, unit: "Bobcoins" },
+        records: 2,
+        sessions: 1,
+      });
+      assert.strictEqual(bobBuckets[0]?.totals.uncachedInputTokens, 20_000);
+      assert.deepStrictEqual(
+        summary.sources
+          .filter((source) => source.fingerprint.provider === "bob")
+          .map((source) => [
+            source.status,
+            source.fingerprint.resolvedHomePath,
+            source.distinctSessions,
+          ]),
+        // The legacy default account resolves to the server's home, which has no database.
+        [
+          ["ok", databasePath, 1],
+          ["missing", NodePath.join(home, ".bob", "db", "bob.db"), 0],
+        ],
       );
     }).pipe(Effect.scoped),
   );

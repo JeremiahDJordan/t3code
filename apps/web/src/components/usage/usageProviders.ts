@@ -1,7 +1,8 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type { ThreadUsageCost, UsageProviderKind } from "@t3tools/contracts";
 
 import {
   AntigravityIcon,
+  BobIcon,
   ClaudeAI,
   CursorIcon,
   GrokIcon,
@@ -41,6 +42,8 @@ export const PROVIDER_PRESENTATION = {
   cursor: { label: "Cursor", color: "#8b8b8b", mark: CursorIcon },
   opencode: { label: "OpenCode", color: "#5b9bbd", mark: OpenCodeIcon },
   antigravity: { label: "Antigravity", color: "#8c7bd1", mark: AntigravityIcon },
+  // The blue of Bob's mark in each theme.
+  bob: { label: "Bob", color: "light-dark(#0e61fa, #4587fd)", mark: BobIcon },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */
@@ -52,11 +55,14 @@ export function providersWithUsage(
     readonly provider: UsageProviderKind;
     readonly costUsd: number;
     readonly totalTokens: number;
+    readonly credits?: ThreadUsageCost;
   }[],
 ): readonly UsageProviderKind[] {
   const active = new Set(
     totals
-      .filter((entry) => entry.totalTokens > 0 || entry.costUsd > 0)
+      .filter(
+        (entry) => entry.totalTokens > 0 || entry.costUsd > 0 || (entry.credits?.amount ?? 0) > 0,
+      )
       .map((entry) => entry.provider),
   );
   return PROVIDER_ORDER.filter((provider) => active.has(provider));

@@ -6,7 +6,7 @@
  *
  * @module usageTranscripts
  */
-import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+import type { ThreadUsageCost, UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
@@ -15,6 +15,8 @@ export interface UsageRecord {
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
+  /** Spend in the provider's own unit, such as Bob's Bobcoins. Never dollars. */
+  readonly credits?: ThreadUsageCost;
   /**
    * Whether the request ran in fast mode, which bills at a model-specific
    * multiple of the standard rate. Only Claude Code records this.

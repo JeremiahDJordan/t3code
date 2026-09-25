@@ -15,6 +15,7 @@ import {
   formatHourShort,
   formatPercent,
   formatTokens,
+  formatUsageSpend,
   formatUsd,
   makeWindow,
 } from "@t3tools/shared/usageFormat";
@@ -612,7 +613,7 @@ function ProviderSection(props: {
               </View>
               <Text className="text-lg tabular-nums text-foreground">
                 {metric === "cost"
-                  ? formatUsd(provider.costUsd)
+                  ? formatUsageSpend(provider.costUsd, provider.credits)
                   : formatTokens(provider.totalTokens)}
               </Text>
             </View>
@@ -626,7 +627,7 @@ function ProviderSection(props: {
             <Text className="text-sm text-foreground-muted">
               {metric === "cost"
                 ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
-                : `${formatPercent(share)} of tokens · ${formatUsd(provider.costUsd)}`}
+                : `${formatPercent(share)} of tokens · ${formatUsageSpend(provider.costUsd, provider.credits)}`}
             </Text>
           </View>
         );
@@ -726,12 +727,16 @@ function ModelsSection(props: { readonly merged: MergedUsage }) {
             </Text>
             <Text className="text-sm text-foreground-muted">
               {isModelCostUnknown(model)
-                ? `no known rates · ${formatTokens(model.totalTokens)} tokens`
+                ? `${model.credits === undefined ? "no known rates" : `billed in ${model.credits.unit}`} · ${formatTokens(model.totalTokens)} tokens`
                 : `${formatPercent(model.costShare)} of cost · ${formatTokens(model.totalTokens)} tokens`}
             </Text>
           </View>
           <Text className="text-base tabular-nums text-foreground">
-            {isModelCostUnknown(model) ? "Unpriced" : formatUsd(model.costUsd)}
+            {model.credits !== undefined
+              ? formatUsageSpend(model.costUsd, model.credits)
+              : isModelCostUnknown(model)
+                ? "Unpriced"
+                : formatUsd(model.costUsd)}
           </Text>
         </View>
       ))}

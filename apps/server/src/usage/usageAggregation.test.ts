@@ -194,6 +194,66 @@ describe("UsageAggregator", () => {
     expect(aggregator.add(record({ timestampMs: Date.parse("2026-07-01T12:00:00Z") }))).toBe(false);
   });
 
+  it("totals Bobcoins apart from dollars and never prices them from the public table", () => {
+    const bob = (amount: number, dedupeKey: string) =>
+      record({
+        provider: "bob",
+        // A Bob tier that shares its id with a public model must still not be priced as one.
+        model: "claude-fable-5",
+        sessionId: "task-a",
+        credits: { amount, unit: "Bobcoins" },
+        dedupeKey,
+      });
+    const result = aggregate([bob(0.25, "bob:m-1"), bob(0.5, "bob:m-2"), record()]);
+    const bobBucket = result.buckets.find((bucket) => bucket.provider === "bob");
+    const claudeBucket = result.buckets.find((bucket) => bucket.provider === "claude");
+
+    expect(bobBucket).toMatchObject({
+      costUsd: 0,
+      cacheSavingsUsd: 0,
+      costSource: "unpriced",
+      credits: { amount: 0.75, unit: "Bobcoins" },
+      records: 2,
+      unpricedRecords: 2,
+    });
+    expect(bobBucket?.totals.outputTokens).toBe(100);
+    expect(claudeBucket?.costSource).toBe("modelPriced");
+    expect(claudeBucket).not.toHaveProperty("credits");
+  });
+
+  it("prices credit-billed records at a custom price the user set", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      priceOverrides: new Map([
+        [
+          "premium-ide",
+          {
+            inputCostPerToken: 1e-6,
+            outputCostPerToken: 1e-6,
+            cacheReadCostPerToken: 1e-6,
+            cacheCreationCostPerToken: 1e-6,
+            fastMultiplier: 1,
+          },
+        ],
+      ]),
+    });
+    aggregator.add(
+      record({
+        provider: "bob",
+        model: "premium-ide",
+        credits: { amount: 0.25, unit: "Bobcoins" },
+      }),
+    );
+    const [bucket] = aggregator.finish().buckets;
+
+    expect(bucket?.costSource).toBe("modelPriced");
+    expect(bucket?.costUsd).toBeCloseTo(1160e-6, 12);
+    expect(bucket?.credits).toEqual({ amount: 0.25, unit: "Bobcoins" });
+  });
+
   it("separates providers and models into their own buckets", () => {
     const result = aggregate([
       record(),

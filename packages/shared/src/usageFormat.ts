@@ -4,7 +4,12 @@
  *
  * @module usageFormat
  */
-import { UsageDay, type UsageResolution, type UsageSummaryInput } from "@t3tools/contracts";
+import {
+  UsageDay,
+  type ThreadUsageCost,
+  type UsageResolution,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
 
 const CURRENCY = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -17,6 +22,18 @@ const INTEGER = new Intl.NumberFormat("en-US");
 
 export function formatUsd(value: number): string {
   return CURRENCY.format(value);
+}
+
+/**
+ * Spend as the cost view shows it: dollars, a provider's own credits such as
+ * `12.30 Bobcoins` in place of `$0.00`, or both when a custom price applies.
+ * Credits keep more decimals below 1, as Bob Shell shows them.
+ */
+export function formatUsageSpend(costUsd: number, credits: ThreadUsageCost | undefined): string {
+  if (credits === undefined) return formatUsd(costUsd);
+  const { amount } = credits;
+  const spent = `${amount.toFixed(amount >= 1 ? 2 : amount >= 0.01 ? 3 : 4)} ${credits.unit}`;
+  return costUsd > 0 ? `${formatUsd(costUsd)} · ${spent}` : spent;
 }
 
 export function formatCount(value: number): string {

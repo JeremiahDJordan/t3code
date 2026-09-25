@@ -7,8 +7,23 @@ import {
   formatHourShort,
   formatPercent,
   formatRelativeHourShort,
+  formatUsageSpend,
   makeWindow,
 } from "./usageFormat.ts";
+
+describe("formatUsageSpend", () => {
+  it("shows a provider's own credits instead of zero dollars", () => {
+    expect(formatUsageSpend(0, { amount: 12.3, unit: "Bobcoins" })).toBe("12.30 Bobcoins");
+    expect(formatUsageSpend(0, { amount: 0.0042, unit: "Bobcoins" })).toBe("0.0042 Bobcoins");
+    expect(formatUsageSpend(0, undefined)).toBe("$0.00");
+  });
+
+  it("shows both when a custom price gives credits a dollar cost", () => {
+    expect(formatUsageSpend(1.5, { amount: 0.25, unit: "Bobcoins" })).toBe(
+      "$1.50 · 0.250 Bobcoins",
+    );
+  });
+});
 
 describe("formatPercent", () => {
   it("distinguishes a small positive share from zero", () => {
