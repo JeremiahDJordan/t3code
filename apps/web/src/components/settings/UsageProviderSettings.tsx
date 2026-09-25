@@ -1,4 +1,8 @@
-import type { EnvironmentId, UnifiedSettings } from "@t3tools/contracts";
+import {
+  BobUsageInUpstreamClients,
+  type EnvironmentId,
+  type UnifiedSettings,
+} from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
@@ -16,10 +20,18 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { PROVIDER_PRESENTATION } from "../usage/usageProviders";
 import { AddUsageLimitSourceDialog } from "./AddUsageLimitSourceDialog";
 import { searchableSetting } from "./settingsSearch";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+
+/** How clients without Bob support can show Bob's usage: hidden, or as a provider they know. */
+const BOB_USAGE_IN_UPSTREAM_CLIENTS = BobUsageInUpstreamClients.literals.map((value) => ({
+  value,
+  label: value === "hidden" ? "Hidden" : `As ${PROVIDER_PRESENTATION[value].label}`,
+}));
 
 /** Hub management follows the selected device and access rules of provider settings. */
 export function UsageProviderSettings({
@@ -27,12 +39,14 @@ export function UsageProviderSettings({
   environmentLabel,
   sources,
   cursorKeychainUsageEnabled,
+  bobUsageInUpstreamClients,
   readOnly,
 }: {
   readonly environmentId: EnvironmentId;
   readonly environmentLabel: string;
   readonly sources: UnifiedSettings["usageLimitSources"];
   readonly cursorKeychainUsageEnabled: boolean;
+  readonly bobUsageInUpstreamClients: BobUsageInUpstreamClients;
   readonly readOnly: boolean;
 }) {
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
@@ -91,6 +105,41 @@ export function UsageProviderSettings({
             }
           />
         ) : null}
+        <SettingsRow
+          id="bob-usage-in-upstream-clients"
+          title="Bob usage in other T3 Code apps"
+          description="Apps without Bob support, such as the App Store app, cannot show Bob, so it is Hidden there by default. Choose a provider you don't use to show Bob's history as that provider; its dollar totals there then include Bobcoins, each counted as $1."
+          control={
+            <Select
+              value={bobUsageInUpstreamClients}
+              onValueChange={(value) =>
+                updateSettings({ bobUsageInUpstreamClients: value as BobUsageInUpstreamClients })
+              }
+            >
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label="Bob usage in other T3 Code apps"
+                disabled={readOnly}
+              >
+                <SelectValue>
+                  {
+                    BOB_USAGE_IN_UPSTREAM_CLIENTS.find(
+                      (choice) => choice.value === bobUsageInUpstreamClients,
+                    )?.label
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {BOB_USAGE_IN_UPSTREAM_CLIENTS.map((choice) => (
+                  <SelectItem hideIndicator key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
         {entries.length === 0 ? (
           <SettingsRow title="No hubs configured." />
         ) : (
