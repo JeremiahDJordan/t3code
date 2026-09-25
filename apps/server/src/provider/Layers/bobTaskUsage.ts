@@ -135,19 +135,53 @@ export function sameBobTaskCosts(
 }
 
 /**
+ * Context windows (maximum input tokens) of the models IBM's Bob gateway listed on 2026-09-24
+ * in `/inference/v1/model/info`. ACP reports neither the model Bob runs nor its window, so T3
+ * uses these until Bob sends ACP `usage_update`; IBM can change them without notice.
+ */
+const BOB_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+  "premium-ide": 270_000,
+  "premium-shell": 270_000,
+  premium: 200_000,
+  fast: 200_000,
+  explorer: 200_000,
+  "wxO-model": 1_000_000,
+  background: 131_072,
+  security: 131_072,
+  "gpt-oss-20b": 131_072,
+  "openai/gpt-oss-20b": 131_072,
+};
+
+/** The model Bob's router picked for every chat task (tier `premium`) observed on Bob 2.0.5. */
+const BOB_ROUTER_DEFAULT_MODEL = "premium-ide";
+
+/**
+ * The context window a Bob session most likely has: the model pinned by Bob's `session.model`
+ * setting, which bypasses its router, or else the router's usual pick. Undefined for a model T3
+ * does not know, so the meter shows a count instead of a wrong share.
+ */
+export function bobContextWindow(configuredModel: string | undefined): number | undefined {
+  return BOB_MODEL_CONTEXT_WINDOWS[configuredModel?.trim() || BOB_ROUTER_DEFAULT_MODEL];
+}
+
+/**
  * Thread usage from a reading; `last*` is what was spent since `previous`. Without Bob's
- * token counts it is the context size and Bobcoins alone.
+ * token counts it is the context size and Bobcoins alone. `maxTokens` is the session's
+ * context window when T3 knows it (see `bobContextWindow`).
  */
 export function bobThreadTokenUsage(
   current: BobTaskCosts,
   previous: BobTaskCosts | undefined,
+  maxTokens?: number,
 ): ThreadTokenUsageSnapshot {
   const cost = { amount: current.cost, unit: "Bobcoins" };
-  if (!current.tokensRecorded) return { usedTokens: current.contextTokens, cost };
+  const window = maxTokens !== undefined && maxTokens > 0 ? { maxTokens } : {};
+  if (!current.tokensRecorded) return { usedTokens: current.contextTokens, ...window, cost };
   const last = bobTaskCostsSince(current, previous);
   const totalProcessedTokens = current.input + current.output;
   return {
     usedTokens: current.contextTokens,
+    ...window,
     ...(totalProcessedTokens > current.contextTokens ? { totalProcessedTokens } : {}),
     inputTokens: current.input,
     cachedInputTokens: Math.min(current.input, current.cacheRead),
