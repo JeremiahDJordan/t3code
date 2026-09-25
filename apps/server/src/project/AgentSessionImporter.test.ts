@@ -2,12 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it, vi } from "@effect/vitest";
 import {
   AgentSessionImportProjectChangedError,
+  BOB_DEFAULT_MODEL,
   CommandId,
   MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type AgentSessionSource,
   type OrchestrationCommand,
   type OrchestrationProjectShell,
   type OrchestrationThread,
@@ -65,12 +67,19 @@ import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 const PROJECT_ID = ProjectId.make("project-1");
 const WORKSPACE_ROOT = "/tmp/project-from-server";
 const CLAUDE_SESSION_ID = "123e4567-e89b-42d3-a456-426614174000";
+const BOB_TASK_ID = "0123456789abcdef0123456789abcdef";
 const encodeTranscriptRecord = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
-const makeThread = (source: "codex" | "claudeAgent"): AgentSessionScanner.AgentSessionThread => ({
+const SESSION_IDS: Record<AgentSessionSource, string> = {
+  codex: "codex-session",
+  claudeAgent: CLAUDE_SESSION_ID,
+  bob: BOB_TASK_ID,
+};
+
+const makeThread = (source: AgentSessionSource): AgentSessionScanner.AgentSessionThread => ({
   source,
   providerInstanceId: ProviderInstanceId.make(source),
-  providerSessionId: source === "codex" ? "codex-session" : CLAUDE_SESSION_ID,
+  providerSessionId: SESSION_IDS[source],
   title: `Imported ${source} thread`,
   model: null,
   createdAt: "2026-08-24T10:00:00.000Z",
@@ -109,7 +118,7 @@ const makeProject = (): OrchestrationProjectShell => ({
 });
 
 const makeProjectedThread = (input: {
-  readonly source: "codex" | "claudeAgent";
+  readonly source: AgentSessionSource;
   readonly projectId?: ProjectId;
   readonly imported?: boolean;
   readonly includeFollowup?: boolean;
@@ -235,7 +244,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.void,
           getBinding: () => Effect.succeedNone,
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
 
         const result = yield* runImport({
@@ -340,7 +349,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.die("unused"),
           getBinding: () => Effect.die("must not read a scanner skip binding"),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
 
         const result = yield* runImport({
@@ -418,7 +427,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           getBinding: () =>
             Effect.succeed(bindings[0] === undefined ? Option.none() : Option.some(bindings[0])),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
         const snapshots = makeSnapshotsLayer({
           project: makeProject(),
@@ -459,7 +468,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.void,
           getBinding: () => Effect.succeedSome(runningBinding),
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
         const engine = OrchestrationEngine.OrchestrationEngineService.of({
           dispatch: () => Effect.die("must not replay history or settle active work"),
@@ -514,7 +523,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
           recordImportedTranscript: () => Effect.die("unused"),
           getBinding: () => Effect.succeedNone,
           listThreadIds: () => Effect.die("unused"),
-          listBindings: () => Effect.die("unused"),
+          listBindings: () => Effect.succeed([]),
         });
 
         const result = yield* runImport({
@@ -537,6 +546,119 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
 
         expect(result).toEqual({ importedCount: 0, skippedCount: 2 });
         expect(commands).toHaveLength(0);
+      }),
+    );
+
+    it.effect("stores Bob's resume cursor and leaves out tasks T3 already runs", () =>
+      Effect.gen(function* () {
+        const commands: Array<OrchestrationCommand> = [];
+        const bindings: Array<ProviderSessionDirectory.ProviderRuntimeBinding> = [];
+        const recorded: Array<string> = [];
+        const boundTaskIds: Array<ReadonlySet<string> | undefined> = [];
+        const bobThread = makeThread("bob");
+        const threadId = ThreadId.make(`import:bob:${BOB_TASK_ID}`);
+        const scanner = AgentSessionScanner.AgentSessionScanner.of({
+          scan: Effect.die("unused"),
+          recentThreads: (_workspaceRoot, _completedSources, boundBobTaskIds) => {
+            boundTaskIds.push(boundBobTaskIds);
+            return Stream.succeed(makeThreadOutcome(bobThread));
+          },
+        });
+        const engine = OrchestrationEngine.OrchestrationEngineService.of({
+          dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+          readEvents: () => Stream.empty,
+          readThreadEvents: () => Stream.empty,
+          getThreadReplayStats: () => Effect.die("unused"),
+          streamDomainEvents: Stream.empty,
+          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          latestSequence: Effect.succeed(0),
+        });
+        const t3Bindings: Array<ProviderSessionDirectory.ProviderRuntimeBinding> = [
+          // A thread T3 started in Bob.
+          {
+            threadId: ThreadId.make("thread-started-in-t3"),
+            provider: ProviderDriverKind.make("bob"),
+            providerInstanceId: ProviderInstanceId.make("bob"),
+            resumeCursor: { schemaVersion: 1, sessionId: "task-started-in-t3" },
+          },
+          // An imported Bob thread that Bob could not resume, so T3 moved it to a new task.
+          {
+            threadId: ThreadId.make("import:bob:task-imported-earlier"),
+            provider: ProviderDriverKind.make("bob"),
+            providerInstanceId: ProviderInstanceId.make("bob"),
+            resumeCursor: { schemaVersion: 1, sessionId: "task-continued-in-t3" },
+          },
+          {
+            threadId: ThreadId.make("import:bob:task-still-imported"),
+            provider: ProviderDriverKind.make("bob"),
+            providerInstanceId: ProviderInstanceId.make("bob"),
+            resumeCursor: { schemaVersion: 1, sessionId: "task-still-imported" },
+          },
+          {
+            threadId: ThreadId.make("thread-claude"),
+            provider: ProviderDriverKind.make("claudeAgent"),
+            providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+            resumeCursor: { threadId: "thread-claude", resume: CLAUDE_SESSION_ID },
+          },
+        ];
+        const directory = ProviderSessionDirectory.ProviderSessionDirectory.of({
+          upsert: (binding) => Effect.sync(() => void bindings.push(binding)),
+          getProvider: () => Effect.die("unused"),
+          recordImportedTranscript: ({ threadId: recordedThreadId }) =>
+            Effect.sync(() => void recorded.push(recordedThreadId)),
+          getBinding: (requestedThreadId) =>
+            Effect.succeed(
+              Option.fromNullishOr(
+                bindings.find((binding) => binding.threadId === requestedThreadId),
+              ),
+            ),
+          listThreadIds: () => Effect.die("unused"),
+          listBindings: () =>
+            Effect.succeed(
+              [...t3Bindings, ...bindings].map((binding) => ({
+                ...binding,
+                lastSeenAt: "2026-08-24T10:00:00.000Z",
+              })),
+            ),
+        });
+        const snapshots = makeSnapshotsLayer({
+          project: makeProject(),
+          getThread: () =>
+            commands.some((command) => command.type === "thread.history.import")
+              ? Option.some(makeProjectedThread({ source: "bob", imported: true }))
+              : Option.none(),
+        });
+
+        const first = yield* runImport({ scanner, engine, directory, snapshots });
+        // A second run finds the imported thread and only records the task again.
+        const second = yield* runImport({ scanner, engine, directory, snapshots });
+
+        expect([first, second]).toEqual([
+          { importedCount: 1, skippedCount: 0 },
+          { importedCount: 1, skippedCount: 0 },
+        ]);
+        expect(boundTaskIds[0]).toEqual(new Set(["task-started-in-t3", "task-continued-in-t3"]));
+        expect(boundTaskIds[1]).toEqual(boundTaskIds[0]);
+        expect(bindings).toEqual([
+          {
+            threadId,
+            provider: "bob",
+            providerInstanceId: "bob",
+            status: "stopped",
+            runtimeMode: "full-access",
+            resumeCursor: { schemaVersion: 1, sessionId: BOB_TASK_ID },
+            runtimePayload: { cwd: WORKSPACE_ROOT },
+          },
+        ]);
+        expect(commands.map((command) => command.type)).toEqual([
+          "thread.create",
+          "thread.history.import",
+        ]);
+        expect(commands[0]).toMatchObject({
+          threadId,
+          modelSelection: { instanceId: "bob", model: BOB_DEFAULT_MODEL },
+        });
+        expect(recorded).toEqual([threadId, threadId]);
       }),
     );
   });
@@ -860,7 +982,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
       }),
   );
 
-  for (const source of ["codex", "claudeAgent"] as const) {
+  for (const source of ["codex", "claudeAgent", "bob"] as const) {
     it.effect(`resumes imported ${source} history only after the first prompt`, () =>
       Effect.gen(function* () {
         const engine = yield* OrchestrationEngine.OrchestrationEngineService;
@@ -871,15 +993,16 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         const projectId = ProjectId.make(`project-import-resume-${source}`);
         const sourceThread = {
           ...makeThread(source),
-          providerSessionId: source === "codex" ? "codex-first-resume" : CLAUDE_SESSION_ID,
+          providerSessionId: source === "codex" ? "codex-first-resume" : SESSION_IDS[source],
         };
         const threadId = ThreadId.make(
           `import:${sourceThread.providerInstanceId}:${sourceThread.providerSessionId}`,
         );
-        const resumeCursor =
-          source === "codex"
-            ? { threadId: sourceThread.providerSessionId }
-            : { threadId, resume: sourceThread.providerSessionId };
+        const resumeCursor = {
+          codex: { threadId: sourceThread.providerSessionId },
+          claudeAgent: { threadId, resume: sourceThread.providerSessionId },
+          bob: { schemaVersion: 1, sessionId: sourceThread.providerSessionId },
+        }[source];
         const provider = ProviderDriverKind.make(source);
         const harness = yield* makeTestProviderAdapterHarness({ provider });
         const importSettled = yield* Deferred.make<void>();
