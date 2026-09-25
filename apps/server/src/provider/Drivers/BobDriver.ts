@@ -2,9 +2,10 @@
  * BobDriver — `ProviderDriver` for IBM Bob Shell (`bob acp`).
  *
  * Bob manages its own model and login. The status check runs `bob --version`,
- * reads the sign-in the instance uses, and then the monthly Bobcoin budget. Slash
- * commands come from Bob's sessions, per workspace, and the version notice from
- * the release IBM publishes.
+ * reads the sign-in the instance uses, and then the monthly Bobcoin budget, which
+ * is also re-read after each turn that spends Bobcoins. Slash commands, modes and
+ * a pinned team's budget come from Bob's sessions, per workspace, and the version
+ * notice from the release IBM publishes.
  *
  * @module provider/Drivers/BobDriver
  */
@@ -28,9 +29,14 @@ import {
   checkBobProviderStatus,
   enrichBobSnapshot,
   makeBobCommandCatalog,
+  makeBobUsageLimitsRefresh,
 } from "../Layers/BobProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
-import { readBobUsageLimits } from "../Layers/bobUsageLimits.ts";
+import {
+  readBobPinnedTeams,
+  readBobUsageLimits,
+  readBobUsageProfile,
+} from "../Layers/bobUsageLimits.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -145,14 +151,35 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         ),
       );
 
-      const { snapshot, onAvailableCommands, onAvailableModes, snapshotForCwd } =
-        yield* makeBobCommandCatalog(managedSnapshot);
+      const {
+        snapshot,
+        onAvailableCommands,
+        onAvailableModes,
+        setWorkspaceUsageLimits,
+        snapshotForCwd,
+      } = yield* makeBobCommandCatalog(managedSnapshot);
+      const refreshUsageLimits = yield* makeBobUsageLimitsRefresh({
+        readProfile: readBobUsageProfile(effectiveConfig.authMethod, processEnv).pipe(
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
+        readPinnedTeams: (cwd) =>
+          readBobPinnedTeams(cwd).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
+        applyUsageLimits: snapshot.applyUsageLimits,
+        setWorkspaceUsageLimits,
+      });
+      const driverScope = yield* Effect.scope;
       const adapter = yield* makeBobAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
         instanceId,
         onAvailableCommands,
         onAvailableModes,
+        refreshUsageLimits,
       });
 
       return {
@@ -163,9 +190,18 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         accentColor,
         enabled,
         snapshot,
-        /** A workspace sees the commands Bob's latest session there reported. */
+        /**
+         * A workspace sees the commands Bob's latest session there reported. Opening one also
+         * reads the budget of a team it pins, so its bar is right before Bob first runs there.
+         */
         snapshotForCwd: (cwd) =>
-          effectiveConfig.enabled ? snapshotForCwd(cwd) : snapshot.getSnapshot,
+          effectiveConfig.enabled
+            ? snapshotForCwd(cwd).pipe(
+                Effect.tap(() =>
+                  refreshUsageLimits(cwd, false).pipe(Effect.forkIn(driverScope), Effect.asVoid),
+                ),
+              )
+            : snapshot.getSnapshot,
         adapter,
         textGeneration,
       } satisfies ProviderInstance;
