@@ -29,6 +29,9 @@ const bobNoResume = process.env.T3_ACP_BOB_NO_RESUME === "1";
 const bobAskOnCancel = process.env.T3_ACP_BOB_ASK_ON_CANCEL === "1";
 // With T3_ACP_EMIT_TOOL_CALLS, Bob's tool edits a file instead of running a command.
 const bobToolEdits = process.env.T3_ACP_BOB_TOOL_EDITS === "1";
+// Bob 2.0.5's task export/import: a stored task resumes only once it has been moved here.
+const bobTaskTransfer = process.env.T3_ACP_BOB_TASK_TRANSFER === "1";
+const bobMovedTaskId = "bob-moved-task";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
@@ -522,7 +525,7 @@ const program = Effect.gen(function* () {
       if (bobProfile) {
         yield* bobSessionSetupError;
         // Bob answers every other failed resume (unknown task, other cwd) with the same error.
-        if (bobResumeNotFound) {
+        if (bobResumeNotFound || (bobTaskTransfer && request.sessionId !== bobMovedTaskId)) {
           return yield* AcpError.AcpRequestError.resourceNotFound(
             `Resource not found: ${request.sessionId}`,
             { uri: request.sessionId },
@@ -1614,6 +1617,30 @@ const program = Effect.gen(function* () {
   }
 
   yield* agent.handleUnknownExtRequest((method, params) => {
+    if (bobTaskTransfer && method === "_bob/task/export") {
+      const exportedId = (params as { readonly sessionId?: string }).sessionId;
+      return Effect.succeed({
+        version: 1,
+        exportedAt: 1,
+        workspace: "file:/old-folder",
+        tasks: [
+          {
+            task: {
+              id: exportedId,
+              workspace: "file:/old-folder",
+              env: {
+                workspace: "/old-folder",
+                staticEnvInfo: { primaryWorkspace: "/old-folder", systemInfo: {} },
+              },
+            },
+            messages: [{ id: "message-1", role: "user", data: { content: "hi" }, createdAt: 1 }],
+          },
+        ],
+      });
+    }
+    if (bobTaskTransfer && method === "_bob/task/import") {
+      return Effect.succeed({ sessionIds: [bobMovedTaskId] });
+    }
     if (method === "_test/environment") {
       return Effect.succeed({
         inherited: process.env.T3_ACP_RUNTIME_AMBIENT === "sentinel",
