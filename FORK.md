@@ -25,6 +25,12 @@ don't reopen them without new information. Add to it when a decision changes.
   and adapts usage per the `bobUsageInUpstreamClients` setting (hidden by default).
   That is also why the usage contract keeps upstream's version number instead of
   bumping it: `bob` and `credits` only reach clients that asked for them.
+- **Driving Bob needs a fork client.** Upstream clients list only the providers they
+  were built with, so they show Bob's threads, diffs and (per the setting) usage, but
+  cannot start or continue a Bob turn: the composer asks to enable a provider. Over T3
+  Connect, the source-built desktop app drives Bob; app.t3.codes and the App Store app
+  only view. On a phone, use the web client a fork server hosts, over the network or
+  Tailscale.
 
 ## Install from source
 
@@ -49,8 +55,9 @@ needs **Open Anyway** in System Settings → Privacy & Security the first time.
 **Server only (Linux, or a Mac without the desktop app).** `vp run --filter t3 build`,
 then start `node apps/server/dist/bin.mjs serve` in a project folder; it prints a
 pairing link. Add `--host 0.0.0.0 --port 3773` to reach it from other machines. For T3
-Connect, run `node apps/server/dist/bin.mjs connect link --headless` once, approve its
-code, and restart `serve`.
+Connect, run `node apps/server/dist/bin.mjs connect link --headless` once in a terminal
+(it offers to download Cloudflare's relay client first), approve its code at
+accounts.t3.codes, and restart `serve`.
 
 On a machine where Bob has never run, the first turn reports Bob's license. Run `bob`
 once in a terminal, or `bob --accept-license -p "hi"` on a headless machine.
