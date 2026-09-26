@@ -25,12 +25,15 @@ don't reopen them without new information. Add to it when a decision changes.
   and adapts usage per the `bobUsageInUpstreamClients` setting (hidden by default).
   That is also why the usage contract keeps upstream's version number instead of
   bumping it: `bob` and `credits` only reach clients that asked for them.
-- **Driving Bob needs a fork client.** Upstream clients list only the providers they
-  were built with, so they show Bob's threads, diffs and (per the setting) usage, but
-  cannot start or continue a Bob turn: the composer asks to enable a provider. Over T3
-  Connect, the source-built desktop app drives Bob; app.t3.codes and the App Store app
-  only view. On a phone, use the web client a fork server hosts, over the network or
-  Tailscale.
+- **Upstream's web client cannot drive Bob; upstream's mobile app should.** The web
+  composer takes a built-in provider's on/off state from its copy of the server
+  settings (`applyProviderInstanceSettings`), and upstream's settings schema strips
+  `providers.bob`, so Bob reads as disabled: app.t3.codes shows Bob's threads and diffs
+  but asks to enable a provider (tested over T3 Connect). The mobile app builds its
+  model list from the server's provider snapshots, which say Bob is enabled, so the
+  App Store app should offer Bob with a generic icon (from reading the code; not tried
+  on the App Store build). The source-built desktop app drives Bob over T3 Connect
+  (tested).
 
 ## Install from source
 
