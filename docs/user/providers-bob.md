@@ -37,6 +37,12 @@ its skills and MCP prompts appear in the composer's `/` menu. When a thread move
 to another folder, such as picking a branch that lives in another worktree, Bob
 moves the conversation with it.
 
+Reverting a thread, or editing and resubmitting an earlier turn, rewinds Bob's
+conversation as well, as rolling back a task in Bob's IDE does: Bob continues from
+the conversation before that turn. The reverted turns' Bobcoins leave **Usage →
+Usage**, although your monthly allowance still counts them. When Bob runs a
+subagent, the thread shows it as an agent with the subagent's report.
+
 T3 Code's Plan mode uses Bob's plan mode. After Bob has run, the model picker's
 **Mode** option also offers Bob's Ask mode and your custom modes
 (`custom_modes.yaml`); turns use Agent mode unless you pick another. A custom mode
@@ -75,6 +81,3 @@ its dollar totals include Bobcoins, each counted as $1.
   are unavailable.
 - Compacting a Bob conversation is unavailable. Start a new thread when one gets
   too long.
-- T3 Code keeps conversation history and file diffs, but Bob cannot rewind its
-  conversation. Reverting a thread or editing and resubmitting an earlier turn is
-  unavailable.

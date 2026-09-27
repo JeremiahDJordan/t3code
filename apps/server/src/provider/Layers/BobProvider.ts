@@ -52,7 +52,8 @@ import type { ServerProviderShape } from "../Services/ServerProvider.ts";
 
 const BOB_PRESENTATION = {
   displayName: "Bob",
-  supportsConversationRollback: false,
+  // By rewinding the task with Bob's task export and import; see `rewindBobTask`.
+  supportsConversationRollback: true,
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
   // Read from Bob's task database after each turn.
