@@ -1,4 +1,4 @@
-// node:sqlite reads Bob Shell's live task database; Node fs tells a missing one apart.
+// Node fs tells a missing database apart, and node:timers yields between rows.
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * Reads Bob Shell's per-request spend from its task database.
@@ -12,11 +12,11 @@
  * @module bobUsageReader
  */
 import * as NodeFSP from "node:fs/promises";
-import * as NodeSqlite from "node:sqlite";
 import * as NodeTimersPromises from "node:timers/promises";
 
 import type { UsageTokenTotals } from "@t3tools/contracts";
 
+import { bobTableColumns, withBobDatabase } from "../provider/Layers/bobDatabase.ts";
 import { totalTokens, type UsageRecord } from "./usageTranscripts.ts";
 
 /** The unit Bob bills in, as its own usage display names it. */
@@ -98,7 +98,7 @@ function parseBobMessage(
  * malformed row from failing the query. Subagent tasks count toward their
  * parent's session. Optional columns missing from older schemas fall back.
  */
-function usageQuery(taskColumns: ReadonlySet<unknown>): { sql: string; windowed: boolean } {
+function usageQuery(taskColumns: ReadonlySet<string>): { sql: string; windowed: boolean } {
   const windowed = taskColumns.has("updated_at");
   const sessionId = taskColumns.has("parent_id") ? "COALESCE(t.parent_id, t.id)" : "t.id";
   const model = taskColumns.has("env")
@@ -133,15 +133,6 @@ FROM (
   };
 }
 
-function columns(database: NodeSqlite.DatabaseSync, table: string): ReadonlySet<unknown> {
-  return new Set(
-    database
-      .prepare(`PRAGMA table_info(${table})`)
-      .all()
-      .map((row) => row.name),
-  );
-}
-
 export interface BobUsageReadResult {
   readonly files: readonly { readonly path: string; readonly records: readonly UsageRecord[] }[];
   readonly missing: boolean;
@@ -150,7 +141,8 @@ export interface BobUsageReadResult {
 
 /**
  * Reads the charged requests of every task Bob updated at or after `sinceMs`.
- * The connection is read-only and closed before returning, so Bob keeps writing.
+ * The connection is read-only and closed before returning, so Bob keeps writing;
+ * a busy Bob fails this source promptly rather than stalling the server.
  */
 export async function readBobUsage(
   databasePath: string,
@@ -164,36 +156,27 @@ export async function readBobUsage(
   }
   const file = { path: databasePath, records: [] as UsageRecord[] };
   const seen = new Set<string>();
-  let error = false;
-  let database: NodeSqlite.DatabaseSync | undefined;
-  try {
-    database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
-    // A busy Bob should fail this source promptly rather than stalling the
-    // server while SQLite waits for its writer.
-    database.exec("PRAGMA busy_timeout = 100");
-    const taskColumns = columns(database, "tasks");
-    const messageColumns = columns(database, "messages");
+  // Resolves to whether the read failed; records read before a failure are kept.
+  const error = await withBobDatabase(databasePath, async (database) => {
+    const taskColumns = bobTableColumns(database, "tasks");
+    const messageColumns = bobTableColumns(database, "messages");
     if (
       !taskColumns.has("id") ||
       !["id", "task_id", "role", "data"].every((column) => messageColumns.has(column))
     ) {
-      error = true;
-    } else {
-      const { sql, windowed } = usageQuery(taskColumns);
-      let rows = 0;
-      for (const row of database.prepare(sql).iterate(...(windowed ? [sinceMs] : []))) {
-        const record = parseBobMessage(row);
-        if (record !== null && record.timestampMs >= sinceMs && !seen.has(record.dedupeKey)) {
-          seen.add(record.dedupeKey);
-          file.records.push(record);
-        }
-        if (++rows % 256 === 0) await NodeTimersPromises.setImmediate();
-      }
+      return true;
     }
-  } catch {
-    error = true;
-  } finally {
-    database?.close();
-  }
+    const { sql, windowed } = usageQuery(taskColumns);
+    let rows = 0;
+    for (const row of database.prepare(sql).iterate(...(windowed ? [sinceMs] : []))) {
+      const record = parseBobMessage(row);
+      if (record !== null && record.timestampMs >= sinceMs && !seen.has(record.dedupeKey)) {
+        seen.add(record.dedupeKey);
+        file.records.push(record);
+      }
+      if (++rows % 256 === 0) await NodeTimersPromises.setImmediate();
+    }
+    return false;
+  }).catch(() => true);
   return { files: [file], missing: false, error };
 }

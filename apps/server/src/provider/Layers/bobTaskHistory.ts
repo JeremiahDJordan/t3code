@@ -1,5 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - Bob's task database is SQLite, and node:sqlite
-// has no Effect platform service. Each read opens it read-only and closes it before returning.
 /**
  * bobTaskHistory - Bob Shell conversations, read from Bob's own task database so
  * project import can offer work that ran in the `bob` CLI.
@@ -11,13 +9,13 @@
  *
  * @module provider/Layers/bobTaskHistory
  */
-import * as NodeSqlite from "node:sqlite";
-
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+
+import { bobTableColumns, readBobDatabase } from "./bobDatabase.ts";
 
 const BobResumeCursor = Schema.Struct({
   schemaVersion: Schema.Literal(1),
@@ -61,8 +59,6 @@ export interface BobTaskHistory {
   /** The first user prompt and the newest remaining messages, oldest first. */
   readonly messages: ReadonlyArray<BobTaskMessage>;
 }
-
-const decodeTableColumn = Schema.decodeUnknownOption(Schema.Struct({ name: Schema.String }));
 
 const BobTaskRow = Schema.Struct({
   id: Schema.String,
@@ -117,17 +113,13 @@ const MESSAGE_ORDER_DESC = "coalesce(timestamp, created_at) DESC, position DESC"
 const T3_RUNTIME_INSTRUCTIONS =
   /\s*<runtime_info>In case you're asked: you are running in T3 Code[\s\S]*$/;
 
-/** Importable root tasks. Checks for columns older Bob databases lack are left out. */
-function importableTasksQuery(
-  database: NodeSqlite.DatabaseSync,
-  selection: "newest" | "byId",
-): string {
-  const columns = new Set(
-    database
-      .prepare("PRAGMA table_info(tasks)")
-      .all()
-      .flatMap((row) => Option.toArray(decodeTableColumn(row)).map((column) => column.name)),
-  );
+/**
+ * Importable root tasks, given the columns of Bob's `tasks` table. Checks for columns older Bob
+ * databases lack are left out. The message count is taken in an outer query, so only the
+ * selected tasks pay for it rather than every root task sorted before the `LIMIT`; the outer
+ * `ORDER BY` keeps SQLite from flattening the two back together.
+ */
+function importableTasksQuery(columns: ReadonlySet<string>, selection: "newest" | "byId"): string {
   const optional = (column: string) => (columns.has(column) ? `t.${column}` : "NULL");
   const conditions = [
     "t.project_id LIKE 'file:%'",
@@ -137,27 +129,17 @@ function importableTasksQuery(
     ...(columns.has("time_archived") ? ["t.time_archived IS NULL"] : []),
     ...(selection === "byId" ? ["t.id = ?"] : []),
   ];
-  return `SELECT t.id, t.project_id, ${optional("title")} AS title,
-      ${optional("first_message")} AS first_message, t.created_at, t.updated_at,
-      (SELECT count(*) FROM messages m WHERE m.task_id = t.id) AS message_count
-    FROM tasks t
-    WHERE ${conditions.join(" AND ")}
-    ${selection === "newest" ? "ORDER BY t.updated_at DESC, t.id LIMIT ?" : ""}`;
+  const order = selection === "newest" ? "ORDER BY t.updated_at DESC, t.id" : "";
+  return `SELECT t.*, (SELECT count(*) FROM messages m WHERE m.task_id = t.id) AS message_count
+    FROM (
+      SELECT t.id, t.project_id, ${optional("title")} AS title,
+        ${optional("first_message")} AS first_message, t.created_at, t.updated_at
+      FROM tasks t
+      WHERE ${conditions.join(" AND ")}
+      ${selection === "newest" ? `${order} LIMIT ?` : ""}
+    ) AS t
+    ${order}`;
 }
-
-/** Runs `read` on Bob's database opened read-only; undefined when it cannot be read. */
-const readBobDatabase = <A>(
-  databasePath: string,
-  read: (database: NodeSqlite.DatabaseSync) => A,
-): Effect.Effect<A | undefined> =>
-  Effect.try(() => {
-    const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
-    try {
-      return read(database);
-    } finally {
-      database.close();
-    }
-  }).pipe(Effect.orElseSucceed(() => undefined));
 
 /** The folder a `file:` project id names: a raw path, or a `file://` URL. */
 const bobTaskCwd = Effect.fnUntraced(function* (projectId: string) {
@@ -212,7 +194,7 @@ export const listBobTasks = Effect.fn("listBobTasks")(function* (
   limit: number,
 ) {
   const rows = yield* readBobDatabase(databasePath, (database) =>
-    database.prepare(importableTasksQuery(database, "newest")).all(limit),
+    database.prepare(importableTasksQuery(bobTableColumns(database, "tasks"), "newest")).all(limit),
   );
   const tasks: Array<BobTaskSummary> = [];
   for (const row of rows ?? []) {
@@ -235,7 +217,9 @@ export const readBobTaskHistory = Effect.fn("readBobTaskHistory")(function* (
   const snapshot = yield* readBobDatabase(databasePath, (database) => {
     // One read transaction keeps the task row and its messages consistent while Bob writes.
     database.exec("BEGIN");
-    const task = database.prepare(importableTasksQuery(database, "byId")).get(taskId);
+    const task = database
+      .prepare(importableTasksQuery(bobTableColumns(database, "tasks"), "byId"))
+      .get(taskId);
     const newest = database
       .prepare(`${VISIBLE_MESSAGES} ORDER BY ${MESSAGE_ORDER_DESC} LIMIT ?`)
       .all(taskId, Math.max(0, maxMessages));

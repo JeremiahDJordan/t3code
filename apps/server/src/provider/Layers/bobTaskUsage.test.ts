@@ -111,6 +111,19 @@ describe("bobThreadTokenUsage with a context window", () => {
     });
     expect(bobThreadTokenUsage(secondTurn, firstTurn).maxTokens).toBeUndefined();
   });
+
+  it("drops an assumed window the context has outgrown, keeping a full one", () => {
+    const outgrown = { ...secondTurn, contextTokens: 300_000 };
+    const usage = bobThreadTokenUsage(outgrown, firstTurn, 270_000);
+    expect(usage.usedTokens).toBe(300_000);
+    expect(usage).not.toHaveProperty("maxTokens");
+    expect(bobThreadTokenUsage({ ...outgrown, tokensRecorded: false }, firstTurn, 270_000)).toEqual(
+      { usedTokens: 300_000, cost: { amount: 0.118, unit: "Bobcoins" } },
+    );
+    expect(
+      bobThreadTokenUsage({ ...secondTurn, contextTokens: 270_000 }, firstTurn, 270_000).maxTokens,
+    ).toBe(270_000);
+  });
 });
 
 describe("bobTurnTokenUsage", () => {
