@@ -194,8 +194,17 @@ interface BobSessionContext {
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
-  /** Runs one prompt at a time, as Bob requires, so a steer waits for the running prompt. */
+  /**
+   * Runs one prompt at a time, as Bob requires. A follow-up waits for the running prompt: in
+   * `queue` mode until Bob finishes it, in `steer` mode after interrupting it once no tool call
+   * is running. Either way it then goes to Bob as the next prompt of the same turn.
+   */
   readonly promptLock: Semaphore.Semaphore;
+  /**
+   * A steer waits for the running prompt: `waiting` until Bob finishes its running tool calls,
+   * `cancelled` once the prompt was cancelled for it. Cleared when that prompt returns.
+   */
+  steer: "waiting" | "cancelled" | undefined;
   /** Counts Stop requests. A prompt waiting to be sent when Stop is pressed is dropped. */
   interrupts: number;
   /**
@@ -669,6 +678,43 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
       });
 
     /**
+     * Interrupts the running prompt for a waiting steer once Bob runs no tool call, so a tool
+     * call Bob started finishes rather than being cancelled. Bob records its tool results before
+     * it asks the model again, so the steer continues from them; what Bob loses is the model reply
+     * in progress, which the steer replaces. The cancel runs apart from Bob's updates, which it
+     * waits on.
+     */
+    const interruptForSteer = (ctx: BobSessionContext) =>
+      Effect.gen(function* () {
+        if (
+          ctx.steer !== "waiting" ||
+          ctx.promptEpoch === undefined ||
+          (ctx.openTurn?.openTools.size ?? 0) > 0
+        ) {
+          return;
+        }
+        ctx.steer = "cancelled";
+        yield* Effect.ignore(ctx.acp.cancel).pipe(Effect.forkIn(adapterScope), Effect.asVoid);
+      });
+
+    /**
+     * In steer mode, a follow-up still waiting when a prompt reaches Bob, such as one sent while
+     * an earlier follow-up waited, interrupts that prompt as it did the one before.
+     */
+    const steerWaitingFollowUp = (ctx: BobSessionContext) =>
+      Effect.suspend(() => {
+        if (
+          bobSettings.followUpBehavior !== "steer" ||
+          ctx.promptsInFlight <= 1 ||
+          ctx.steer !== undefined
+        ) {
+          return Effect.void;
+        }
+        ctx.steer = "waiting";
+        return interruptForSteer(ctx);
+      });
+
+    /**
      * Emits the open turn's `turn.completed` once, whichever of its prompt or Bob's exit ends it,
      * and returns the session to ready unless a new turn has already claimed it. Bob leaves the
      * tool it was running unfinished when Stop cancels it, so any tool still open ends failed.
@@ -854,6 +900,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
            */
           const refusesPermission = () =>
             ctx?.stopped === true ||
+            ctx?.steer === "cancelled" ||
             (ctx?.promptEpoch !== undefined && ctx.promptEpoch !== ctx.interrupts);
           const handlePermission = (params: EffectAcpSchema.RequestPermissionRequest) =>
             Effect.gen(function* () {
@@ -1100,6 +1147,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             promptLock: yield* Semaphore.make(1),
             interrupts: 0,
             promptEpoch: undefined,
+            steer: undefined,
             taskCosts,
             turnStartTaskCosts: taskCosts,
             canCloseSessions:
@@ -1176,6 +1224,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                         rawPayload: event.rawPayload,
                       }),
                     );
+                    yield* interruptForSteer(ctx);
                     return;
                   }
                   case "ThoughtDelta":
@@ -1276,9 +1325,20 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
     const sendTurn: BobAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        // A sendTurn while a prompt is in flight is a steer: it continues the active turn and
-        // waits for the running prompt, since Bob rejects a second concurrent prompt.
+        // A sendTurn while a prompt is in flight continues the active turn. Bob rejects a second
+        // concurrent prompt, so it waits for the running one: queued follow-ups until Bob finishes
+        // it, steers after interrupting it once Bob's running tool calls finish.
         const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
+        // Only a prompt that is with Bob is interrupted; between prompts the steer just waits.
+        if (
+          bobSettings.followUpBehavior === "steer" &&
+          steeringTurnId !== undefined &&
+          ctx.steer === undefined &&
+          ctx.promptEpoch !== undefined
+        ) {
+          ctx.steer = "waiting";
+          yield* interruptForSteer(ctx);
+        }
         const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
         const interrupts = ctx.interrupts;
         ctx.activeTurnId = turnId;
@@ -1408,29 +1468,38 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           // Stop drops a prompt that was still waiting, instead of sending it after the cancel.
           const dropped = ctx.interrupts !== interrupts;
           if (!dropped) ctx.promptEpoch = interrupts;
+          const dispatched = yield* Deferred.make<void>();
           // ACP commands parse the complete text. Extra context can turn an exact
           // command into an ordinary model prompt or change its arguments.
           const result: EffectAcpSchema.PromptResponse = dropped
             ? { stopReason: "cancelled" }
-            : yield* ctx.acp
-                .prompt({
-                  prompt: /^\/[^\s/]+(?:\s|$)/.test(rawPrompt)
-                    ? promptParts
-                    : [
-                        ...promptParts,
-                        { type: "text", text: buildRuntimeInstructions({ harness: "Bob" }) },
-                      ],
-                })
-                .pipe(
-                  Effect.mapError((error) =>
-                    mapBobAcpError(input.threadId, "session/prompt", error),
-                  ),
-                  Effect.ensuring(
-                    Effect.sync(() => {
-                      ctx.promptEpoch = undefined;
-                    }),
-                  ),
-                );
+            : yield* Effect.raceFirst(
+                ctx.acp.prompt(
+                  {
+                    prompt: /^\/[^\s/]+(?:\s|$)/.test(rawPrompt)
+                      ? promptParts
+                      : [
+                          ...promptParts,
+                          { type: "text", text: buildRuntimeInstructions({ harness: "Bob" }) },
+                        ],
+                  },
+                  { dispatched },
+                ),
+                // Only once the prompt is sent, so a steer's cancel stops it rather than going first.
+                Deferred.await(dispatched).pipe(
+                  Effect.andThen(steerWaitingFollowUp(ctx)),
+                  Effect.andThen(Effect.never),
+                ),
+              ).pipe(
+                Effect.mapError((error) => mapBobAcpError(input.threadId, "session/prompt", error)),
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    ctx.promptEpoch = undefined;
+                    // The steer this prompt held goes next; one waiting behind it interrupts it.
+                    ctx.steer = undefined;
+                  }),
+                ),
+              );
 
           yield* ctx.acp.drainEvents;
 

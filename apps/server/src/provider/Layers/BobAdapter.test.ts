@@ -145,6 +145,7 @@ const withMockBob = <A, E, R>(
   }) => Effect.Effect<A, E, R>,
   instance?: {
     readonly authMethod?: BobAuthMethod;
+    readonly followUpBehavior?: "queue" | "steer";
     readonly environment?: NodeJS.ProcessEnv;
     readonly onAvailableCommands?: BobAdapterLiveOptions["onAvailableCommands"];
     readonly onAvailableModes?: BobAdapterLiveOptions["onAvailableModes"];
@@ -164,6 +165,7 @@ const withMockBob = <A, E, R>(
       decodeBobSettings({
         binaryPath,
         ...(instance?.authMethod ? { authMethod: instance.authMethod } : {}),
+        ...(instance?.followUpBehavior ? { followUpBehavior: instance.followUpBehavior } : {}),
       }),
       {
         taskDatabasePath,
@@ -843,7 +845,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         });
         assert.deepStrictEqual(session.resumeCursor, {
           schemaVersion: 1,
-          sessionId: "bob-moved-task",
+          sessionId: "bob-imported-1",
         });
 
         const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
@@ -868,7 +870,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         ]);
         assert.deepStrictEqual(
           paramsOf(requests, "session/resume").map((params) => params.sessionId),
-          ["task-in-old-folder", "bob-moved-task"],
+          ["task-in-old-folder", "bob-imported-1"],
         );
         assert.lengthOf(paramsOf(requests, "session/new"), 0);
 
@@ -926,13 +928,13 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         // the kept part once.
         assert.deepStrictEqual(
           paramsOf(requests, "session/resume").map((params) => params.sessionId),
-          ["bob-moved-task"],
+          ["bob-imported-1"],
         );
         assert.deepStrictEqual(paramsOf(requests, "session/delete"), [{ sessionId: originalTask }]);
         const [rolledBack] = yield* adapter.listSessions();
         assert.deepStrictEqual(rolledBack?.resumeCursor, {
           schemaVersion: 1,
-          sessionId: "bob-moved-task",
+          sessionId: "bob-imported-1",
           turnStartedAt: turnStartedAt.slice(0, 1),
         });
 
@@ -954,13 +956,14 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
         assert.lengthOf(paramsOf(requests, "_bob/task/import"), 0);
         assert.lengthOf(paramsOf(requests, "session/new"), 2);
+        // The original goes, not the new conversation that replaces it.
         assert.deepStrictEqual(paramsOf(requests, "session/delete"), [
           { sessionId: "mock-session-1" },
         ]);
         const [rolledBack] = yield* adapter.listSessions();
         assert.deepStrictEqual(rolledBack?.resumeCursor, {
           schemaVersion: 1,
-          sessionId: "mock-session-1",
+          sessionId: "mock-session-2",
         });
 
         yield* adapter.stopSession(threadId);
@@ -1475,7 +1478,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
-  it.effect("sends a follow-up after Bob's running prompt and continues the same turn", () =>
+  it.effect("queues a follow-up until Bob finishes its prompt, by default", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("bob-steer");
@@ -1518,8 +1521,9 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
             ["turn.completed", turn.turnId],
           ],
         );
-        // The follow-up reaches Bob only after the first prompt's tool was answered.
+        // The follow-up reaches Bob only after the first prompt finished, uninterrupted.
         const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.isFalse(requests.some((entry) => entry.method === "session/cancel"));
         const followUpIndex = requests.findIndex(
           (entry) =>
             entry.method === "session/prompt" &&
@@ -1529,6 +1533,176 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         assert.isAbove(followUpIndex, firstAnswerIndex);
       }),
     ),
+  );
+
+  it.effect("lets Bob's running tool call finish before a steer interrupts the prompt", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_BOB_TOOL_THEN_THINK: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-steer-after-tool");
+          const opened = yield* Queue.unbounded<ApprovalRequestId>();
+          yield* Stream.runForEach(adapter.streamEvents, (event) =>
+            event.type === "request.opened"
+              ? Queue.offer(opened, ApprovalRequestId.make(String(event.requestId)))
+              : Effect.void,
+          ).pipe(Effect.forkChild({ startImmediately: true }));
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+          });
+          const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+          const first = yield* adapter
+            .sendTurn({ threadId, input: "run it" })
+            .pipe(Effect.forkChild);
+          const toolRequest = yield* Queue.take(opened);
+          const steer = yield* adapter
+            .sendTurn({ threadId, input: "then stop there" })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          // Bob's tool call is still waiting for its approval, so the steer leaves it alone.
+          const beforeAnswer = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          assert.isFalse(beforeAnswer.some((entry) => entry.method === "session/cancel"));
+
+          yield* adapter.respondToRequest(threadId, toolRequest, "accept");
+          const turn = yield* Fiber.join(first);
+          assert.equal((yield* Fiber.join(steer)).turnId, turn.turnId);
+
+          const collected = Array.from(yield* events);
+          const completed = collected.find((event) => event.type === "turn.completed");
+          assert.equal(
+            completed?.type === "turn.completed" && completed.payload.state,
+            "completed",
+          );
+          assert.deepStrictEqual(
+            collected.flatMap((event) =>
+              event.type === "item.completed" && event.itemId === "bob-tool-then-think"
+                ? [event.payload.status]
+                : [],
+            ),
+            ["completed"],
+          );
+          // The prompt is cancelled only after the tool call finished, then the steer goes to Bob.
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          const answered = requests.findIndex((entry) => "result" in entry);
+          const cancelled = requests.findIndex((entry) => entry.method === "session/cancel");
+          const steered = requests.findIndex(
+            (entry) =>
+              entry.method === "session/prompt" &&
+              JSON.stringify(entry.params).includes("then stop there"),
+          );
+          assert.isAbove(cancelled, answered);
+          assert.isAbove(steered, cancelled);
+
+          yield* adapter.stopSession(threadId);
+        }),
+      { followUpBehavior: "steer" },
+    ),
+  );
+
+  it.effect("interrupts Bob's model reply right away for a steer between tool calls", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_BOB_TOOL_THEN_THINK: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-steer-while-thinking");
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const toolDone = yield* nextEvent(
+            adapter,
+            (event) => event.type === "item.completed" && event.itemId === "bob-tool-then-think",
+          );
+          const completedTurn = yield* nextEvent(
+            adapter,
+            (event) => event.type === "turn.completed",
+          );
+
+          const first = yield* adapter
+            .sendTurn({ threadId, input: "run it" })
+            .pipe(Effect.forkChild);
+          yield* toolDone;
+          const steer = yield* adapter.sendTurn({ threadId, input: "now this instead" });
+          const turn = yield* Fiber.join(first);
+          assert.equal(steer.turnId, turn.turnId);
+          const completed = yield* completedTurn;
+          assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          const cancelled = requests.findIndex((entry) => entry.method === "session/cancel");
+          const steered = requests.findIndex(
+            (entry) =>
+              entry.method === "session/prompt" &&
+              JSON.stringify(entry.params).includes("now this instead"),
+          );
+          assert.isAtLeast(cancelled, 0);
+          assert.isAbove(steered, cancelled);
+
+          yield* adapter.stopSession(threadId);
+        }),
+      { followUpBehavior: "steer" },
+    ),
+  );
+
+  it.effect("interrupts a steer's prompt for a second steer sent while the first waited", () =>
+    Effect.gen(function* () {
+      const firstPromptSent = yield* Deferred.make<void>();
+      yield* withMockBob(
+        { T3_ACP_BOB: "1", T3_ACP_PROMPT_DELAY_MS: "2000" },
+        ({ adapter, requestLogPath }) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make("bob-steer-twice");
+            yield* adapter.startSession({
+              threadId,
+              cwd: process.cwd(),
+              runtimeMode: "full-access",
+            });
+            const completedTurn = yield* nextEvent(
+              adapter,
+              (event) => event.type === "turn.completed",
+            );
+
+            const sendTurn = (input: string) =>
+              adapter
+                .sendTurn({ threadId, input })
+                .pipe(Effect.forkChild({ startImmediately: true }));
+            const first = yield* sendTurn("prompt:one");
+            yield* Deferred.await(firstPromptSent);
+            const second = yield* sendTurn("prompt:two");
+            const third = yield* sendTurn("prompt:three");
+            const turn = yield* Fiber.join(first);
+            assert.equal((yield* Fiber.join(second)).turnId, turn.turnId);
+            assert.equal((yield* Fiber.join(third)).turnId, turn.turnId);
+            const completed = yield* completedTurn;
+            assert.equal(
+              completed.type === "turn.completed" && completed.payload.state,
+              "completed",
+            );
+
+            // Each prompt a later message waited behind is cancelled once Bob has it.
+            const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+            assert.deepStrictEqual(
+              requests.flatMap((entry) =>
+                entry.method === "session/cancel"
+                  ? ["cancel"]
+                  : entry.method === "session/prompt"
+                    ? [JSON.stringify(entry.params).match(/prompt:(?:one|two|three)/)?.[0]]
+                    : [],
+              ),
+              ["prompt:one", "cancel", "prompt:two", "cancel", "prompt:three"],
+            );
+
+            yield* adapter.stopSession(threadId);
+          }),
+        {
+          followUpBehavior: "steer",
+          nativeEventLogger: signalRequestStarted("session/prompt", firstPromptSent),
+        },
+      );
+    }),
   );
 
   it.effect("reports Bob's reason for a failed turn and settles it", () =>
