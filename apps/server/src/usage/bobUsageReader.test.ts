@@ -8,6 +8,7 @@ import * as NodeSqlite from "node:sqlite";
 import { afterEach, assert, beforeEach, describe, it } from "@effect/vitest";
 
 import { readBobUsage } from "./bobUsageReader.ts";
+import { totalTokens } from "./usageTranscripts.ts";
 
 const T = Date.parse("2026-08-01T10:00:00.000Z");
 const MINUTE = 60_000;
@@ -17,6 +18,8 @@ interface BobTaskRow {
   readonly parentId?: string;
   readonly model?: string;
   readonly updatedAt: number;
+  /** Bob's running totals for the task, which include its subagents'. */
+  readonly costs?: Record<string, number>;
 }
 
 interface BobMessageRow {
@@ -66,12 +69,13 @@ function writeBobDatabase(tasks: readonly BobTaskRow[], messages: readonly BobMe
   for (const task of tasks) {
     database
       .prepare(
-        "INSERT INTO tasks (id, project_id, parent_id, env, created_at, updated_at) VALUES (?, 'file:/work', ?, ?, ?, ?)",
+        "INSERT INTO tasks (id, project_id, parent_id, env, costs, created_at, updated_at) VALUES (?, 'file:/work', ?, ?, ?, ?, ?)",
       )
       .run(
         task.id,
         task.parentId ?? null,
         task.model === undefined ? null : JSON.stringify({ model: { id: task.model } }),
+        task.costs === undefined ? null : JSON.stringify(task.costs),
         task.updatedAt - 10 * MINUTE,
         task.updatedAt,
       );
@@ -118,9 +122,20 @@ describe("readBobUsage", () => {
   it("reads each charged request with its Bobcoins, time, model, and root session", async () => {
     writeBobDatabase(
       [
-        { id: "task-a", model: "premium-ide", updatedAt: T + 10 * MINUTE },
-        // A subagent without a model of its own.
-        { id: "task-b", parentId: "task-a", updatedAt: T + 10 * MINUTE },
+        {
+          id: "task-a",
+          model: "premium-ide",
+          updatedAt: T + 10 * MINUTE,
+          // Includes the subagent's spend, which its own task counts.
+          costs: { cost: 0.1, contextTokens: 20_835 },
+        },
+        // A subagent as Bob 2.0.5 writes it: no model and no rows of its own.
+        {
+          id: "task-b",
+          parentId: "task-a",
+          updatedAt: T + 4 * MINUTE,
+          costs: { cost: 0.01, contextTokens: 500 },
+        },
       ],
       [
         { ...assistant("user-1", "task-a", T - MINUTE, { cost: 9 }), role: "user" },
@@ -138,7 +153,6 @@ describe("readBobUsage", () => {
         // Cancelled before Bob charged it.
         assistant("m-3", "task-a", T + 2 * MINUTE, undefined),
         { id: "m-4", taskId: "task-a", role: "assistant", data: "{not json" },
-        assistant("m-5", "task-b", T + 4 * MINUTE, { cost: 0.01, contextTokens: 500 }),
       ],
     );
 
@@ -180,21 +194,71 @@ describe("readBobUsage", () => {
       {
         provider: "bob",
         timestampMs: T + 4 * MINUTE,
-        model: "bob",
+        model: "premium-ide",
         sessionId: "task-a",
         totals: { uncachedInputTokens: 500, ...noTokens },
         reportedCostUsd: null,
         credits: { amount: 0.01, unit: "Bobcoins" },
         fast: false,
-        dedupeKey: "bob:m-5",
+        dedupeKey: "bob:task:task-b",
       },
     ]);
+  });
+
+  it("counts a subagent's rows from older Bob once, adding only the spend they miss", async () => {
+    writeBobDatabase(
+      [
+        { id: "task-a", model: "premium-ide", updatedAt: T + 10 * MINUTE },
+        // Its rows miss a cancelled request, and one row is older than the window.
+        {
+          id: "task-c",
+          parentId: "task-a",
+          model: "explorer",
+          updatedAt: T + 10 * MINUTE,
+          costs: { cost: 0.75, contextTokens: 900 },
+        },
+        // Its rows hold all of its spend.
+        {
+          id: "task-d",
+          parentId: "task-a",
+          updatedAt: T + 10 * MINUTE,
+          costs: { cost: 0.5, contextTokens: 300 },
+        },
+      ],
+      [
+        assistant("m-6", "task-c", T - 2 * 60 * MINUTE, { cost: 0.25, contextTokens: 100 }),
+        assistant("m-7", "task-c", T, { cost: 0.25, contextTokens: 200 }),
+        assistant("m-8", "task-d", T + MINUTE, { cost: 0.5, contextTokens: 300 }),
+      ],
+    );
+
+    const records = await readRecords(T - 60 * MINUTE);
+    assert.deepStrictEqual(
+      records.map((record) => [
+        record.dedupeKey,
+        record.model,
+        record.sessionId,
+        record.credits?.amount,
+        totalTokens(record.totals),
+      ]),
+      [
+        ["bob:m-7", "explorer", "task-a", 0.25, 200],
+        ["bob:m-8", "bob", "task-a", 0.5, 300],
+        ["bob:task:task-c", "explorer", "task-a", 0.25, 0],
+      ],
+    );
   });
 
   it("skips tasks Bob last updated, and requests made, before the window", async () => {
     const database = writeBobDatabase(
       [
         { id: "old", model: "premium-ide", updatedAt: T - 2 * 24 * 60 * MINUTE },
+        {
+          id: "old-subagent",
+          parentId: "old",
+          updatedAt: T - 2 * 24 * 60 * MINUTE,
+          costs: { cost: 5, contextTokens: 50 },
+        },
         { id: "new", model: "premium-ide", updatedAt: T },
       ],
       [
