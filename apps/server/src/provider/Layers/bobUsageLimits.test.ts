@@ -181,8 +181,6 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
     }).pipe(Effect.scoped),
   );
 
-  // Bob applies its `gatewayUrl` setting over the environment when it starts, keying the
-  // login by the setting as written and normalizing it only for requests.
   it.effect("reads the model Bob's settings pin, ignoring an unset or malformed one", () =>
     Effect.gen(function* () {
       const pinned = yield* makeBobHome({
@@ -199,6 +197,8 @@ it.layer(NodeServices.layer)("readBobUsageLimits", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  // Bob applies its `gatewayUrl` setting over the environment when it starts, keying the
+  // login by the setting as written and normalizing it only for requests.
   it.effect("prefers the gateway in Bob's settings over BOB_GATEWAY_URL", () =>
     Effect.gen(function* () {
       const home = yield* makeBobHome({
