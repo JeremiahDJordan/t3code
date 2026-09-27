@@ -35,7 +35,12 @@ import { ServerConfig } from "../../config.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { BOB_API_KEY_REQUIRED_MESSAGE, BOB_SSO_SIGN_IN_MESSAGE } from "../acp/BobAcpSupport.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
-import { type BobAdapterLiveOptions, bobApprovalOptions, makeBobAdapter } from "./BobAdapter.ts";
+import {
+  type BobAdapterLiveOptions,
+  bobApprovalOptions,
+  bobRollbackCut,
+  makeBobAdapter,
+} from "./BobAdapter.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
@@ -176,6 +181,19 @@ const withMockBob = <A, E, R>(
 const bobAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-bob-adapter-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
+
+describe("bobRollbackCut", () => {
+  it("cuts at the first dropped turn that reached Bob's task", () => {
+    assert.deepStrictEqual(bobRollbackCut([100, 200, 300], 1), { atMs: 300 });
+    assert.deepStrictEqual(bobRollbackCut([100, null, 300], 2), { atMs: 300 });
+    // The dropped turns never reached this task, such as after a lost resume.
+    assert.isNull(bobRollbackCut([100, null], 1));
+  });
+
+  it("counts Bob's prompts for turns older than T3's records", () => {
+    assert.deepStrictEqual(bobRollbackCut([100], 3), { lastTurns: 3 });
+  });
+});
 
 describe("bobApprovalOptions", () => {
   it("offers to always allow only when Bob can remember the tool", () => {
@@ -806,6 +824,97 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
           ["task-in-old-folder", "bob-moved-task"],
         );
         assert.lengthOf(paramsOf(requests, "session/new"), 0);
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("rolls Bob's conversation back to before the dropped turn, as Bob's IDE does", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_TASK_TRANSFER: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-rollback");
+        const session = yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const originalTask = (session.resumeCursor as { readonly sessionId: string }).sessionId;
+        // Bob stamps its messages with the wall clock, which the test clock follows here.
+        // @effect-diagnostics-next-line globalDateInEffect:off
+        yield* TestClock.setTime(Date.now());
+        yield* adapter.sendTurn({ threadId, input: "first" });
+        // @effect-diagnostics-next-line globalDateInEffect:off
+        yield* TestClock.setTime(Date.now());
+        const second = yield* adapter.sendTurn({ threadId, input: "second" });
+        const turnStartedAt = (second.resumeCursor as { readonly turnStartedAt: number[] })
+          .turnStartedAt;
+        assert.lengthOf(turnStartedAt, 2);
+
+        const snapshot = yield* adapter.rollbackThread(threadId, 1);
+        assert.lengthOf(snapshot.turns, 1);
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        const [imported] = paramsOf(requests, "_bob/task/import");
+        const snapshotMessages = (
+          imported?.snapshot as {
+            readonly tasks: ReadonlyArray<{
+              readonly messages: ReadonlyArray<{
+                readonly role: string;
+                readonly data: { readonly content: string };
+              }>;
+            }>;
+          }
+        ).tasks[0]?.messages;
+        // Bob keeps its system prompt and the first turn; the second turn's prompt and reply go.
+        assert.deepStrictEqual(
+          snapshotMessages?.map((message) => [message.role, message.data.content]),
+          [
+            ["system", "You are Bob."],
+            ["user", "first"],
+            ["assistant", "Done."],
+          ],
+        );
+        // The session reopens on the kept conversation and the original goes, so Bob counts
+        // the kept part once.
+        assert.deepStrictEqual(
+          paramsOf(requests, "session/resume").map((params) => params.sessionId),
+          ["bob-moved-task"],
+        );
+        assert.deepStrictEqual(paramsOf(requests, "session/delete"), [{ sessionId: originalTask }]);
+        const [rolledBack] = yield* adapter.listSessions();
+        assert.deepStrictEqual(rolledBack?.resumeCursor, {
+          schemaVersion: 1,
+          sessionId: "bob-moved-task",
+          turnStartedAt: turnStartedAt.slice(0, 1),
+        });
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("starts a new Bob conversation when every turn is rolled back", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_TASK_TRANSFER: "1" }, ({ adapter, requestLogPath }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-rollback-all");
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId, input: "only" });
+
+        const snapshot = yield* adapter.rollbackThread(threadId, 1);
+        assert.lengthOf(snapshot.turns, 0);
+
+        const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.lengthOf(paramsOf(requests, "_bob/task/import"), 0);
+        assert.lengthOf(paramsOf(requests, "session/new"), 2);
+        assert.deepStrictEqual(paramsOf(requests, "session/delete"), [
+          { sessionId: "mock-session-1" },
+        ]);
+        const [rolledBack] = yield* adapter.listSessions();
+        assert.deepStrictEqual(rolledBack?.resumeCursor, {
+          schemaVersion: 1,
+          sessionId: "mock-session-1",
+        });
 
         yield* adapter.stopSession(threadId);
       }),
