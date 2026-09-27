@@ -33,7 +33,9 @@ const bobToolEdits = process.env.T3_ACP_BOB_TOOL_EDITS === "1";
 const bobTaskTransfer = process.env.T3_ACP_BOB_TASK_TRANSFER === "1";
 // Each Bob prompt runs a subagent, as Bob reports one: a tool call titled "Running subagent: ...".
 const bobSubagent = process.env.T3_ACP_BOB_SUBAGENT === "1";
-const bobMovedTaskId = "bob-moved-task";
+// The first Bob prompt runs one approved tool call, then keeps "thinking" until cancelled.
+const bobToolThenThink = process.env.T3_ACP_BOB_TOOL_THEN_THINK === "1";
+const bobImportedTaskPrefix = "bob-imported-";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
@@ -91,6 +93,26 @@ const permissionRequestCount = Math.max(
 );
 const sessionId = "mock-session-1";
 
+/**
+ * A new Bob task id: `prefix` numbered by the `method` requests this test's Bob processes have
+ * received, this one included. They share the request log, so no two tasks share an id.
+ */
+const nextBobTaskId = (prefix: string, method: string) => {
+  const received =
+    requestLogPath && NodeFS.existsSync(requestLogPath)
+      ? NodeFS.readFileSync(requestLogPath, "utf8")
+          .split("\n")
+          .filter((line) => {
+            try {
+              return (JSON.parse(line) as { readonly method?: unknown }).method === method;
+            } catch {
+              return false;
+            }
+          }).length
+      : 0;
+  return `${prefix}${Math.max(received, 1)}`;
+};
+
 let currentModeId = antigravityProfile ? "default" : bobProfile ? "agent" : "ask";
 let currentModelId = antigravityProfile ? "gemini-test-low" : "default";
 let parameterizedModelPicker = false;
@@ -102,6 +124,7 @@ let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
 let bobRunningPrompt: Deferred.Deferred<void> | undefined;
 let bobTitled = false;
+let bobThought = false;
 /** The task's messages as Bob's task export returns them, each prompt stamped when received. */
 const bobTaskMessages: Array<{
   id: string;
@@ -535,8 +558,9 @@ const program = Effect.gen(function* () {
       }
       if (bobProfile) {
         yield* bobSessionSetupError;
-        yield* publishBobCommands(sessionId);
-        return { sessionId, modes: modeState() };
+        const newSessionId = nextBobTaskId("mock-session-", "session/new");
+        yield* publishBobCommands(newSessionId);
+        return { sessionId: newSessionId, modes: modeState() };
       }
       return {
         sessionId,
@@ -552,7 +576,10 @@ const program = Effect.gen(function* () {
       if (bobProfile) {
         yield* bobSessionSetupError;
         // Bob answers every other failed resume (unknown task, other cwd) with the same error.
-        if (bobResumeNotFound || (bobTaskTransfer && request.sessionId !== bobMovedTaskId)) {
+        if (
+          bobResumeNotFound ||
+          (bobTaskTransfer && !request.sessionId.startsWith(bobImportedTaskPrefix))
+        ) {
           return yield* AcpError.AcpRequestError.resourceNotFound(
             `Resource not found: ${request.sessionId}`,
             { uri: request.sessionId },
@@ -1646,6 +1673,46 @@ const program = Effect.gen(function* () {
       });
     });
 
+  /** A prompt that runs one tool call once allowed, then asks the model until cancelled. */
+  const runBobToolThenThink = (request: AcpSchema.PromptRequest) =>
+    Effect.gen(function* () {
+      bobThought = true;
+      const toolCall = {
+        toolCallId: "bob-tool-then-think",
+        title: "sleep 1",
+        kind: "execute" as const,
+      };
+      yield* agent.client.sessionUpdate({
+        sessionId: request.sessionId,
+        update: { sessionUpdate: "tool_call", ...toolCall, status: "pending" },
+      });
+      yield* agent.client.requestPermission({
+        sessionId: request.sessionId,
+        toolCall: { ...toolCall, status: "pending" },
+        options: [
+          { optionId: permissionOptionIds.allowOnce, name: "Allow once", kind: "allow_once" },
+          { optionId: permissionOptionIds.rejectOnce, name: "Reject", kind: "reject_once" },
+        ],
+      });
+      yield* agent.client.sessionUpdate({
+        sessionId: request.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: toolCall.toolCallId,
+          status: "in_progress",
+        },
+      });
+      yield* agent.client.sessionUpdate({
+        sessionId: request.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: toolCall.toolCallId,
+          status: "completed",
+        },
+      });
+      return yield* Effect.never;
+    });
+
   const runBobPrompt = (request: AcpSchema.PromptRequest) =>
     Effect.gen(function* () {
       const cancelled = yield* Deferred.make<void>();
@@ -1674,7 +1741,7 @@ const program = Effect.gen(function* () {
           })
         : Effect.void;
       const result = yield* Effect.raceFirst(
-        runPrompt(request),
+        bobToolThenThink && !bobThought ? runBobToolThenThink(request) : runPrompt(request),
         Deferred.await(cancelled).pipe(
           Effect.andThen(beforeStopping),
           Effect.as({ stopReason: "cancelled" } as const),
@@ -1734,7 +1801,9 @@ const program = Effect.gen(function* () {
       });
     }
     if (bobTaskTransfer && method === "_bob/task/import") {
-      return Effect.succeed({ sessionIds: [bobMovedTaskId] });
+      return Effect.sync(() => ({
+        sessionIds: [nextBobTaskId(bobImportedTaskPrefix, "_bob/task/import")],
+      }));
     }
     if (method === "_test/environment") {
       return Effect.succeed({
