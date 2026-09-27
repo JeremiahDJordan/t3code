@@ -1514,6 +1514,116 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("lets Bob's running tool call finish before a steer interrupts the prompt", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_BOB_TOOL_THEN_THINK: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-steer-after-tool");
+          const opened = yield* Queue.unbounded<ApprovalRequestId>();
+          yield* Stream.runForEach(adapter.streamEvents, (event) =>
+            event.type === "request.opened"
+              ? Queue.offer(opened, ApprovalRequestId.make(String(event.requestId)))
+              : Effect.void,
+          ).pipe(Effect.forkChild({ startImmediately: true }));
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "approval-required",
+          });
+          const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+          const first = yield* adapter
+            .sendTurn({ threadId, input: "run it" })
+            .pipe(Effect.forkChild);
+          const toolRequest = yield* Queue.take(opened);
+          const steer = yield* adapter
+            .sendTurn({ threadId, input: "then stop there" })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          // Bob's tool call is still waiting for its approval, so the steer leaves it alone.
+          const beforeAnswer = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          assert.isFalse(beforeAnswer.some((entry) => entry.method === "session/cancel"));
+
+          yield* adapter.respondToRequest(threadId, toolRequest, "accept");
+          const turn = yield* Fiber.join(first);
+          assert.equal((yield* Fiber.join(steer)).turnId, turn.turnId);
+
+          const collected = Array.from(yield* events);
+          const completed = collected.find((event) => event.type === "turn.completed");
+          assert.equal(
+            completed?.type === "turn.completed" && completed.payload.state,
+            "completed",
+          );
+          assert.deepStrictEqual(
+            collected.flatMap((event) =>
+              event.type === "item.completed" && event.itemId === "bob-tool-then-think"
+                ? [event.payload.status]
+                : [],
+            ),
+            ["completed"],
+          );
+          // The prompt is cancelled only after the tool call finished, then the steer goes to Bob.
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          const answered = requests.findIndex((entry) => "result" in entry);
+          const cancelled = requests.findIndex((entry) => entry.method === "session/cancel");
+          const steered = requests.findIndex(
+            (entry) =>
+              entry.method === "session/prompt" &&
+              JSON.stringify(entry.params).includes("then stop there"),
+          );
+          assert.isAbove(cancelled, answered);
+          assert.isAbove(steered, cancelled);
+
+          yield* adapter.stopSession(threadId);
+        }),
+    ),
+  );
+
+  it.effect("interrupts Bob's model reply right away for a steer between tool calls", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_BOB_TOOL_THEN_THINK: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-steer-while-thinking");
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const toolDone = yield* nextEvent(
+            adapter,
+            (event) => event.type === "item.completed" && event.itemId === "bob-tool-then-think",
+          );
+          const completedTurn = yield* nextEvent(
+            adapter,
+            (event) => event.type === "turn.completed",
+          );
+
+          const first = yield* adapter
+            .sendTurn({ threadId, input: "run it" })
+            .pipe(Effect.forkChild);
+          yield* toolDone;
+          const steer = yield* adapter.sendTurn({ threadId, input: "now this instead" });
+          const turn = yield* Fiber.join(first);
+          assert.equal(steer.turnId, turn.turnId);
+          const completed = yield* completedTurn;
+          assert.equal(completed.type === "turn.completed" && completed.payload.state, "completed");
+
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          const cancelled = requests.findIndex((entry) => entry.method === "session/cancel");
+          const steered = requests.findIndex(
+            (entry) =>
+              entry.method === "session/prompt" &&
+              JSON.stringify(entry.params).includes("now this instead"),
+          );
+          assert.isAtLeast(cancelled, 0);
+          assert.isAbove(steered, cancelled);
+
+          yield* adapter.stopSession(threadId);
+        }),
+    ),
+  );
+
   it.effect("reports Bob's reason for a failed turn and settles it", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_FAIL_PROMPT: "1" }, ({ adapter }) =>
       Effect.gen(function* () {

@@ -43,6 +43,11 @@ the conversation before that turn. The reverted turns' Bobcoins leave **Usage �
 Usage**, although your monthly allowance still counts them. When Bob runs a
 subagent, the thread shows it as an agent with the subagent's report.
 
+A message you send while Bob is working never cancels a tool call: Bob finishes the
+tool call it is running, then stops and continues with your message. **Settings →
+General → Follow-up behavior** decides when T3 Code sends it: **Queue** waits for
+Bob's next tool call to finish, and **Steer** sends it right away.
+
 T3 Code's Plan mode uses Bob's plan mode. After Bob has run, the model picker's
 **Mode** option also offers Bob's Ask mode and your custom modes
 (`custom_modes.yaml`); turns use Agent mode unless you pick another. A custom mode

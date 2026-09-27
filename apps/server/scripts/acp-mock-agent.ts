@@ -33,6 +33,8 @@ const bobToolEdits = process.env.T3_ACP_BOB_TOOL_EDITS === "1";
 const bobTaskTransfer = process.env.T3_ACP_BOB_TASK_TRANSFER === "1";
 // Each Bob prompt runs a subagent, as Bob reports one: a tool call titled "Running subagent: ...".
 const bobSubagent = process.env.T3_ACP_BOB_SUBAGENT === "1";
+// The first Bob prompt runs one approved tool call, then keeps "thinking" until cancelled.
+const bobToolThenThink = process.env.T3_ACP_BOB_TOOL_THEN_THINK === "1";
 const bobMovedTaskId = "bob-moved-task";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
@@ -102,6 +104,7 @@ let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
 let bobRunningPrompt: Deferred.Deferred<void> | undefined;
 let bobTitled = false;
+let bobThought = false;
 /** The task's messages as Bob's task export returns them, each prompt stamped when received. */
 const bobTaskMessages: Array<{
   id: string;
@@ -1635,6 +1638,46 @@ const program = Effect.gen(function* () {
       });
     });
 
+  /** A prompt that runs one tool call once allowed, then asks the model until cancelled. */
+  const runBobToolThenThink = (request: AcpSchema.PromptRequest) =>
+    Effect.gen(function* () {
+      bobThought = true;
+      const toolCall = {
+        toolCallId: "bob-tool-then-think",
+        title: "sleep 1",
+        kind: "execute" as const,
+      };
+      yield* agent.client.sessionUpdate({
+        sessionId: request.sessionId,
+        update: { sessionUpdate: "tool_call", ...toolCall, status: "pending" },
+      });
+      yield* agent.client.requestPermission({
+        sessionId: request.sessionId,
+        toolCall: { ...toolCall, status: "pending" },
+        options: [
+          { optionId: permissionOptionIds.allowOnce, name: "Allow once", kind: "allow_once" },
+          { optionId: permissionOptionIds.rejectOnce, name: "Reject", kind: "reject_once" },
+        ],
+      });
+      yield* agent.client.sessionUpdate({
+        sessionId: request.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: toolCall.toolCallId,
+          status: "in_progress",
+        },
+      });
+      yield* agent.client.sessionUpdate({
+        sessionId: request.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: toolCall.toolCallId,
+          status: "completed",
+        },
+      });
+      return yield* Effect.never;
+    });
+
   const runBobPrompt = (request: AcpSchema.PromptRequest) =>
     Effect.gen(function* () {
       const cancelled = yield* Deferred.make<void>();
@@ -1663,7 +1706,7 @@ const program = Effect.gen(function* () {
           })
         : Effect.void;
       const result = yield* Effect.raceFirst(
-        runPrompt(request),
+        bobToolThenThink && !bobThought ? runBobToolThenThink(request) : runPrompt(request),
         Deferred.await(cancelled).pipe(
           Effect.andThen(beforeStopping),
           Effect.as({ stopReason: "cancelled" } as const),
