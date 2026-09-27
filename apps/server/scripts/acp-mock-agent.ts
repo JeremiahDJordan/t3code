@@ -31,6 +31,8 @@ const bobAskOnCancel = process.env.T3_ACP_BOB_ASK_ON_CANCEL === "1";
 const bobToolEdits = process.env.T3_ACP_BOB_TOOL_EDITS === "1";
 // Bob 2.0.5's task export/import: a stored task resumes only once it has been moved here.
 const bobTaskTransfer = process.env.T3_ACP_BOB_TASK_TRANSFER === "1";
+// Each Bob prompt runs a subagent, as Bob reports one: a tool call titled "Running subagent: ...".
+const bobSubagent = process.env.T3_ACP_BOB_SUBAGENT === "1";
 const bobMovedTaskId = "bob-moved-task";
 const emitToolCalls = process.env.T3_ACP_EMIT_TOOL_CALLS === "1";
 const emitInterleavedAssistantToolCalls =
@@ -1583,6 +1585,56 @@ const program = Effect.gen(function* () {
    * running prompt as cancelled. After a prompt that was not cancelled it updates the task's
    * title (first prompt only) and time.
    */
+  /** A subagent run as Bob reports it: allowed, run, then its report as `<task_result>`. */
+  const runBobSubagent = (sessionId: string) =>
+    Effect.gen(function* () {
+      const toolCallId = `bob-subagent-${bobTaskMessages.length}`;
+      const description = "Count the lines in greet.py";
+      const toolCall = {
+        toolCallId,
+        title: `Running subagent: ${description}`,
+        kind: "other" as const,
+        rawInput: { description },
+      };
+      yield* agent.client.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "tool_call", ...toolCall, status: "pending" },
+      });
+      const permission = yield* agent.client.requestPermission({
+        sessionId,
+        toolCall: { ...toolCall, status: "pending" },
+        options: [
+          { optionId: permissionOptionIds.allowOnce, name: "Allow once", kind: "allow_once" },
+          { optionId: permissionOptionIds.rejectOnce, name: "Reject", kind: "reject_once" },
+        ],
+      });
+      const allowed =
+        permission.outcome.outcome === "selected" &&
+        permission.outcome.optionId === permissionOptionIds.allowOnce;
+      if (!allowed) {
+        yield* agent.client.sessionUpdate({
+          sessionId,
+          update: { sessionUpdate: "tool_call_update", toolCallId, status: "failed" },
+        });
+        return;
+      }
+      yield* agent.client.sessionUpdate({
+        sessionId,
+        update: { sessionUpdate: "tool_call_update", toolCallId, status: "in_progress" },
+      });
+      const result = "<task_result>\ngreet.py has 7 lines.\n</task_result>";
+      yield* agent.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId,
+          status: "completed",
+          rawOutput: { result },
+          content: [{ type: "content", content: { type: "text", text: result } }],
+        },
+      });
+    });
+
   const runBobPrompt = (request: AcpSchema.PromptRequest) =>
     Effect.gen(function* () {
       const cancelled = yield* Deferred.make<void>();
@@ -1594,6 +1646,7 @@ const program = Effect.gen(function* () {
       bobRunningPrompt = cancelled;
       const promptText = request.prompt.find((block) => block.type === "text");
       yield* recordBobTaskMessage("user", promptText?.type === "text" ? promptText.text : "");
+      if (bobSubagent) yield* runBobSubagent(request.sessionId);
       const beforeStopping = bobAskOnCancel
         ? agent.client.requestPermission({
             sessionId: request.sessionId,
