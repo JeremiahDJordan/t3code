@@ -24,7 +24,11 @@ don't reopen them without new information. Add to it when a decision changes.
   to their connection; for any other client the server leaves `bob` out of the scan
   and adapts usage per the `bobUsageInUpstreamClients` setting (hidden by default).
   That is also why the usage contract keeps upstream's version number instead of
-  bumping it: `bob` and `credits` only reach clients that asked for them.
+  bumping it: `bob` and `credits` only reach clients that asked for them. Since
+  upstream pingdotgg/t3code#10076 (2026-09-26), upstream clients skip usage entries
+  with unknown providers instead of failing, so clients built after it would
+  tolerate `bob` on their own; the adaptation stays for the installed ones and for
+  the "show Bob as another provider" setting.
 - **Upstream's web client cannot drive Bob; upstream's mobile app can.** The web
   composer takes a built-in provider's on/off state from its copy of the server
   settings (`applyProviderInstanceSettings`), and upstream's settings schema strips
