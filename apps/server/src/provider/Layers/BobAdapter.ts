@@ -21,6 +21,7 @@ import {
   ProviderInstanceId,
   RuntimeRequestId,
   type RuntimeMode,
+  RuntimeTaskId,
   type SessionExitedPayload,
   type ThreadId,
   TurnId,
@@ -183,6 +184,8 @@ interface BobSessionContext {
         reply?: { readonly itemId: string | undefined; text: string };
         /** The turn's tool calls Bob has not finished, by tool call id. */
         readonly openTools: Map<string, AcpToolCallState>;
+        /** The turn's subagent runs, by tool call id, and whether T3 announced them started. */
+        readonly subagents: Map<string, { readonly description: string; started: boolean }>;
         /** Completes once the turn's `turn.completed` is out. */
         readonly settled: Deferred.Deferred<void>;
       }
@@ -315,6 +318,29 @@ function bobErrorDetails(error: EffectAcpErrors.AcpError): string | undefined {
   return typeof details === "string" && details.trim() ? details.trim() : undefined;
 }
 
+const HTML_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+};
+
+/**
+ * A tool title as Bob meant it. Bob HTML-escapes its tool titles (`=` arrives as `&#x3D;`) but
+ * not their input, so an escaped title neither reads right nor matches the input it names.
+ */
+export function decodeBobTitle(title: string): string {
+  return title.replace(
+    /&(?:#x([0-9a-f]+)|#(\d+)|([a-z]+));/gi,
+    (entity, hex: string | undefined, decimal: string | undefined, name: string | undefined) => {
+      if (name !== undefined) return HTML_ENTITIES[name.toLowerCase()] ?? entity;
+      const codePoint = Number.parseInt(hex ?? decimal ?? "", hex !== undefined ? 16 : 10);
+      return codePoint > 0 && codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : entity;
+    },
+  );
+}
+
 /**
  * Bob names and classifies a tool only in its `tool_call`; later updates carry just status and
  * output, and a command arrives as the title with no `rawInput`. Carrying both forward keeps
@@ -330,7 +356,7 @@ function makeBobToolCallNormalizer() {
       return notification;
     }
     const known = tools.get(update.toolCallId);
-    const title = update.title ?? known?.title;
+    const title = update.title ? decodeBobTitle(update.title) : known?.title;
     const kind = update.kind ?? known?.kind;
     if (update.status === "completed" || update.status === "failed") {
       tools.delete(update.toolCallId);
@@ -349,6 +375,46 @@ function makeBobToolCallNormalizer() {
       },
     };
   };
+}
+
+/**
+ * The task a tool call from Bob's `tool_call` update runs, when it runs one of Bob's subagents.
+ * Bob titles such a call "Running subagent: <description>" in the user's language, with the
+ * description as its input, so it is recognized by that shape rather than by the words.
+ */
+export function bobSubagentDescription(
+  update: EffectAcpSchema.SessionNotification["update"],
+): string | undefined {
+  if (update.sessionUpdate !== "tool_call" || (update.kind ?? "other") !== "other") {
+    return undefined;
+  }
+  const rawInput = update.rawInput;
+  const description =
+    typeof rawInput === "object" && rawInput !== null && !Array.isArray(rawInput)
+      ? (rawInput as Record<string, unknown>).description
+      : undefined;
+  if (typeof description !== "string") return undefined;
+  const trimmed = description.trim();
+  const title = update.title.trim();
+  return trimmed && title !== trimmed && title.endsWith(trimmed) ? trimmed : undefined;
+}
+
+/** How much of a subagent's report the task's summary keeps. */
+const BOB_SUBAGENT_SUMMARY_MAX_CHARS = 2_000;
+
+/** A finished subagent's report, without the `<task_result>` tags Bob wraps it in. */
+export function bobSubagentSummary(toolCall: AcpToolCallState): string | undefined {
+  const rawOutput = toolCall.data.rawOutput;
+  const result =
+    typeof rawOutput === "object" && rawOutput !== null && !Array.isArray(rawOutput)
+      ? (rawOutput as Record<string, unknown>).result
+      : undefined;
+  if (typeof result !== "string") return undefined;
+  const text = result
+    .replace(/^\s*<task_result>/, "")
+    .replace(/<\/task_result>\s*$/, "")
+    .trim();
+  return text ? text.slice(0, BOB_SUBAGENT_SUMMARY_MAX_CHARS) : undefined;
 }
 
 /**
@@ -528,6 +594,80 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
       return Effect.succeed(ctx);
     };
 
+    /** Reports a run of one of Bob's subagents as a T3 task, linked to the tool call running it. */
+    const offerSubagentEvent = (
+      ctx: BobSessionContext,
+      turnId: TurnId,
+      toolCallId: string,
+      description: string,
+      status: "started" | "completed" | "failed" | "stopped",
+      summary?: string,
+    ) =>
+      Effect.gen(function* () {
+        const task = {
+          taskId: RuntimeTaskId.make(toolCallId),
+          title: description,
+          toolUseId: toolCallId,
+        };
+        const stamp = { ...(yield* makeEventStamp()), provider: PROVIDER, threadId: ctx.threadId };
+        yield* offerRuntimeEvent(
+          status === "started"
+            ? { type: "task.started", ...stamp, turnId, payload: { ...task, description } }
+            : {
+                type: "task.completed",
+                ...stamp,
+                turnId,
+                payload: { ...task, status, ...(summary ? { summary } : {}) },
+              },
+        );
+      });
+
+    /**
+     * Follows Bob's subagent runs as tasks. Bob starts a subagent once its tool call is allowed,
+     * so the task starts when the call runs, and ends with the subagent's report when it does.
+     * Bob does not stream the subagent's own tool calls, so the task has no inner activity.
+     */
+    const trackSubagent = (
+      ctx: BobSessionContext,
+      toolCall: AcpToolCallState,
+      rawPayload: unknown,
+    ) =>
+      Effect.gen(function* () {
+        const turn = ctx.openTurn;
+        if (!turn) return;
+        let subagent = turn.subagents.get(toolCall.toolCallId);
+        if (!subagent) {
+          const update = (rawPayload as Partial<EffectAcpSchema.SessionNotification> | undefined)
+            ?.update;
+          const description = update ? bobSubagentDescription(update) : undefined;
+          if (!description) return;
+          subagent = { description, started: false };
+          turn.subagents.set(toolCall.toolCallId, subagent);
+        }
+        const ran = toolCall.status === "inProgress" || toolCall.status === "completed";
+        if (!subagent.started && ran) {
+          subagent.started = true;
+          yield* offerSubagentEvent(
+            ctx,
+            turn.id,
+            toolCall.toolCallId,
+            subagent.description,
+            "started",
+          );
+        }
+        if (toolCall.status !== "completed" && toolCall.status !== "failed") return;
+        turn.subagents.delete(toolCall.toolCallId);
+        if (!subagent.started) return;
+        yield* offerSubagentEvent(
+          ctx,
+          turn.id,
+          toolCall.toolCallId,
+          subagent.description,
+          toolCall.status,
+          bobSubagentSummary(toolCall),
+        );
+      });
+
     /**
      * Emits the open turn's `turn.completed` once, whichever of its prompt or Bob's exit ends it,
      * and returns the session to ready unless a new turn has already claimed it. Bob leaves the
@@ -538,6 +678,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         const turn = ctx.openTurn;
         if (!turn) return;
         ctx.openTurn = undefined;
+        for (const [toolCallId, subagent] of turn.subagents) {
+          if (subagent.started) {
+            yield* offerSubagentEvent(ctx, turn.id, toolCallId, subagent.description, "stopped");
+          }
+        }
         for (const toolCall of turn.openTools.values()) {
           yield* offerRuntimeEvent(
             makeAcpToolCallEvent({
@@ -720,7 +865,14 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                   return { outcome: { outcome: "selected" as const, optionId } };
                 }
               }
-              const permissionRequest = parsePermissionRequest(params);
+              // The card shows Bob's title as Bob meant it.
+              const request = params.toolCall.title
+                ? {
+                    ...params,
+                    toolCall: { ...params.toolCall, title: decodeBobTitle(params.toolCall.title) },
+                  }
+                : params;
+              const permissionRequest = parsePermissionRequest(request);
               const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
               const runtimeRequestId = RuntimeRequestId.make(requestId);
               const decision = yield* Deferred.make<ProviderApprovalDecision>();
@@ -738,10 +890,10 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                   permissionRequest,
                   approvalOptions: bobApprovalOptions(params),
                   detail:
-                    bobPermissionDetail(params, permissionRequest.detail) ??
+                    bobPermissionDetail(request, permissionRequest.detail) ??
                     encodeJsonStringForDiagnostics(params)?.slice(0, 2000) ??
                     "[unserializable params]",
-                  args: params,
+                  args: request,
                   source: "acp.jsonrpc",
                   method: "session/request_permission",
                   rawPayload: params,
@@ -1004,6 +1156,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     return;
                   case "ToolCallUpdated": {
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
+                    yield* trackSubagent(ctx, event.toolCall, event.rawPayload);
                     const openTools = ctx.openTurn?.openTools;
                     if (
                       event.toolCall.status === "completed" ||
@@ -1178,6 +1331,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               interrupted: false,
               plan: input.interactionMode === "plan",
               openTools: new Map(),
+              subagents: new Map(),
               settled: yield* Deferred.make<void>(),
             };
             // Before the prompt goes out, so Bob stamps it at or after this time.
