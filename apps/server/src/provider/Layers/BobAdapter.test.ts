@@ -26,6 +26,7 @@ import {
   type ProviderApprovalDecision,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
+  RuntimeTaskId,
   ThreadId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -39,6 +40,8 @@ import {
   type BobAdapterLiveOptions,
   bobApprovalOptions,
   bobRollbackCut,
+  bobSubagentDescription,
+  decodeBobTitle,
   makeBobAdapter,
 } from "./BobAdapter.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -192,6 +195,50 @@ describe("bobRollbackCut", () => {
 
   it("counts Bob's prompts for turns older than T3's records", () => {
     assert.deepStrictEqual(bobRollbackCut([100], 3), { lastTurns: 3 });
+  });
+});
+
+describe("bobSubagentDescription", () => {
+  const toolCall = (title: string, rawInput: unknown, kind: "other" | "read" = "other") =>
+    ({ sessionUpdate: "tool_call", toolCallId: "call", title, kind, rawInput }) as const;
+
+  it("recognizes a subagent run by its shape, in any language", () => {
+    assert.equal(
+      bobSubagentDescription(
+        toolCall("Running subagent: Count lines", { description: "Count lines" }),
+      ),
+      "Count lines",
+    );
+    assert.equal(
+      bobSubagentDescription(
+        toolCall("Subagent wird ausgeführt: Zeilen zählen", { description: "Zeilen zählen" }),
+      ),
+      "Zeilen zählen",
+    );
+  });
+
+  it("leaves other tool calls alone", () => {
+    assert.isUndefined(
+      bobSubagentDescription(toolCall("Count lines", { description: "Count lines" })),
+    );
+    assert.isUndefined(bobSubagentDescription(toolCall("Read greet.py", { path: "greet.py" })));
+    assert.isUndefined(
+      bobSubagentDescription(
+        toolCall("Running subagent: Count lines", { description: "Count lines" }, "read"),
+      ),
+    );
+  });
+});
+
+describe("decodeBobTitle", () => {
+  it("reads a title as Bob meant it, which Bob sends HTML-escaped", () => {
+    assert.equal(
+      decodeBobTitle("Running subagent: list files with recursive&#x3D;true &amp; &lt;hidden&gt;"),
+      "Running subagent: list files with recursive=true & <hidden>",
+    );
+    assert.equal(decodeBobTitle("say &quot;hi&quot; &#39;twice&#39;"), `say "hi" 'twice'`);
+    // Anything else is left as it came.
+    assert.equal(decodeBobTitle("a &unknown; b &#x110000; c"), "a &unknown; b &#x110000; c");
   });
 });
 
@@ -915,6 +962,74 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
           schemaVersion: 1,
           sessionId: "mock-session-1",
         });
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("shows Bob's subagent runs as tasks linked to the tool call running them", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_SUBAGENT: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-subagent");
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const turn = yield* adapter.sendTurn({ threadId, input: "count the lines" });
+
+        const task = {
+          taskId: RuntimeTaskId.make("bob-subagent-2"),
+          title: "Count the lines in greet.py with wc -l --total=only",
+          toolUseId: "bob-subagent-2",
+        };
+        assert.deepStrictEqual(
+          Array.from(yield* events).flatMap((event) =>
+            event.type === "task.started" || event.type === "task.completed"
+              ? [[event.type, event.turnId, event.payload]]
+              : [],
+          ),
+          [
+            [
+              "task.started",
+              turn.turnId,
+              { ...task, description: "Count the lines in greet.py with wc -l --total=only" },
+            ],
+            [
+              "task.completed",
+              turn.turnId,
+              { ...task, status: "completed", summary: "greet.py has 7 lines." },
+            ],
+          ],
+        );
+
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("reports no task for a subagent the user declines", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_SUBAGENT: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-subagent-declined");
+        yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          event.type === "request.opened"
+            ? adapter.respondToRequest(
+                threadId,
+                ApprovalRequestId.make(String(event.requestId)),
+                "decline",
+              )
+            : Effect.void,
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+        });
+        yield* adapter.sendTurn({ threadId, input: "count the lines" });
+
+        assert.isFalse(Array.from(yield* events).some((event) => event.type.startsWith("task.")));
 
         yield* adapter.stopSession(threadId);
       }),
