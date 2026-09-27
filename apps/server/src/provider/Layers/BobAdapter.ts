@@ -195,8 +195,9 @@ interface BobSessionContext {
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
   /**
-   * Runs one prompt at a time, as Bob requires. A steer interrupts the running prompt once no
-   * tool call is running, then goes to Bob as the next prompt of the same turn.
+   * Runs one prompt at a time, as Bob requires. A follow-up waits for the running prompt: in
+   * `queue` mode until Bob finishes it, in `steer` mode after interrupting it once no tool call
+   * is running. Either way it then goes to Bob as the next prompt of the same turn.
    */
   readonly promptLock: Semaphore.Semaphore;
   /**
@@ -1275,12 +1276,13 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
     const sendTurn: BobAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const ctx = yield* requireSession(input.threadId);
-        // A sendTurn while a prompt is in flight is a steer: it continues the active turn, and
-        // since Bob rejects a second concurrent prompt, it interrupts the running one once Bob's
-        // running tool calls finish, then waits for it to return.
+        // A sendTurn while a prompt is in flight continues the active turn. Bob rejects a second
+        // concurrent prompt, so it waits for the running one: queued follow-ups until Bob finishes
+        // it, steers after interrupting it once Bob's running tool calls finish.
         const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
         // Only a prompt that is with Bob is interrupted; between prompts the steer just waits.
         if (
+          bobSettings.followUpBehavior === "steer" &&
           steeringTurnId !== undefined &&
           ctx.steer === undefined &&
           ctx.promptEpoch !== undefined

@@ -144,6 +144,7 @@ const withMockBob = <A, E, R>(
   }) => Effect.Effect<A, E, R>,
   instance?: {
     readonly authMethod?: BobAuthMethod;
+    readonly followUpBehavior?: "queue" | "steer";
     readonly environment?: NodeJS.ProcessEnv;
     readonly onAvailableCommands?: BobAdapterLiveOptions["onAvailableCommands"];
     readonly onAvailableModes?: BobAdapterLiveOptions["onAvailableModes"];
@@ -163,6 +164,7 @@ const withMockBob = <A, E, R>(
       decodeBobSettings({
         binaryPath,
         ...(instance?.authMethod ? { authMethod: instance.authMethod } : {}),
+        ...(instance?.followUpBehavior ? { followUpBehavior: instance.followUpBehavior } : {}),
       }),
       {
         taskDatabasePath,
@@ -1458,7 +1460,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
-  it.effect("sends a follow-up after Bob's running prompt and continues the same turn", () =>
+  it.effect("queues a follow-up until Bob finishes its prompt, by default", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_EMIT_TOOL_CALLS: "1" }, ({ adapter, requestLogPath }) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("bob-steer");
@@ -1501,8 +1503,9 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
             ["turn.completed", turn.turnId],
           ],
         );
-        // The follow-up reaches Bob only after the first prompt's tool was answered.
+        // The follow-up reaches Bob only after the first prompt finished, uninterrupted.
         const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+        assert.isFalse(requests.some((entry) => entry.method === "session/cancel"));
         const followUpIndex = requests.findIndex(
           (entry) =>
             entry.method === "session/prompt" &&
@@ -1576,6 +1579,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
 
           yield* adapter.stopSession(threadId);
         }),
+      { followUpBehavior: "steer" },
     ),
   );
 
@@ -1621,6 +1625,7 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
 
           yield* adapter.stopSession(threadId);
         }),
+      { followUpBehavior: "steer" },
     ),
   );
 
