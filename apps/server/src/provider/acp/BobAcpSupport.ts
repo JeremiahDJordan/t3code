@@ -256,6 +256,98 @@ export const moveBobTask = (
     Effect.orElseSucceed(() => undefined),
   );
 
+/**
+ * Where a rollback cuts a Bob task: at the first prompt Bob recorded at or after `atMs`, or, when
+ * the turns' start times are unknown, at the `lastTurns`-th prompt from the end.
+ */
+export type BobRewindCut = { readonly atMs: number } | { readonly lastTurns: number };
+
+export type BobRewindResult =
+  /** No prompt falls at or after the cut, so Bob's conversation already ends before it. */
+  | { readonly _tag: "Unchanged" }
+  /** The cut removes every prompt; the caller starts a new conversation instead. */
+  | { readonly _tag: "Emptied" }
+  /** Bob holds the kept conversation as a new task, `sessionId`; the original is untouched. */
+  | { readonly _tag: "Rewound"; readonly sessionId: string }
+  | { readonly _tag: "Failed"; readonly detail: string };
+
+/** A message of an exported task that is a prompt: one the user sent, not one Bob added. */
+function isBobPromptMessage(entry: unknown): boolean {
+  const record = asRecord(entry);
+  const meta = asRecord(asRecord(record?.data)?._meta);
+  return record?.role === "user" && meta?.hide !== true && meta?.notAi !== true;
+}
+
+function bobMessageTimestamp(entry: unknown): number | undefined {
+  const timestamp = asRecord(asRecord(asRecord(entry)?.data)?._meta)?.timestamp;
+  return typeof timestamp === "number" && Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+/**
+ * The index of the exported message that starts the first dropped turn, or undefined when the
+ * cut drops nothing. Bob stamps each message when it records it, on the host T3 runs on, so a
+ * prompt sent after a turn began is stamped at or after that turn's start time.
+ */
+export function bobRewindCutIndex(
+  messages: ReadonlyArray<unknown>,
+  cut: BobRewindCut,
+): number | undefined {
+  const prompts = messages.flatMap((entry, index) =>
+    isBobPromptMessage(entry) ? [{ index, timestamp: bobMessageTimestamp(entry) }] : [],
+  );
+  if ("lastTurns" in cut) {
+    if (cut.lastTurns < 1 || prompts.length === 0) return undefined;
+    return prompts[Math.max(0, prompts.length - cut.lastTurns)]!.index;
+  }
+  return prompts.find((prompt) => prompt.timestamp !== undefined && prompt.timestamp >= cut.atMs)
+    ?.index;
+}
+
+/**
+ * Rewinds a Bob task to before a turn, as Bob's IDE does when it rolls a task back to before a
+ * message: the messages from that turn's first prompt on are dropped. Bob has no ACP request for
+ * it, so the kept messages go through `_bob/task/export` and `_bob/task/import` into a new task,
+ * with their timestamps; the caller resumes it and deletes the original once no session holds it.
+ */
+export const rewindBobTask = (
+  runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
+  sessionId: string,
+  cwd: string,
+  cut: BobRewindCut,
+): Effect.Effect<BobRewindResult> =>
+  Effect.gen(function* () {
+    const exported = yield* runtime.request("_bob/task/export", { sessionId });
+    if (!isBobTaskExport(exported)) {
+      return { _tag: "Failed", detail: "Bob's task export has an unexpected shape." } as const;
+    }
+    const [entry, ...others] = exported.tasks;
+    const messages = asRecord(entry)?.messages;
+    if (!Array.isArray(messages)) {
+      return { _tag: "Failed", detail: "Bob's task export has no messages." } as const;
+    }
+    const index = bobRewindCutIndex(messages, cut);
+    if (index === undefined) return { _tag: "Unchanged" } as const;
+    const kept = messages.slice(0, index);
+    if (!kept.some(isBobPromptMessage)) return { _tag: "Emptied" } as const;
+    const snapshot = { ...exported, tasks: [{ ...entry, messages: kept }, ...others] };
+    const imported = decodeBobTaskImport(
+      yield* runtime.request("_bob/task/import", { cwd, snapshot }),
+    );
+    return imported._tag === "Some"
+      ? ({ _tag: "Rewound", sessionId: imported.value.sessionIds[0] } as const)
+      : ({ _tag: "Failed", detail: "Bob did not return the rewound task." } as const);
+  }).pipe(
+    Effect.timeoutOption(BOB_TASK_MOVE_TIMEOUT),
+    Effect.map((result): BobRewindResult =>
+      result._tag === "Some"
+        ? result.value
+        : { _tag: "Failed", detail: "Bob did not rewind the task in time." },
+    ),
+    Effect.catch((error) =>
+      Effect.succeed<BobRewindResult>({ _tag: "Failed", detail: error.message }),
+    ),
+  );
+
 /** Starts `bob acp` in the caller's scope and returns its ACP session runtime. */
 export const makeBobAcpRuntime = (
   input: BobAcpRuntimeInput,
