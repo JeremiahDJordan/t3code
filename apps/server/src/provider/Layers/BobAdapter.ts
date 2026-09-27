@@ -76,10 +76,13 @@ import {
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
+  type BobRewindCut,
   closeBobSession,
+  deleteBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
   moveBobTask,
+  rewindBobTask,
   setBobSessionMode,
 } from "../acp/BobAcpSupport.ts";
 import { type BobAdapterShape } from "../Services/BobAdapter.ts";
@@ -147,6 +150,8 @@ interface PendingApproval {
 
 interface BobSessionContext {
   readonly threadId: ThreadId;
+  /** What started the session, so a rollback can start it again on the rewound task. */
+  readonly startInput: Parameters<BobAdapterShape["startSession"]>[0];
   /** The folder Bob runs in. */
   readonly cwd: string;
   session: ProviderSession;
@@ -159,6 +164,12 @@ interface BobSessionContext {
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /**
+   * When each of the thread's turns began, in epoch milliseconds, oldest first, as far back as
+   * T3 recorded them; null for a turn Bob's current task holds nothing from. A rollback cuts
+   * Bob's task at the first prompt Bob stamped at or after the first dropped turn's start.
+   */
+  turnStartedAt: Array<number | null>;
   activeTurnId: TurnId | undefined;
   /**
    * The started turn still owed a `turn.completed`, and whether Stop was pressed during it. A
@@ -207,12 +218,44 @@ function settlePendingApprovalsAsCancelled(
   );
 }
 
-function parseBobResume(raw: unknown): { sessionId: string } | undefined {
+function parseBobResume(
+  raw: unknown,
+): { sessionId: string; turnStartedAt: Array<number | null> } | undefined {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
   const record = raw as Record<string, unknown>;
   if (record.schemaVersion !== BOB_RESUME_VERSION) return undefined;
   if (typeof record.sessionId !== "string" || !record.sessionId.trim()) return undefined;
-  return { sessionId: record.sessionId.trim() };
+  const turnStartedAt = Array.isArray(record.turnStartedAt)
+    ? record.turnStartedAt.map((value) =>
+        typeof value === "number" && Number.isFinite(value) ? value : null,
+      )
+    : [];
+  return { sessionId: record.sessionId.trim(), turnStartedAt };
+}
+
+/** The resume cursor for Bob task `sessionId`, with the thread's turn start times. */
+function bobResumeCursor(sessionId: string, turnStartedAt: ReadonlyArray<number | null>) {
+  return {
+    schemaVersion: BOB_RESUME_VERSION,
+    sessionId,
+    ...(turnStartedAt.length > 0 ? { turnStartedAt: [...turnStartedAt] } : {}),
+  };
+}
+
+/**
+ * Where to cut Bob's task to drop the last `numTurns` turns: at the first dropped turn T3
+ * recorded a start for, or null when none of them reached Bob's task. Turns older than T3's
+ * records, such as imported history, fall back to counting Bob's prompts from the end.
+ */
+export function bobRollbackCut(
+  turnStartedAt: ReadonlyArray<number | null>,
+  numTurns: number,
+): BobRewindCut | null {
+  if (numTurns > turnStartedAt.length) return { lastTurns: numTurns };
+  const atMs = turnStartedAt
+    .slice(turnStartedAt.length - numTurns)
+    .find((value): value is number => value !== null);
+  return atMs === undefined ? null : { atMs };
 }
 
 /**
@@ -582,7 +625,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
      * Otherwise a running turn is cancelled and settles before Bob is closed, so Bob can finish
      * writing its task.
      */
-    const stopSessionInternal = (ctx: BobSessionContext, exitError?: EffectAcpErrors.AcpError) =>
+    const stopSessionInternal = (
+      ctx: BobSessionContext,
+      exitError?: EffectAcpErrors.AcpError,
+      options?: { readonly emitExitEvent?: boolean },
+    ) =>
       Effect.gen(function* () {
         if (ctx.stopped) return;
         ctx.stopped = true;
@@ -616,7 +663,9 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           yield* Fiber.interrupt(ctx.notificationFiber);
         }
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
-        yield* publishSessionExited(ctx, { exitKind: "graceful" });
+        if (options?.emitExitEvent !== false) {
+          yield* publishSessionExited(ctx, { exitKind: "graceful" });
+        }
       }).pipe(Effect.uninterruptible);
 
     /** Opens Bob for a thread, resuming its stored task when there is one. */
@@ -834,7 +883,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           // continues in a new Bob conversation rather than failing. Sign-in, license and trust
           // errors still fail, since a new conversation would hit them too, and so does a resume
           // that times out, since its task may still be there.
-          const resumeSessionId = parseBobResume(input.resumeCursor)?.sessionId;
+          const resumed = parseBobResume(input.resumeCursor);
+          const resumeSessionId = resumed?.sessionId;
           let lostResume: EffectAcpErrors.AcpError | undefined;
           const { scope, acp, started } = yield* openBob(resumeSessionId).pipe(
             Effect.catchIf(
@@ -858,6 +908,11 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
           // The baseline for the first turn's usage, which matters on resume.
           const taskCosts = yield* readBobTaskCosts(taskDatabasePath, started.sessionId);
+          // A moved task keeps its messages' timestamps, so the turn start times still apply; a
+          // new conversation holds none of the earlier turns.
+          const turnStartedAt = lostResume
+            ? (resumed?.turnStartedAt ?? []).map(() => null)
+            : [...(resumed?.turnStartedAt ?? [])];
           const now = yield* nowIso;
           const session: ProviderSession = {
             provider: PROVIDER,
@@ -867,16 +922,14 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             cwd,
             model: BOB_DEFAULT_MODEL,
             threadId: input.threadId,
-            resumeCursor: {
-              schemaVersion: BOB_RESUME_VERSION,
-              sessionId: started.sessionId,
-            },
+            resumeCursor: bobResumeCursor(started.sessionId, turnStartedAt),
             createdAt: now,
             updatedAt: now,
           };
 
           ctx = {
             threadId: input.threadId,
+            startInput: input,
             cwd,
             session,
             scope,
@@ -886,6 +939,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             notificationFiber: undefined,
             pendingApprovals,
             turns: [],
+            turnStartedAt,
             activeTurnId: undefined,
             openTurn: undefined,
             promptsInFlight: 0,
@@ -1124,6 +1178,12 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               openTools: new Map(),
               settled: yield* Deferred.make<void>(),
             };
+            // Before the prompt goes out, so Bob stamps it at or after this time.
+            ctx.turnStartedAt.push(DateTime.toEpochMillis(yield* DateTime.now));
+            ctx.session = {
+              ...ctx.session,
+              resumeCursor: bobResumeCursor(ctx.sessionId, ctx.turnStartedAt),
+            };
             ctx.turnStartTaskCosts = ctx.taskCosts;
             yield* offerRuntimeEvent({
               type: "turn.started",
@@ -1339,9 +1399,16 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         return { threadId, turns: ctx.turns };
       });
 
+    /**
+     * Drops the thread's last `numTurns` turns from Bob's conversation, as Bob's IDE rolls a task
+     * back to before a message. T3 has already restored the files. Bob keeps the conversation
+     * before the first dropped turn as a new task, which the session reopens; the original is then
+     * deleted, so Bob's history and Bobcoin totals count the kept part once. Rolling back every
+     * turn starts a new conversation.
+     */
     const rollbackThread: BobAdapterShape["rollbackThread"] = (threadId, numTurns) =>
       Effect.gen(function* () {
-        yield* requireSession(threadId);
+        const ctx = yield* requireSession(threadId);
         if (!Number.isInteger(numTurns) || numTurns < 1) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
@@ -1349,11 +1416,52 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             issue: "numTurns must be an integer >= 1.",
           });
         }
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "thread/rollback",
-          detail: "Bob ACP sessions do not support provider-side rollback.",
+        if (ctx.promptsInFlight > 0) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "thread/rollback",
+            detail: "Bob is still working on this thread. Stop it before reverting.",
+          });
+        }
+        const keptTurns = ctx.turns.slice(0, Math.max(0, ctx.turns.length - numTurns));
+        const keptStarts = ctx.turnStartedAt.slice(
+          0,
+          Math.max(0, ctx.turnStartedAt.length - numTurns),
+        );
+        const cut = bobRollbackCut(ctx.turnStartedAt, numTurns);
+        const rewound =
+          cut === null
+            ? ({ _tag: "Unchanged" } as const)
+            : yield* rewindBobTask(ctx.acp, ctx.sessionId, ctx.cwd, cut);
+        switch (rewound._tag) {
+          case "Failed":
+            return yield* new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "thread/rollback",
+              detail: `Bob could not rewind its conversation: ${rewound.detail}`,
+            });
+          case "Unchanged":
+            // None of the dropped turns reached Bob's task, so its conversation already ends
+            // before them.
+            ctx.turnStartedAt = keptStarts;
+            ctx.turns.splice(keptTurns.length);
+            ctx.session = {
+              ...ctx.session,
+              resumeCursor: bobResumeCursor(ctx.sessionId, ctx.turnStartedAt),
+            };
+            return { threadId, turns: keptTurns };
+        }
+        const previousSessionId = ctx.sessionId;
+        yield* stopSessionInternal(ctx, undefined, { emitExitEvent: false });
+        yield* startSession({
+          ...ctx.startInput,
+          runtimeMode: ctx.session.runtimeMode,
+          resumeCursor:
+            rewound._tag === "Rewound" ? bobResumeCursor(rewound.sessionId, keptStarts) : undefined,
         });
+        const next = yield* requireSession(threadId);
+        yield* deleteBobSession(next.acp, previousSessionId);
+        return { threadId, turns: keptTurns };
       });
 
     const stopSession: BobAdapterShape["stopSession"] = (threadId) =>
@@ -1391,7 +1499,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
     return {
       provider: PROVIDER,
       // No `compaction`: Bob's ACP server has no `/compact`, it would reach the model as text.
-      capabilities: { sessionModelSwitch: "unsupported", supportsConversationRollback: false },
+      capabilities: { sessionModelSwitch: "unsupported", supportsConversationRollback: true },
       startSession,
       sendTurn,
       interruptTurn,

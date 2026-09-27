@@ -100,6 +100,31 @@ let overlappingFirstPromptId: string | undefined;
 const cancelledSessions = new Set<string>();
 let bobRunningPrompt: Deferred.Deferred<void> | undefined;
 let bobTitled = false;
+/** The task's messages as Bob's task export returns them, each prompt stamped when received. */
+const bobTaskMessages: Array<{
+  id: string;
+  role: string;
+  data: Record<string, unknown>;
+  createdAt: number;
+}> = [
+  {
+    id: "system-1",
+    role: "system",
+    data: { id: "system-1", role: "system", content: "You are Bob.", _meta: { mode: "agent" } },
+    createdAt: 1,
+  },
+];
+const recordBobTaskMessage = (role: "user" | "assistant", content: string) =>
+  Effect.gen(function* () {
+    const id = `${role}-${bobTaskMessages.length}`;
+    const timestamp = DateTime.toEpochMillis(yield* DateTime.now);
+    bobTaskMessages.push({
+      id,
+      role,
+      data: { id, role, content, _meta: { timestamp } },
+      createdAt: timestamp,
+    });
+  });
 
 function promptIdFromRequestMeta(
   request: Pick<AcpSchema.PromptRequest, "_meta">,
@@ -1567,6 +1592,8 @@ const program = Effect.gen(function* () {
         );
       }
       bobRunningPrompt = cancelled;
+      const promptText = request.prompt.find((block) => block.type === "text");
+      yield* recordBobTaskMessage("user", promptText?.type === "text" ? promptText.text : "");
       const beforeStopping = bobAskOnCancel
         ? agent.client.requestPermission({
             sessionId: request.sessionId,
@@ -1596,6 +1623,7 @@ const program = Effect.gen(function* () {
         ),
       );
       if (result.stopReason !== "cancelled") {
+        yield* recordBobTaskMessage("assistant", "Done.");
         const firstText = request.prompt.find((block) => block.type === "text");
         yield* agent.client.sessionUpdate({
           sessionId: request.sessionId,
@@ -1633,7 +1661,10 @@ const program = Effect.gen(function* () {
                 staticEnvInfo: { primaryWorkspace: "/old-folder", systemInfo: {} },
               },
             },
-            messages: [{ id: "message-1", role: "user", data: { content: "hi" }, createdAt: 1 }],
+            messages:
+              bobTaskMessages.length > 1
+                ? bobTaskMessages
+                : [{ id: "message-1", role: "user", data: { content: "hi" }, createdAt: 1 }],
           },
         ],
       });
