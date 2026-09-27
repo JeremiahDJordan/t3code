@@ -1,6 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off
-import * as NodeSqlite from "node:sqlite";
-
 import type { ThreadTokenUsageSnapshot, TurnTokenUsage } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -8,6 +5,7 @@ import type * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { bobHomeDirectory } from "../acp/BobAcpSupport.ts";
+import { readBobDatabase } from "./bobDatabase.ts";
 
 /**
  * Bob's running totals for one task, from `tasks.costs`. Token counts and `cost`
@@ -62,14 +60,10 @@ export const readBobTaskCosts = Effect.fn("readBobTaskCosts")(function* (
   databasePath: string,
   taskId: string,
 ) {
-  const raw = yield* Effect.try(() => {
-    const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
-    try {
-      return database.prepare("SELECT costs FROM tasks WHERE id = ?").get(taskId)?.costs;
-    } finally {
-      database.close();
-    }
-  }).pipe(Effect.orElseSucceed(() => undefined));
+  const raw = yield* readBobDatabase(
+    databasePath,
+    (database) => database.prepare("SELECT costs FROM tasks WHERE id = ?").get(taskId)?.costs,
+  );
   if (typeof raw !== "string") return undefined;
   return Option.getOrUndefined(
     Option.map(decodeTaskCosts(raw), (costs): BobTaskCosts => ({
@@ -135,9 +129,14 @@ export function sameBobTaskCosts(
 }
 
 /**
- * Context windows (maximum input tokens) of the models IBM's Bob gateway listed on 2026-09-24
- * in `/inference/v1/model/info`. ACP reports neither the model Bob runs nor its window, so T3
- * uses these until Bob sends ACP `usage_update`; IBM can change them without notice.
+ * Context windows (maximum input tokens) of the models IBM's Bob gateway listed in
+ * `/inference/v1/model/info`: a snapshot taken on 2026-09-24 with Bob 2.0.5. ACP reports
+ * neither the model Bob runs nor its window, and IBM can change both without notice, so these
+ * are assumptions (`bobThreadTokenUsage` drops one the context outgrows).
+ *
+ * Refresh: re-read `/inference/v1/model/info` whenever Bob updates, along with the router's
+ * default below. Delete the table once Bob reports its window over ACP (`usage_update` with a
+ * `size`).
  */
 const BOB_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   "premium-ide": 270_000,
@@ -167,7 +166,8 @@ export function bobContextWindow(configuredModel: string | undefined): number | 
 /**
  * Thread usage from a reading; `last*` is what was spent since `previous`. Without Bob's
  * token counts it is the context size and Bobcoins alone. `maxTokens` is the session's
- * context window when T3 knows it (see `bobContextWindow`).
+ * context window when T3 knows it (see `bobContextWindow`). That window is assumed, so a
+ * context larger than it proves it wrong and is reported as a count without a window.
  */
 export function bobThreadTokenUsage(
   current: BobTaskCosts,
@@ -175,7 +175,10 @@ export function bobThreadTokenUsage(
   maxTokens?: number,
 ): ThreadTokenUsageSnapshot {
   const cost = { amount: current.cost, unit: "Bobcoins" };
-  const window = maxTokens !== undefined && maxTokens > 0 ? { maxTokens } : {};
+  const window =
+    maxTokens !== undefined && maxTokens > 0 && current.contextTokens <= maxTokens
+      ? { maxTokens }
+      : {};
   if (!current.tokensRecorded) return { usedTokens: current.contextTokens, ...window, cost };
   const last = bobTaskCostsSince(current, previous);
   const totalProcessedTokens = current.input + current.output;

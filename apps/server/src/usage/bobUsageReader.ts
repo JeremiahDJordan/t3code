@@ -1,4 +1,4 @@
-// node:sqlite reads Bob Shell's live task database; Node fs tells a missing one apart.
+// Node fs tells a missing database apart, and node:timers yields between rows.
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * Reads Bob Shell's per-request spend from its task database.
@@ -9,14 +9,17 @@
  * because Bob re-inserts rows. Turns cancelled or failed before an assistant
  * message still charge the task but leave no row, so they are missing here.
  *
+ * Bob 2.0.5 writes no rows for subagent tasks. Their spend is only in the task's
+ * running `tasks.costs`, so it is counted once, at the task's last update.
+ *
  * @module bobUsageReader
  */
 import * as NodeFSP from "node:fs/promises";
-import * as NodeSqlite from "node:sqlite";
 import * as NodeTimersPromises from "node:timers/promises";
 
 import type { UsageTokenTotals } from "@t3tools/contracts";
 
+import { bobTableColumns, withBobDatabase } from "../provider/Layers/bobDatabase.ts";
 import { totalTokens, type UsageRecord } from "./usageTranscripts.ts";
 
 /** The unit Bob bills in, as its own usage display names it. */
@@ -95,20 +98,20 @@ function parseBobMessage(
  * scanning every message. The inner query pulls the small `_meta` out of each
  * large `data` once, and `OFFSET 0` stops SQLite from flattening it into the
  * outer query, which would re-read `data` per column. `json_valid` keeps one
- * malformed row from failing the query. Subagent tasks count toward their
- * parent's session. Optional columns missing from older schemas fall back.
+ * malformed row from failing the query. Older Bob wrote rows for subagent
+ * tasks, which count toward their parent's session. Optional columns missing
+ * from older schemas fall back.
  */
-function usageQuery(taskColumns: ReadonlySet<unknown>): { sql: string; windowed: boolean } {
+function usageQuery(taskColumns: ReadonlySet<string>): { sql: string; windowed: boolean } {
   const windowed = taskColumns.has("updated_at");
   const sessionId = taskColumns.has("parent_id") ? "COALESCE(t.parent_id, t.id)" : "t.id";
-  const model = taskColumns.has("env")
-    ? "CASE WHEN json_valid(t.env) THEN json_extract(t.env, '$.model.id') END"
-    : "NULL";
+  const model = taskColumns.has("env") ? taskModel("t") : "NULL";
   return {
     windowed,
     sql: `
 SELECT
   id,
+  taskId,
   sessionId,
   model,
   json_extract(meta, '$.timestamp') AS timestampMs,
@@ -122,6 +125,7 @@ SELECT
 FROM (
   SELECT
     m.id AS id,
+    t.id AS taskId,
     ${sessionId} AS sessionId,
     ${model} AS model,
     CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$._meta') END AS meta
@@ -133,14 +137,37 @@ FROM (
   };
 }
 
-function columns(database: NodeSqlite.DatabaseSync, table: string): ReadonlySet<unknown> {
-  return new Set(
-    database
-      .prepare(`PRAGMA table_info(${table})`)
-      .all()
-      .map((row) => row.name),
-  );
+/** The model a task's `env` names, as SQL over the task aliased `alias`. */
+function taskModel(alias: string): string {
+  return `CASE WHEN json_valid(${alias}.env) THEN json_extract(${alias}.env, '$.model.id') END`;
 }
+
+/**
+ * Subagent tasks touched since the window, with their running spend from
+ * `tasks.costs`, on their parent's session. Bob 2.0.5 names no model on a
+ * subagent task, so its parent's stands in. Null when the schema predates any
+ * of these columns.
+ */
+function subagentQuery(taskColumns: ReadonlySet<string>): string | null {
+  if (!["parent_id", "costs", "updated_at"].every((column) => taskColumns.has(column))) {
+    return null;
+  }
+  const model = taskColumns.has("env") ? `COALESCE(${taskModel("t")}, ${taskModel("p")})` : "NULL";
+  return `
+SELECT
+  t.id AS id,
+  t.parent_id AS sessionId,
+  ${model} AS model,
+  t.updated_at AS timestampMs,
+  CASE WHEN json_valid(t.costs) THEN json_extract(t.costs, '$.cost') END AS cost,
+  CASE WHEN json_valid(t.costs) THEN json_extract(t.costs, '$.contextTokens') END AS contextTokens
+FROM tasks AS t
+LEFT JOIN tasks AS p ON p.id = t.parent_id
+WHERE t.parent_id IS NOT NULL AND t.updated_at >= ?`;
+}
+
+/** Summing the same spend in another order leaves rounding dust, which is not spend. */
+const BOB_CREDIT_EPSILON = 1e-9;
 
 export interface BobUsageReadResult {
   readonly files: readonly { readonly path: string; readonly records: readonly UsageRecord[] }[];
@@ -150,7 +177,8 @@ export interface BobUsageReadResult {
 
 /**
  * Reads the charged requests of every task Bob updated at or after `sinceMs`.
- * The connection is read-only and closed before returning, so Bob keeps writing.
+ * The connection is read-only and closed before returning, so Bob keeps writing;
+ * a busy Bob fails this source promptly rather than stalling the server.
  */
 export async function readBobUsage(
   databasePath: string,
@@ -164,36 +192,53 @@ export async function readBobUsage(
   }
   const file = { path: databasePath, records: [] as UsageRecord[] };
   const seen = new Set<string>();
-  let error = false;
-  let database: NodeSqlite.DatabaseSync | undefined;
-  try {
-    database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
-    // A busy Bob should fail this source promptly rather than stalling the
-    // server while SQLite waits for its writer.
-    database.exec("PRAGMA busy_timeout = 100");
-    const taskColumns = columns(database, "tasks");
-    const messageColumns = columns(database, "messages");
+  // Resolves to whether the read failed; records read before a failure are kept.
+  const error = await withBobDatabase(databasePath, async (database) => {
+    const taskColumns = bobTableColumns(database, "tasks");
+    const messageColumns = bobTableColumns(database, "messages");
     if (
       !taskColumns.has("id") ||
       !["id", "task_id", "role", "data"].every((column) => messageColumns.has(column))
     ) {
-      error = true;
-    } else {
-      const { sql, windowed } = usageQuery(taskColumns);
-      let rows = 0;
-      for (const row of database.prepare(sql).iterate(...(windowed ? [sinceMs] : []))) {
-        const record = parseBobMessage(row);
-        if (record !== null && record.timestampMs >= sinceMs && !seen.has(record.dedupeKey)) {
-          seen.add(record.dedupeKey);
-          file.records.push(record);
-        }
-        if (++rows % 256 === 0) await NodeTimersPromises.setImmediate();
-      }
+      return true;
     }
-  } catch {
-    error = true;
-  } finally {
-    database?.close();
-  }
+    const add = (record: ReturnType<typeof parseBobMessage>) => {
+      if (record !== null && record.timestampMs >= sinceMs && !seen.has(record.dedupeKey)) {
+        seen.add(record.dedupeKey);
+        file.records.push(record);
+      }
+    };
+    const { sql, windowed } = usageQuery(taskColumns);
+    // Bobcoins in each task's rows, before the window drops any.
+    const rowSpend = new Map<unknown, number>();
+    let rows = 0;
+    for (const row of database.prepare(sql).iterate(...(windowed ? [sinceMs] : []))) {
+      rowSpend.set(
+        row.taskId,
+        (rowSpend.get(row.taskId) ?? 0) + Math.max(0, finite(row.cost) ?? 0),
+      );
+      add(parseBobMessage(row));
+      if (++rows % 256 === 0) await NodeTimersPromises.setImmediate();
+    }
+    const subagents = subagentQuery(taskColumns);
+    if (subagents === null) return false;
+    for (const row of database.prepare(subagents).iterate(sinceMs)) {
+      // What the task's rows leave out, which is all of it from Bob 2.0.5. Rows
+      // an older Bob wrote carry their own tokens, so the rest carries none.
+      const unrecorded = (finite(row.cost) ?? 0) - (rowSpend.get(row.id) ?? 0);
+      if (unrecorded > BOB_CREDIT_EPSILON) {
+        add(
+          parseBobMessage({
+            ...row,
+            id: `task:${String(row.id)}`,
+            cost: unrecorded,
+            contextTokens: rowSpend.has(row.id) ? null : row.contextTokens,
+          }),
+        );
+      }
+      if (++rows % 256 === 0) await NodeTimersPromises.setImmediate();
+    }
+    return false;
+  }).catch(() => true);
   return { files: [file], missing: false, error };
 }
