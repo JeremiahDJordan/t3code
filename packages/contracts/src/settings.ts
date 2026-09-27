@@ -774,6 +774,15 @@ const BOB_AUTH_METHODS = [
 export const BobAuthMethod = Schema.Literals(BOB_AUTH_METHODS.map((method) => method.value));
 export type BobAuthMethod = typeof BobAuthMethod.Type;
 
+const BOB_FOLLOW_UP_BEHAVIORS = [
+  { value: "queue", label: "Queue" },
+  { value: "steer", label: "Steer" },
+] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
+export const BobFollowUpBehavior = Schema.Literals(
+  BOB_FOLLOW_UP_BEHAVIORS.map((behavior) => behavior.value),
+);
+export type BobFollowUpBehavior = typeof BobFollowUpBehavior.Type;
+
 export const BobSettings = makeProviderSettingsSchema(
   {
     // Off by default like Cursor and Grok. Users opt in from Settings.
@@ -801,13 +810,27 @@ export const BobSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "bob", clearWhenEmpty: "omit" },
       }),
     ),
+    // Decided on the server so every client, including ones without Bob support, follows it.
+    followUpBehavior: BobFollowUpBehavior.pipe(
+      Schema.withDecodingDefault(Effect.succeed("queue" as const)),
+      Schema.annotateKey({
+        title: "Follow-up messages",
+        description:
+          "What Bob does with a message sent while it is working. Queue waits until Bob finishes its turn. Steer lets Bob finish its running tool call, then interrupts it with the message.",
+        providerSettingsForm: {
+          control: "select",
+          options: BOB_FOLLOW_UP_BEHAVIORS,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["authMethod", "binaryPath"],
+    order: ["authMethod", "followUpBehavior", "binaryPath"],
   },
 );
 export type BobSettings = typeof BobSettings.Type;
@@ -1521,6 +1544,7 @@ const BobSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   authMethod: Schema.optionalKey(BobAuthMethod),
   binaryPath: Schema.optionalKey(TrimmedString),
+  followUpBehavior: Schema.optionalKey(BobFollowUpBehavior),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
