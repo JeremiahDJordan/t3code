@@ -7,8 +7,10 @@ import {
   BOB_SSO_SIGN_IN_MESSAGE,
   bobAcpSpawnArgs,
   buildBobAcpSpawnInput,
+  bobRewindCutIndex,
   describeBobAcpSetupError,
   moveBobTask,
+  rewindBobTask,
 } from "./BobAcpSupport.ts";
 
 describe("bobAcpSpawnArgs", () => {
@@ -181,6 +183,125 @@ describe("moveBobTask", () => {
       });
       expect(yield* moveBobTask(bob.runtime, "old", "/new")).toBe("copy");
       expect(bob.requests).toEqual(["_bob/task/export", "_bob/task/import", "session/delete"]);
+    }),
+  );
+});
+
+describe("bobRewindCutIndex", () => {
+  /** An exported Bob message, as `_bob/task/export` lists it. */
+  const message = (role: string, timestamp?: number, meta: Record<string, unknown> = {}) => ({
+    id: `${role}-${timestamp ?? 0}`,
+    role,
+    data: {
+      role,
+      content: "",
+      _meta: { ...(timestamp === undefined ? {} : { timestamp }), ...meta },
+    },
+    createdAt: 1,
+  });
+  const messages = [
+    message("system"),
+    message("user", 100),
+    message("assistant", 110),
+    // Messages Bob adds as the user, such as a reverted-changes note, are not prompts.
+    message("user", 150, { notAi: true }),
+    message("user", 160, { hide: true }),
+    message("user", 200),
+    message("assistant", 210),
+    message("user", 300),
+    message("assistant", 310),
+  ];
+
+  it("cuts at the first prompt Bob stamped at or after the turn's start", () => {
+    expect(bobRewindCutIndex(messages, { atMs: 120 })).toBe(5);
+    expect(bobRewindCutIndex(messages, { atMs: 300 })).toBe(7);
+    expect(bobRewindCutIndex(messages, { atMs: 301 })).toBeUndefined();
+  });
+
+  it("counts prompts from the end when turn start times are unknown", () => {
+    expect(bobRewindCutIndex(messages, { lastTurns: 1 })).toBe(7);
+    expect(bobRewindCutIndex(messages, { lastTurns: 2 })).toBe(5);
+    expect(bobRewindCutIndex(messages, { lastTurns: 9 })).toBe(1);
+    expect(bobRewindCutIndex(messages, { lastTurns: 0 })).toBeUndefined();
+  });
+});
+
+describe("rewindBobTask", () => {
+  const exportOf = (timestamps: ReadonlyArray<number>) => ({
+    version: 1,
+    tasks: [
+      {
+        task: { id: "old" },
+        messages: [
+          { id: "system", role: "system", data: { role: "system", content: "" } },
+          ...timestamps.map((timestamp) => ({
+            id: `prompt-${timestamp}`,
+            role: "user",
+            data: { role: "user", content: "", _meta: { timestamp } },
+          })),
+        ],
+      },
+    ],
+  });
+  const fakeBob = (answers: Record<string, unknown>) => {
+    const requests: Array<{ readonly method: string; readonly params: unknown }> = [];
+    return {
+      requests,
+      runtime: {
+        request: (method: string, params: unknown) =>
+          Effect.suspend(() => {
+            requests.push({ method, params });
+            return method in answers
+              ? Effect.succeed(answers[method])
+              : Effect.fail(EffectAcpErrors.AcpRequestError.methodNotFound(method));
+          }),
+      },
+    };
+  };
+
+  it.effect("imports the messages before the cut as a new task and leaves the original", () =>
+    Effect.gen(function* () {
+      const bob = fakeBob({
+        "_bob/task/export": exportOf([100, 200]),
+        "_bob/task/import": { sessionIds: ["rewound"] },
+      });
+      expect(yield* rewindBobTask(bob.runtime, "old", "/work", { atMs: 150 })).toEqual({
+        _tag: "Rewound",
+        sessionId: "rewound",
+      });
+      const imported = bob.requests[1]?.params as {
+        readonly cwd: string;
+        readonly snapshot: { readonly tasks: ReadonlyArray<{ readonly messages: unknown[] }> };
+      };
+      expect(bob.requests.map((request) => request.method)).toEqual([
+        "_bob/task/export",
+        "_bob/task/import",
+      ]);
+      expect(imported.cwd).toBe("/work");
+      expect(imported.snapshot.tasks[0]?.messages).toHaveLength(2);
+    }),
+  );
+
+  it.effect("imports nothing when the cut drops every prompt or none", () =>
+    Effect.gen(function* () {
+      const bob = fakeBob({ "_bob/task/export": exportOf([100, 200]) });
+      expect(yield* rewindBobTask(bob.runtime, "old", "/work", { atMs: 50 })).toEqual({
+        _tag: "Emptied",
+      });
+      expect(yield* rewindBobTask(bob.runtime, "old", "/work", { atMs: 250 })).toEqual({
+        _tag: "Unchanged",
+      });
+      expect(bob.requests.map((request) => request.method)).toEqual([
+        "_bob/task/export",
+        "_bob/task/export",
+      ]);
+    }),
+  );
+
+  it.effect("reports a Bob that cannot export the task", () =>
+    Effect.gen(function* () {
+      const result = yield* rewindBobTask(fakeBob({}).runtime, "old", "/work", { atMs: 1 });
+      expect(result._tag).toBe("Failed");
     }),
   );
 });
