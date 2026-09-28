@@ -16,9 +16,11 @@ import {
   collectLimitAccounts,
   collectLimitNotices,
   collectLimitPools,
+  composerBudgetWindow,
   displayLimitWindows,
   elapsedShare,
   formatResetsIn,
+  formatWindowAmount,
   limitsNotice,
   paceOf,
   providersWithLimits,
@@ -75,6 +77,18 @@ describe("pace", () => {
     expect(formatResetsIn({ ...window, resetsAt: "2026-09-03T11:00:00.000Z" }, now)).toBe(
       "resets now",
     );
+  });
+});
+
+describe("formatWindowAmount", () => {
+  it("names what is used and what is left, never less than none", () => {
+    expect(formatWindowAmount({ used: 12.4, limit: 50, unit: "Bobcoins" })).toBe(
+      "12.40 of 50.00 Bobcoins used · 37.60 left",
+    );
+    expect(formatWindowAmount({ used: 52, limit: 50, unit: "Bobcoins" })).toBe(
+      "52.00 of 50.00 Bobcoins used · 0.00 left",
+    );
+    expect(formatWindowAmount(undefined)).toBeNull();
   });
 });
 
@@ -676,6 +690,25 @@ describe("pooled account columns", () => {
     expect(keys(pool!)).toEqual([["b", "a"]]);
   });
 
+  it("sums amounts only when every account reports them in the same unit", () => {
+    const monthly = { ...window, id: "monthly", kind: "monthly", label: "Monthly" } as const;
+    const coins = (used: number, limit: number, unit = "Bobcoins") => ({
+      ...monthly,
+      amount: { used, limit, unit },
+    });
+    const amountOf = (accounts: LimitAccount[]) =>
+      collectLimitPools(accounts, now)[0]!.windows[0]!.amount;
+    expect(amountOf([account("a", [coins(10, 50)]), account("b", [coins(5, 40)])])).toEqual({
+      used: 15,
+      limit: 90,
+      unit: "Bobcoins",
+    });
+    expect(amountOf([account("a", [coins(10, 50)]), account("b", [monthly])])).toBeUndefined();
+    expect(
+      amountOf([account("a", [coins(10, 50)]), account("b", [coins(5, 40, "credits")])]),
+    ).toBeUndefined();
+  });
+
   it("sorts unknown resets last and breaks ties consistently", () => {
     const accounts = [
       account("z", [{ ...window, resetsAt: undefined }]),
@@ -967,6 +1000,34 @@ describe("/usage-limits", () => {
     expect(usedIn("/pinned/")).toBe(90);
     expect(usedIn("/elsewhere")).toBe(window.usedPercent);
     expect(usedIn(null)).toBe(window.usedPercent);
+  });
+
+  it("gives the composer the first window with amounts, from the folder's own limits", () => {
+    const coins = { used: 5, limit: 50, unit: "Bobcoins" };
+    const monthly = { ...window, id: "monthly", kind: "monthly", amount: coins } as const;
+    const bob = provider({
+      usageLimits: { ...limits, windows: [window, monthly] },
+      workspaceSnapshots: [
+        {
+          cwd: "/pinned",
+          checkedAt: limits.checkedAt,
+          slashCommands: [],
+          skills: [],
+          usageLimits: { ...limits, windows: [{ ...monthly, usedPercent: 90 }] },
+        },
+      ],
+    });
+    expect(composerBudgetWindow(bob, null)).toBe(monthly);
+    expect(composerBudgetWindow(bob, "/pinned/")?.usedPercent).toBe(90);
+    expect(composerBudgetWindow(provider({ usageLimits: limits }), null)).toBeNull();
+    expect(
+      composerBudgetWindow(
+        provider({
+          usageLimits: { ...limits, windows: [monthly], unavailable: { reason: "probeFailed" } },
+        }),
+        null,
+      ),
+    ).toBeNull();
   });
 
   it("surfaces source errors only for sources that carry the selected driver", () => {
