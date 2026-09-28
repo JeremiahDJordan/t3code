@@ -58,9 +58,29 @@ describe("bobProfileToUsage", () => {
       usageLimits: {
         checkedAt,
         windows: [
-          { id: "monthly", kind: "monthly", label: "Monthly", usedPercent: (0.689 / 50) * 100 },
+          {
+            id: "monthly",
+            kind: "monthly",
+            label: "Monthly",
+            usedPercent: (0.689 / 50) * 100,
+            resetsAt: "2026-10-01T00:00:00.000Z",
+            windowDurationMins: 30 * 24 * 60,
+            amount: { used: 0.689, limit: 50, unit: "Bobcoins" },
+          },
         ],
       },
+    });
+  });
+
+  it("resets the window at the start of the next month in UTC", () => {
+    const window = (at: string) => bobProfileToUsage(profile, undefined, at).usageLimits.windows[0];
+    expect(window("2026-02-28T23:59:59.000Z")).toMatchObject({
+      resetsAt: "2026-03-01T00:00:00.000Z",
+      windowDurationMins: 28 * 24 * 60,
+    });
+    expect(window("2026-12-31T23:30:00.000Z")).toMatchObject({
+      resetsAt: "2027-01-01T00:00:00.000Z",
+      windowDurationMins: 31 * 24 * 60,
     });
   });
 
