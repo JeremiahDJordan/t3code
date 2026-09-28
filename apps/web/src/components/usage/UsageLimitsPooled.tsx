@@ -5,6 +5,7 @@ import {
   cursorUsageWindowDetails,
   displayLimitWindows,
   formatResetsIn,
+  formatWindowAmount,
   type LimitAccount,
   type LimitPool,
   type LimitPoolMember,
@@ -150,6 +151,7 @@ function SegmentPopover({
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
   const remaining = remainingPercent(window);
   const resetsIn = formatResetsIn(window, now);
+  const amount = formatWindowAmount(window.amount);
   const where =
     account.environments.length > 0
       ? account.environments.map((environment) => environment.label).join(", ")
@@ -183,6 +185,7 @@ function SegmentPopover({
       </div>
       <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
         <Row label="Left">{remaining}%</Row>
+        {amount ? <span className="text-muted-foreground tabular-nums">{amount}</span> : null}
         {window.resetsAt ? (
           <Row label="Resets">
             {formatUpcomingTimestamp(window.resetsAt, timestampFormat, now)}
@@ -549,7 +552,7 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
             color={color}
             now={now}
             label={details?.label}
-            description={details?.description}
+            description={details?.description ?? formatWindowAmount(window.amount) ?? undefined}
           />
         );
       })}

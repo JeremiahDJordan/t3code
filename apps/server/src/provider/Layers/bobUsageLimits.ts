@@ -190,6 +190,16 @@ function bobProfileTeams(profile: typeof BobProfile.Type) {
   );
 }
 
+/** Every Bob team's Bobcoins reset at the start of each month, 00:00 UTC. */
+function bobBudgetMonth(checkedAt: string) {
+  const start = DateTime.startOf(DateTime.makeUnsafe(checkedAt), "month");
+  const end = DateTime.add(start, { months: 1 });
+  return {
+    resetsAt: DateTime.formatIso(end),
+    windowDurationMins: (DateTime.toEpochMillis(end) - DateTime.toEpochMillis(start)) / 60_000,
+  };
+}
+
 /** The monthly Bobcoin window of one team, and its instance's plan. */
 function bobTeamUsage(
   selected: { readonly instance: BobProfileInstance; readonly team: BobProfileTeam } | undefined,
@@ -219,6 +229,8 @@ function bobTeamUsage(
     kind: "monthly",
     label: "Monthly",
     usedPercent: clampPercent((usage / budget) * 100),
+    ...bobBudgetMonth(checkedAt),
+    amount: { used: Math.max(0, usage), limit: budget, unit: "Bobcoins" },
   };
   return {
     usageLimits: makeUsageLimits({ checkedAt, windows: [window] }),
