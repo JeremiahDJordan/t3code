@@ -23,6 +23,7 @@ import {
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { BOB_API_KEY_REQUIRED_MESSAGE } from "../acp/BobAcpSupport.ts";
+import { BOB_TMUX_MISSING_MESSAGE } from "../acp/BobRelay.ts";
 import { ProviderVersionCache } from "../providerMaintenance.ts";
 import {
   BOB_SSO_UNCONFIRMED_MESSAGE,
@@ -32,6 +33,7 @@ import {
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
   MINIMUM_BOB_VERSION,
+  withBobSessionHostStatus,
 } from "./BobProvider.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
@@ -62,6 +64,25 @@ describe("buildInitialBobProviderSnapshot", () => {
       expect(snapshot.models.map((model) => [model.slug, model.isCustom])).toEqual([
         [BOB_DEFAULT_MODEL, false],
       ]);
+    }),
+  );
+});
+
+describe("withBobSessionHostStatus", () => {
+  it.effect("reports an instance set to run Bob in tmux as unusable without tmux", () =>
+    Effect.gen(function* () {
+      const snapshot = yield* buildInitialBobProviderSnapshot(
+        decodeBobSettings({ enabled: true, sessionHost: "tmux" }),
+      );
+      const ready = { ...snapshot, status: "ready" as const };
+      expect(withBobSessionHostStatus(ready, true)).toBe(ready);
+      expect(withBobSessionHostStatus(ready, false)).toMatchObject({
+        status: "error",
+        message: BOB_TMUX_MISSING_MESSAGE,
+      });
+      // Bob missing, or signed out, is the first thing to fix.
+      const missing = { ...snapshot, status: "error" as const, message: "Bob is not installed." };
+      expect(withBobSessionHostStatus(missing, false)).toBe(missing);
     }),
   );
 });

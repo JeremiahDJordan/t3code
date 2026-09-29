@@ -21,6 +21,8 @@ const antigravityProfile = process.env.T3_ACP_ANTIGRAVITY === "1";
 const bobProfile = process.env.T3_ACP_BOB === "1";
 const bobResumeNotFound = process.env.T3_ACP_BOB_RESUME_NOT_FOUND === "1";
 const bobSignedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
+// Bob is signed out while this file exists, as when its stored login expires between sessions.
+const bobSignedOutFile = process.env.T3_ACP_BOB_SIGNED_OUT_FILE;
 const bobLicenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
 const bobExitOnPrompt = process.env.T3_ACP_BOB_EXIT_ON_PROMPT === "1";
 // An older Bob that does not advertise `session/resume`.
@@ -470,14 +472,17 @@ const program = Effect.gen(function* () {
         ],
       },
     });
-  // Bob checks its sign-in and license before it opens or resumes a session.
-  const bobSessionSetupError: Effect.Effect<void, AcpError.AcpRequestError> = bobSignedOut
-    ? AcpError.AcpRequestError.authRequired()
-    : bobLicenseRequired
-      ? AcpError.AcpRequestError.invalidRequest(
-          "Invalid request: A license agreement is required. Review it with --show-license and accept it with --accept-license.",
-        )
-      : Effect.void;
+  // Bob checks its sign-in and license before it opens a session. A resume checks them only after
+  // it finds the task in this folder, as Bob 2.0.5 does.
+  const bobSessionSetupError: Effect.Effect<void, AcpError.AcpRequestError> = Effect.suspend(() =>
+    bobSignedOut || (bobSignedOutFile !== undefined && NodeFS.existsSync(bobSignedOutFile))
+      ? AcpError.AcpRequestError.authRequired()
+      : bobLicenseRequired
+        ? AcpError.AcpRequestError.invalidRequest(
+            "Invalid request: A license agreement is required. Review it with --show-license and accept it with --accept-license.",
+          )
+        : Effect.void,
+  );
   const publishBobCommands = (targetSessionId: string) =>
     agent.client.sessionUpdate({
       sessionId: targetSessionId,
@@ -574,7 +579,6 @@ const program = Effect.gen(function* () {
   yield* agent.handleResumeSession((request) =>
     Effect.gen(function* () {
       if (bobProfile) {
-        yield* bobSessionSetupError;
         // Bob answers every other failed resume (unknown task, other cwd) with the same error.
         if (
           bobResumeNotFound ||
@@ -585,6 +589,7 @@ const program = Effect.gen(function* () {
             { uri: request.sessionId },
           );
         }
+        yield* bobSessionSetupError;
         if (waitForResumeRelease) {
           yield* Deferred.await(resumeRelease);
         }

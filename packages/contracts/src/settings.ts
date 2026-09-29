@@ -784,6 +784,17 @@ export const BobFollowUpBehavior = Schema.Literals(
 );
 export type BobFollowUpBehavior = typeof BobFollowUpBehavior.Type;
 
+/**
+ * Where an instance runs `bob acp`: in T3's own process tree, or in T3's tmux server, where Bob
+ * and the commands it runs keep going when T3 stops or restarts.
+ */
+const BOB_SESSION_HOSTS = [
+  { value: "server", label: "With T3 Code" },
+  { value: "tmux", label: "In tmux" },
+] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
+export const BobSessionHost = Schema.Literals(BOB_SESSION_HOSTS.map((host) => host.value));
+export type BobSessionHost = typeof BobSessionHost.Type;
+
 export const BobSettings = makeProviderSettingsSchema(
   {
     // Off by default like Cursor and Grok. Users opt in from Settings.
@@ -825,13 +836,26 @@ export const BobSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    sessionHost: BobSessionHost.pipe(
+      Schema.withDecodingDefault(Effect.succeed("server" as const)),
+      Schema.annotateKey({
+        title: "Where Bob runs",
+        description:
+          "In tmux, Bob and the commands it runs keep going when T3 Code stops or restarts, and T3 Code finishes the turn that was running when it starts again. Needs tmux 3.2 or later.",
+        providerSettingsForm: {
+          control: "select",
+          options: BOB_SESSION_HOSTS,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["authMethod", "followUpBehavior", "binaryPath"],
+    order: ["authMethod", "followUpBehavior", "sessionHost", "binaryPath"],
   },
 );
 export type BobSettings = typeof BobSettings.Type;
@@ -1559,6 +1583,7 @@ const BobSettingsPatch = Schema.Struct({
   authMethod: Schema.optionalKey(BobAuthMethod),
   binaryPath: Schema.optionalKey(TrimmedString),
   followUpBehavior: Schema.optionalKey(BobFollowUpBehavior),
+  sessionHost: Schema.optionalKey(BobSessionHost),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
