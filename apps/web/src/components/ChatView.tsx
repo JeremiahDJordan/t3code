@@ -6529,8 +6529,13 @@ export default function ChatView(props: ChatViewProps) {
     serverConfig?.environment.capabilities.threadBackgroundCommands === true,
   );
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
+    // Monitoring that is only the thread's background commands already shows in their row,
+    // with its own Stop.
     const backgroundLivenessItems =
-      backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+      backgroundLivenessBannerItem === null ||
+      (activeBackgroundLiveness === "monitoring" && backgroundCommandBannerItem !== null)
+        ? []
+        : [backgroundLivenessBannerItem];
     const resumeCompactionItems =
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
@@ -6604,6 +6609,7 @@ export default function ChatView(props: ChatViewProps) {
       ...parkedThreadItems,
     ];
   }, [
+    activeBackgroundLiveness,
     activeBranchMismatchKey,
     backgroundCommandBannerItem,
     backgroundLivenessBannerItem,

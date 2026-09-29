@@ -1,3 +1,5 @@
+import * as NodeOS from "node:os";
+
 import {
   BACKGROUND_COMMAND_MAX_CHARS,
   BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS,
@@ -5,6 +7,8 @@ import {
   BackgroundCommandError,
   BackgroundCommandId,
   type BackgroundCommandStopper,
+  CommandId,
+  EventId,
   type OrchestrationEvent,
   type ThreadBackgroundCommand,
   type ThreadId,
@@ -29,6 +33,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ThreadBackgroundLivenessService } from "../orchestration/ThreadBackgroundLiveness.ts";
 import {
   BackgroundCommandChanges,
   type BackgroundCommandRow,
@@ -148,12 +153,13 @@ function signalGroup(pid: number, signal: NodeJS.Signals) {
   });
 }
 
+/** Commands run as T3's own user, so a pid only another user may signal is not one of them. */
 function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+  } catch {
+    return false;
   }
 }
 
@@ -170,6 +176,10 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const crypto = yield* Crypto.Crypto;
   const changes = yield* BackgroundCommandChanges;
+  const liveness = yield* ThreadBackgroundLivenessService;
+  /** A running command keeps its thread "monitoring": it neither settles nor looks idle. */
+  const setLive = (row: { readonly id: string; readonly threadId: ThreadId }, live: boolean) =>
+    Effect.sync(() => liveness.setServerWork({ threadId: row.threadId, workId: row.id, live }));
 
   const supportDir = path.join(config.stateDir, "background-commands");
   const wrapperPath = path.join(supportDir, "run-command.mjs");
@@ -357,6 +367,7 @@ const make = Effect.gen(function* () {
           .pipe(Effect.ignore);
         return yield* refuse(`Could not start the command: ${Cause.pretty(launched.cause)}`);
       }
+      yield* setLive(row, true);
       yield* publish(input.threadId);
       return toThreadBackgroundCommand(row);
     },
@@ -368,11 +379,71 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => undefined),
     );
 
+  /**
+   * The command's process group, as its wrapper recorded it. A command started before this boot
+   * has none: its pid may now belong to an unrelated process, which must never be signalled.
+   */
   const readPid = (row: BackgroundCommandRow) =>
-    fs.readFileString(path.join(row.jobDir, "pid")).pipe(
-      Effect.map((text) => Number.parseInt(text.trim(), 10)),
-      Effect.map((pid) => (Number.isInteger(pid) && pid > 1 ? pid : undefined)),
-      Effect.orElseSucceed(() => undefined),
+    Effect.gen(function* () {
+      const bootedAtMs = (yield* Clock.currentTimeMillis) - NodeOS.uptime() * 1000;
+      if (Date.parse(row.startedAt) < bootedAtMs) return undefined;
+      return yield* fs.readFileString(path.join(row.jobDir, "pid")).pipe(
+        Effect.map((text) => Number.parseInt(text.trim(), 10)),
+        Effect.map((pid) => (Number.isInteger(pid) && pid > 1 ? pid : undefined)),
+        Effect.orElseSucceed(() => undefined),
+      );
+    });
+
+  /** Kills a command's process group, when its pid is known, and its tmux session, at once. */
+  const killCommand = (row: BackgroundCommandRow) =>
+    readPid(row).pipe(
+      Effect.flatMap((pid) => (pid === undefined ? Effect.void : signalGroup(pid, "SIGKILL"))),
+      Effect.andThen(tmux.killSession(row.tmuxSession)),
+    );
+
+  /**
+   * Notes a command's end in its thread's work log. The event also has clients reload the
+   * thread, which is what clears its "monitoring" when no turn follows the end.
+   */
+  const recordEnd = (
+    row: BackgroundCommandRow,
+    status: "exited" | "stopped" | "lost",
+    exitStatus: string | null,
+    endedAt: string,
+  ) =>
+    Clock.currentTimeMillis.pipe(
+      Effect.flatMap((nowMs) =>
+        engine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`server:background-command-ended:${row.id}`),
+          threadId: row.threadId,
+          activity: {
+            id: EventId.make(`background-command-ended:${row.id}`),
+            tone: "info",
+            kind: "background-command.ended",
+            summary:
+              status === "exited"
+                ? `Background command finished: ${exitStatus ?? "exit unknown"}`
+                : status === "stopped"
+                  ? "Background command stopped"
+                  : "Background command is no longer running",
+            // The work log shows `data.command` as the command that ran.
+            payload: {
+              backgroundCommandId: row.id,
+              status,
+              exitStatus,
+              data: { command: row.command },
+            },
+            turnId: null,
+            createdAt: endedAt,
+          },
+          createdAt: isoAt(nowMs),
+        }),
+      ),
+      Effect.asVoid,
+      Effect.catch((error) =>
+        Effect.logWarning("could not note a background command's end", { error }),
+      ),
     );
 
   /** Records how a command ended and wakes the scheduler to tell the agent. */
@@ -395,10 +466,29 @@ const make = Effect.gen(function* () {
           finished
             ? tmux
                 .killSession(row.tmuxSession)
-                .pipe(Effect.andThen(publish(row.threadId)), Effect.andThen(scheduler.wake))
+                .pipe(
+                  Effect.andThen(setLive(row, false)),
+                  Effect.andThen(recordEnd(row, status, exitStatus, endedAt)),
+                  Effect.andThen(publish(row.threadId)),
+                  Effect.andThen(scheduler.wake),
+                )
             : Effect.void,
         ),
       );
+
+  // Commands that ran on across a restart, counted before clients can load their threads.
+  yield* repository.listActive.pipe(
+    Effect.flatMap((rows) =>
+      Effect.forEach(
+        rows.filter((row) => row.status === "running"),
+        (row) => setLive(row, true),
+        { discard: true },
+      ),
+    ),
+    Effect.catch((error) =>
+      Effect.logWarning("could not read running background commands", { error }),
+    ),
+  );
 
   // Stop escalation already applied, per command, so each signal goes once per server run.
   const stopStage = new Map<string, number>();
@@ -467,7 +557,10 @@ const make = Effect.gen(function* () {
     if (newMatches) yield* scheduler.wake;
   }).pipe(Effect.catch((error) => Effect.logWarning("background command poll failed", { error })));
 
-  /** Ctrl-C first; then SIGTERM, SIGKILL and the session, if the command does not end. */
+  /**
+   * Ctrl-C first; then SIGTERM, SIGKILL and the session, if the command does not end. A stop
+   * first seen late, as after a restart, starts at its stage, so the last one kills outright.
+   */
   const escalateStop = (row: BackgroundCommandRow, nowMs: number) =>
     Effect.gen(function* () {
       const elapsed = nowMs - Date.parse(row.stopRequestedAt ?? isoAt(nowMs));
@@ -481,9 +574,10 @@ const make = Effect.gen(function* () {
               : 1;
       if ((stopStage.get(row.id) ?? 0) >= stage) return;
       stopStage.set(row.id, stage);
+      if (stage === 4) return yield* killCommand(row);
       const pid = yield* readPid(row);
-      if (stage === 4 || pid === undefined) {
-        if (stage === 4 || elapsed >= STOP_TERM_AFTER_MS) yield* tmux.killSession(row.tmuxSession);
+      if (pid === undefined) {
+        if (elapsed >= STOP_TERM_AFTER_MS) yield* tmux.killSession(row.tmuxSession);
         return;
       }
       yield* signalGroup(pid, stage === 1 ? "SIGINT" : stage === 2 ? "SIGTERM" : "SIGKILL");
@@ -583,20 +677,27 @@ const make = Effect.gen(function* () {
       }
     }).pipe(Effect.ignore);
 
-  /** Archive stops a thread's commands; delete also removes their records and output. */
+  /**
+   * Archive kills a thread's commands, since nothing would show or stop them after; delete also
+   * removes their records and output.
+   */
   const onThreadGone = (threadId: ThreadId, deleted: boolean) =>
     Effect.gen(function* () {
       const rows = yield* repository.listByThread(threadId);
       for (const row of rows) {
         if (row.status === "running") {
           yield* repository.requestStop(row.id, "agent", isoAt(yield* Clock.currentTimeMillis));
-          yield* tmux.killSession(row.tmuxSession);
+          yield* killCommand(row);
           yield* repository.finish(row.id, {
             status: "stopped",
             exitStatus: null,
             endedAt: isoAt(yield* Clock.currentTimeMillis),
             endNoticeSent: true,
           });
+          yield* setLive(row, false);
+        } else if (!row.endNoticeSent) {
+          // Told later, an end would start a stale turn when the thread is unarchived.
+          yield* repository.markEndNoticeSent(row.id);
         }
         if (deleted) yield* removeJobDir(row);
       }
@@ -605,6 +706,36 @@ const make = Effect.gen(function* () {
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("could not clean up a thread's background commands", {
+          threadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
+
+  /**
+   * An interrupt that names no turn, while none runs, asks to stop the thread's background work,
+   * as the Monitoring banner's Stop on web and desktop does; the thread's commands are that work.
+   * An interrupt of a turn leaves them running, even when that turn has just ended.
+   */
+  const onInterrupt = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const shell = yield* snapshots.getThreadShellById(threadId);
+      if (Option.isNone(shell)) return;
+      const status = shell.value.session?.status;
+      if (
+        status === "running" ||
+        status === "starting" ||
+        shell.value.latestTurn?.state === "running"
+      ) {
+        return;
+      }
+      const rows = yield* repository.listByThread(threadId);
+      for (const row of rows) {
+        if (row.status === "running") yield* stop(row.id, "user");
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("could not stop a thread's background commands", {
           threadId,
           cause: Cause.pretty(cause),
         }),
@@ -620,6 +751,10 @@ const make = Effect.gen(function* () {
             return onThreadGone(event.payload.threadId, false);
           case "thread.deleted":
             return onThreadGone(event.payload.threadId, true);
+          case "thread.turn-interrupt-requested":
+            return event.payload.turnId === undefined
+              ? onInterrupt(event.payload.threadId)
+              : Effect.void;
         }
         return Effect.void;
       };

@@ -206,4 +206,11 @@ it, which uses your quota like any turn. Closing the command's terminal leaves t
 running, but Ctrl-C in that terminal ends it. Background
 commands need tmux 3.2 or later on the machine running T3 Code, and the thread in Full access,
 since they run outside the agent's sandbox. Archiving a thread stops its commands; deleting it
-also removes their output. The same switch in Settings turns them off.
+also removes their output. The same switch in Settings turns them off. While a command runs,
+its thread shows as monitoring on web and desktop, and it does not settle on its own.
+
+T3 Code apps without check-in support, such as the App Store app and app.t3.codes, show the
+messages T3 Code sends for check-ins and commands, but not the scheduled check-ins, the running
+commands, or their buttons. From those apps, ask the agent to cancel a check-in or stop a
+command, or archive the thread. On app.t3.codes, **Stop** on the thread's **Monitoring** banner
+also stops its commands.
