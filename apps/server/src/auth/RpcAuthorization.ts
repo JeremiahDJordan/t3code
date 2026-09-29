@@ -132,6 +132,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.checkInCancel]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribeThreadBackgroundCommands]: AuthOrchestrationReadScope,
   [WS_METHODS.backgroundCommandStop]: AuthOrchestrationOperateScope,
+  [WS_METHODS.backgroundCommandSetMuted]: AuthOrchestrationOperateScope,
   // It types into the command's input, so it needs terminal access.
   [WS_METHODS.backgroundCommandOpenTerminal]: AuthTerminalOperateScope,
   [WS_METHODS.subscribeResourceTelemetry]: AuthOrchestrationReadScope,

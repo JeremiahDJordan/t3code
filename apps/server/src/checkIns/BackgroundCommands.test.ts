@@ -301,6 +301,43 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
     ),
   );
 
+  it.live("holds back a muted command's matches until it is unmuted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const { commands, scheduler, dispatched } = yield* makeHarness({ ...dirs, persistence });
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "while [ ! -f go ]; do sleep 0.1; done; echo 'FAILED test_a'; sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: "FAILED",
+        });
+        expect(yield* commands.setMuted(started.id, true)).toBe(true);
+        expect((yield* commands.list(THREAD_ID))[0]?.muted).toBe(true);
+        NodeFS.writeFileSync(NodePath.join(dirs.workspace, "go"), "");
+        const matchesPath = NodePath.join(NodePath.dirname(started.stdoutPath), "matches.log");
+        for (let attempt = 0; attempt < 100 && !NodeFS.existsSync(matchesPath); attempt += 1) {
+          yield* Effect.sleep("100 millis");
+        }
+        yield* commands.pollNow;
+        yield* scheduler.runDueNow;
+        expect(texts(yield* Ref.get(dispatched))).toHaveLength(0);
+
+        // Unmuted, the match goes out; stopped, the end is told as always.
+        expect(yield* commands.setMuted(started.id, false)).toBe(true);
+        yield* scheduler.runDueNow;
+        expect(texts(yield* Ref.get(dispatched))[0]).toContain("FAILED test_a");
+        expect(yield* commands.stop(started.id, "user")).toBe(true);
+        yield* untilEnded(commands, scheduler);
+        expect(texts(yield* Ref.get(dispatched))[1]).toContain("The user stopped");
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
   it.live("refuses a thread that is not in Full access", () =>
     Effect.scoped(
       Effect.gen(function* () {

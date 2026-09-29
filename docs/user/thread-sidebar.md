@@ -199,7 +199,11 @@ Code tells the agent the moment the command ends, and on a schedule while it run
 asks. The agent can also ask to hear about certain lines as they appear, such as failing tests,
 so it can look into them before a long run finishes; those messages come at most every five
 minutes. Running commands show above the composer with **Terminal**, which opens a terminal on the
-command (scroll with the mouse wheel; hold Shift to select text), and **Stop**. Background
+command (scroll with the mouse wheel; hold Shift to select text); **Mute**, which stops the
+agent's status updates and matching lines about it until you unmute it, though it still hears when
+the command ends; and **Stop**. Stopping a command gives the agent a short turn to hear about
+it, which uses your quota like any turn. Closing the command's terminal leaves the command
+running, but Ctrl-C in that terminal ends it. Background
 commands need tmux 3.2 or later on the machine running T3 Code, and the thread in Full access,
 since they run outside the agent's sandbox. Archiving a thread stops its commands; deleting it
 also removes their output. The same switch in Settings turns them off.
