@@ -11,7 +11,12 @@ import {
 import { Switch } from "../ui/switch";
 import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
-import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  SettingResetButton,
+  SettingsRow,
+  SettingsSection,
+  SettingsUnavailableGroup,
+} from "./settingsLayout";
 import {
   useScopedSettings,
   useScopedSettingsMixed,
@@ -23,10 +28,12 @@ const isRepeatLimit = Schema.is(CheckInRepeatLimitHours);
 function RepeatLimitInput({
   value,
   mixed,
+  disabled,
   onCommit,
 }: {
   value: number;
   mixed: boolean;
+  disabled: boolean;
   onCommit: (hours: number) => void;
 }) {
   // Committed on blur or Enter rather than per keystroke: typing "48" passes through "4",
@@ -39,6 +46,7 @@ function RepeatLimitInput({
         max={720}
         size="sm"
         className="w-32"
+        disabled={disabled}
         onValueCommitted={(next) => {
           if (next === null) return;
           const hours = Math.round(next);
@@ -64,71 +72,87 @@ function RepeatLimitInput({
  * settings scope, so a project can differ from its environment.
  */
 export function AgentCheckInsSettings() {
-  const { scope } = useSettingsScope();
+  const { scope, connectedEnvironments } = useSettingsScope();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const mixedEnabled = useScopedSettingsMixed(["enableAgentCheckIns"]);
   const mixedLimit = useScopedSettingsMixed(["checkInRepeatLimitHours"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
+  // A server without check-ins drops these keys, so an edit there would snap back.
+  const supported = connectedEnvironments.every(
+    (environment) => environment.serverConfig?.environment.capabilities.threadCheckIns === true,
+  );
   return (
-    <SettingsSection id="agent-check-ins" title="Check-ins">
-      <SettingsRow
-        serverScoped
-        settingKeys={["enableAgentCheckIns"]}
-        mixed={mixedEnabled}
-        id={searchableSetting("agent-check-ins").id}
-        title="Agent check-ins"
-        description={
-          isProjectScope
-            ? "Let agents in this project schedule a message back into their thread later, to check on a long build or CI. Each check-in is a turn. Applies when the agent session next starts."
-            : "Let agents schedule a message back into their thread later, to check on a long build or CI. Each check-in is a turn. Projects can override it."
+    <SettingsSection id="check-ins" title="Check-ins and background commands">
+      <SettingsUnavailableGroup
+        message={
+          supported ? undefined : "A selected environment's server does not support check-ins."
         }
-        resetAction={
-          settings.enableAgentCheckIns !== DEFAULT_SERVER_SETTINGS.enableAgentCheckIns ? (
-            <SettingResetButton
-              label="check-ins"
-              onClick={() =>
-                updateSettings({ enableAgentCheckIns: DEFAULT_SERVER_SETTINGS.enableAgentCheckIns })
-              }
+      >
+        <SettingsRow
+          serverScoped
+          settingKeys={["enableAgentCheckIns"]}
+          mixed={mixedEnabled}
+          id={searchableSetting("agent-check-ins").id}
+          title="Agent check-ins"
+          description={
+            isProjectScope
+              ? "Let agents in this project schedule a message back into their thread later, and run long commands in the background that tell them when they end. Each message is a turn. Background commands need Full access and tmux. Applies when the agent session next starts."
+              : "Let agents schedule a message back into their thread later, and run long commands in the background that tell them when they end. Each message is a turn. Background commands need Full access and tmux. Projects can override it."
+          }
+          resetAction={
+            supported &&
+            settings.enableAgentCheckIns !== DEFAULT_SERVER_SETTINGS.enableAgentCheckIns ? (
+              <SettingResetButton
+                label="check-ins"
+                onClick={() =>
+                  updateSettings({
+                    enableAgentCheckIns: DEFAULT_SERVER_SETTINGS.enableAgentCheckIns,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              aria-label="Agent check-ins"
+              mixed={mixedEnabled}
+              disabled={!supported}
+              checked={mixedEnabled ? false : settings.enableAgentCheckIns}
+              onCheckedChange={(enabled) => updateSettings({ enableAgentCheckIns: enabled })}
             />
-          ) : null
-        }
-        control={
-          <Switch
-            aria-label="Agent check-ins"
-            mixed={mixedEnabled}
-            checked={mixedEnabled ? false : settings.enableAgentCheckIns}
-            onCheckedChange={(enabled) => updateSettings({ enableAgentCheckIns: enabled })}
-          />
-        }
-      />
-      <SettingsRow
-        serverScoped
-        settingKeys={["checkInRepeatLimitHours"]}
-        mixed={mixedLimit}
-        id={searchableSetting("check-in-repeat-limit").id}
-        title="Repeating check-ins end after"
-        description="Hours a repeating check-in keeps going before it stops on its own. The agent can schedule another."
-        resetAction={
-          settings.checkInRepeatLimitHours !== DEFAULT_SERVER_SETTINGS.checkInRepeatLimitHours ? (
-            <SettingResetButton
-              label="check-in limit"
-              onClick={() =>
-                updateSettings({
-                  checkInRepeatLimitHours: DEFAULT_SERVER_SETTINGS.checkInRepeatLimitHours,
-                })
-              }
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["checkInRepeatLimitHours"]}
+          mixed={mixedLimit}
+          id={searchableSetting("check-in-repeat-limit").id}
+          title="Repeating check-ins end after"
+          description="Hours a repeating check-in keeps going before it stops on its own. The agent can schedule another."
+          resetAction={
+            supported &&
+            settings.checkInRepeatLimitHours !== DEFAULT_SERVER_SETTINGS.checkInRepeatLimitHours ? (
+              <SettingResetButton
+                label="check-in limit"
+                onClick={() =>
+                  updateSettings({
+                    checkInRepeatLimitHours: DEFAULT_SERVER_SETTINGS.checkInRepeatLimitHours,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <RepeatLimitInput
+              value={settings.checkInRepeatLimitHours}
+              mixed={mixedLimit}
+              disabled={!supported}
+              onCommit={(hours) => updateSettings({ checkInRepeatLimitHours: hours })}
             />
-          ) : null
-        }
-        control={
-          <RepeatLimitInput
-            value={settings.checkInRepeatLimitHours}
-            mixed={mixedLimit}
-            onCommit={(hours) => updateSettings({ checkInRepeatLimitHours: hours })}
-          />
-        }
-      />
+          }
+        />
+      </SettingsUnavailableGroup>
     </SettingsSection>
   );
 }

@@ -214,6 +214,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
   );
+  // A server without check-ins drops their keys, so an edit there would snap back.
+  const supportsCheckIns = targets.every(
+    (target) => target.environment.serverConfig.environment.capabilities.threadCheckIns === true,
+  );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -402,27 +406,29 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       onValueChange={(value) => write({ enableAgentBrowserAccess: value })}
                     />
                   </SettingsSection>
-                  <SettingsSection title="Check-ins">
-                    <FanoutSwitchRow
-                      icon="clock"
-                      label="Agent check-ins"
-                      subtitle="Let agents schedule a message back into their thread later. Each check-in is a turn."
-                      value={uniform("enableAgentCheckIns")}
-                      disabled={disabledFor("enableAgentCheckIns")}
-                      onValueChange={(value) => write({ enableAgentCheckIns: value })}
-                    />
-                    <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
-                      <View className="w-[22px] android:w-6" />
-                      <Text className="flex-1 text-foreground text-lg android:text-base">
-                        Repeats end after (hours)
-                      </Text>
-                      <CheckInHoursField
-                        value={uniform("checkInRepeatLimitHours")}
-                        disabled={disabledFor("checkInRepeatLimitHours")}
-                        onValueChange={(hours) => write({ checkInRepeatLimitHours: hours })}
+                  {supportsCheckIns ? (
+                    <SettingsSection title="Check-ins and background commands">
+                      <FanoutSwitchRow
+                        icon="clock"
+                        label="Agent check-ins"
+                        subtitle="Let agents schedule a message back into their thread later, and run long commands that tell them when they end. Each message is a turn."
+                        value={uniform("enableAgentCheckIns")}
+                        disabled={disabledFor("enableAgentCheckIns")}
+                        onValueChange={(value) => write({ enableAgentCheckIns: value })}
                       />
-                    </View>
-                  </SettingsSection>
+                      <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
+                        <View className="w-[22px] android:w-6" />
+                        <Text className="flex-1 text-foreground text-lg android:text-base">
+                          Repeats end after (hours)
+                        </Text>
+                        <CheckInHoursField
+                          value={uniform("checkInRepeatLimitHours")}
+                          disabled={disabledFor("checkInRepeatLimitHours")}
+                          onValueChange={(hours) => write({ checkInRepeatLimitHours: hours })}
+                        />
+                      </View>
+                    </SettingsSection>
+                  ) : null}
                 </>
               ) : null}
 
