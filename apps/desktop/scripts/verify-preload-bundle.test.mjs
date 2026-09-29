@@ -27,6 +27,26 @@ describe("desktop preload bundle verifier", () => {
     );
   });
 
+  it("loads the preload's macOS branch, which adds page listeners, on every host", () => {
+    assert.doesNotThrow(() =>
+      verifyPreloadBundle(`${validPreload}
+        if (process.platform === "darwin") window.addEventListener("resize", () => {});`),
+    );
+  });
+
+  it("rejects an API a platform branch leaves out, whatever the host", () => {
+    assert.throws(
+      () =>
+        verifyPreloadBundle(
+          validPreload.replace(
+            "getClientPlatform: () => process.platform,",
+            'getClientPlatform: process.platform === "win32" ? undefined : () => process.platform,',
+          ),
+        ),
+      /missing executable APIs: getClientPlatform \(loaded as win32\)/,
+    );
+  });
+
   it("rejects a required API whose exposed value is not callable", () => {
     assert.throws(
       () =>
