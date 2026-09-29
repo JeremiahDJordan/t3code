@@ -48,6 +48,11 @@ function everyLabel(minutes: number): string {
 
 const PATTERN_SHOWN_CHARS = 24;
 
+/** Whether the command still has status updates to come; they end at the repeat limit. */
+function sendsStatusUpdates(command: ThreadBackgroundCommand): boolean {
+  return command.statusEveryMinutes !== null && command.nextStatusAt !== null;
+}
+
 /**
  * What the agent hears about a running command before it ends: `muted · watching for FAILED ·
  * status updates every 20m`, or empty when it hears only about the end.
@@ -59,9 +64,9 @@ function backgroundCommandUpdatesLabel(command: ThreadBackgroundCommand): string
     pattern
       ? `watching for ${pattern.length > PATTERN_SHOWN_CHARS ? `${pattern.slice(0, PATTERN_SHOWN_CHARS)}…` : pattern}`
       : undefined,
-    command.statusEveryMinutes === null
-      ? undefined
-      : `status updates every ${everyLabel(command.statusEveryMinutes)}`,
+    command.statusEveryMinutes !== null && sendsStatusUpdates(command)
+      ? `status updates every ${everyLabel(command.statusEveryMinutes)}`
+      : undefined,
   ];
   return parts.filter((part) => part !== undefined).join(" · ");
 }
@@ -100,6 +105,6 @@ export function canMuteBackgroundCommand(command: ThreadBackgroundCommand): bool
   return (
     command.status === "running" &&
     command.muted !== undefined &&
-    (command.statusEveryMinutes !== null || Boolean(command.notifyOn))
+    (sendsStatusUpdates(command) || Boolean(command.notifyOn))
   );
 }

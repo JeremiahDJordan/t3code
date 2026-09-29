@@ -1288,7 +1288,7 @@ export const ServerSettings = Schema.Struct({
    * thread later. Each delivery is a turn, so it spends the provider's quota.
    */
   enableAgentCheckIns: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  /** How many hours a repeating check-in keeps going before it stops on its own. */
+  /** How many hours a repeating check-in, or a background command's status updates, keep going. */
   checkInRepeatLimitHours: CheckInRepeatLimitHours.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECK_IN_REPEAT_LIMIT_HOURS)),
   ),

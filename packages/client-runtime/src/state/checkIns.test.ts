@@ -44,6 +44,15 @@ describe("backgroundCommandStatusLabel", () => {
     );
   });
 
+  it("drops the status update cadence once the repeat limit has ended status updates", () => {
+    expect(
+      backgroundCommandStatusLabel(
+        { ...command, statusEveryMinutes: 20, nextStatusAt: null },
+        "2:15 PM",
+      ),
+    ).toBe("Running since 2:15 PM");
+  });
+
   it("says how an ended command ended while the agent is told", () => {
     expect(
       backgroundCommandStatusLabel(

@@ -81,6 +81,7 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
   readonly persistence: Context.Context<
     | ThreadCheckIns.ThreadCheckInRepository
     | ThreadBackgroundCommands.ThreadBackgroundCommandRepository
+    | SqlClient.SqlClient
   >;
   readonly runtimeMode?: RuntimeMode;
   /** Domain events the services see, for tests that drive them. */

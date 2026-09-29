@@ -119,12 +119,18 @@ function matchLines(command: ThreadBackgroundCommand, matches: NoticedMatches | 
   return `New lines matching ${patternShown(command.notifyOn)}:\n\`\`\`\n${shown}\n\`\`\`${more}\n`;
 }
 
-/** When the agent hears about the command next, while it runs. */
-function nextLine(command: ThreadBackgroundCommand): string {
+/**
+ * When the agent hears about the command next, while it runs. `lastStatusLimitHours` is set on
+ * the last status update, to the repeat limit that ended them.
+ */
+function nextLine(command: ThreadBackgroundCommand, lastStatusLimitHours?: number): string {
   const matches = command.notifyOn
     ? `about new lines matching ${patternShown(command.notifyOn)} at most every ${formatCheckInMinutes(BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES)}`
     : undefined;
-  if (command.statusEveryMinutes !== null) {
+  if (lastStatusLimitHours !== undefined) {
+    return `\nThis is the last status update: they end ${formatCheckInMinutes(lastStatusLimitHours * 60)} after the command starts. You will still be told the moment it ends${matches ? `, and ${matches}` : ""}.`;
+  }
+  if (command.statusEveryMinutes !== null && command.nextStatusAt !== null) {
     return `\nThe next status update is in ${formatCheckInMinutes(command.statusEveryMinutes)}; you will also be told the moment it ends${matches ? `, and ${matches}` : ""}.`;
   }
   return matches ? `\nYou will be told the moment it ends, and ${matches}.` : "";
@@ -154,16 +160,20 @@ export function backgroundCommandEndText(
   return `${header}\n${matchLines(command, matches)}${outputLines(stdout, stderr)}${noteLine(command)}`;
 }
 
-/** What T3 tells the agent at a status update while a background command runs. */
+/**
+ * What T3 tells the agent at a status update while a background command runs. The last one,
+ * past which the repeat limit ends them, passes that limit.
+ */
 export function backgroundCommandStatusText(
   command: ThreadBackgroundCommand,
   stdout: NoticedOutput,
   stderr: NoticedOutput,
   nowMs: number,
   matches?: NoticedMatches,
+  lastStatusLimitHours?: number,
 ): string {
   const running = formatElapsed(nowMs - Date.parse(command.startedAt));
-  return `[T3 Code] ${shownCommand(command.command)} is still running (${running}).\n${matchLines(command, matches)}${outputLines(stdout, stderr)}${noteLine(command)}${nextLine(command)}`;
+  return `[T3 Code] ${shownCommand(command.command)} is still running (${running}).\n${matchLines(command, matches)}${outputLines(stdout, stderr)}${noteLine(command)}${nextLine(command, lastStatusLimitHours)}`;
 }
 
 /** What T3 tells the agent when a running command prints lines matching its `notifyOn`. */
