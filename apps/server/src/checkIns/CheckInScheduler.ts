@@ -19,6 +19,7 @@ import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -31,9 +32,15 @@ import * as Stream from "effect/Stream";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { threadHasQueuedTurnStart } from "../orchestration/ThreadSettlementPolicy.ts";
+import * as ThreadBackgroundCommands from "../persistence/ThreadBackgroundCommands.ts";
 import * as ThreadCheckIns from "../persistence/ThreadCheckIns.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import {
+  backgroundCommandEndText,
+  backgroundCommandStatusText,
+  type NoticedOutput,
+} from "./backgroundCommandMessage.ts";
 import { checkInMessageText } from "./checkInMessage.ts";
 
 export interface ScheduleCheckInInput {
@@ -71,6 +78,8 @@ export class CheckInScheduler extends Context.Service<
     readonly drain: Effect.Effect<void>;
     /** Delivers whatever is due now and waits for it; the timer does this on its own. */
     readonly runDueNow: Effect.Effect<void>;
+    /** Looks for due deliveries soon, without waiting; for a background command that ended. */
+    readonly wake: Effect.Effect<void>;
   }
 >()("t3/checkIns/CheckInScheduler") {}
 
@@ -80,6 +89,13 @@ export class CheckInScheduler extends Context.Service<
  */
 export const CHECK_IN_IDLE_GRACE_MS = 3_000;
 const SWEEP_INTERVAL = "15 seconds";
+/** How much of an output file's end a message may quote, whatever the line count asked for. */
+const BACKGROUND_COMMAND_TAIL_MAX_BYTES = 4_096;
+
+type CommandNotice = {
+  readonly kind: "end" | "status";
+  readonly row: ThreadBackgroundCommands.BackgroundCommandRow;
+};
 
 function timestampMs(value: string | null | undefined): number {
   if (value == null) return Number.NEGATIVE_INFINITY;
@@ -144,6 +160,9 @@ const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const settingsService = yield* ServerSettings.ServerSettingsService;
+  const commands = yield* ThreadBackgroundCommands.ThreadBackgroundCommandRepository;
+  const commandChanges = yield* ThreadBackgroundCommands.BackgroundCommandChanges;
+  const fs = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const changes = yield* PubSub.unbounded<ThreadId>();
 
@@ -239,34 +258,40 @@ const make = Effect.gen(function* () {
       { bufferSize: 1, strategy: "sliding" },
     );
 
-  /** Sends one due check-in into its thread and records the delivery. */
-  const deliver = Effect.fn("CheckInScheduler.deliver")(function* (
+  /**
+   * Sends one message from T3 into a thread as a new turn. The command id is fixed per notice, so
+   * a retry after a crash between the dispatch and the caller's write is deduplicated by the
+   * engine instead of arriving twice.
+   */
+  const dispatchNotice = (
     shell: OrchestrationThreadShell,
-    checkIn: ThreadCheckIn,
+    notice: {
+      readonly key: string;
+      readonly text: string;
+      readonly label: string;
+      readonly payload: Record<string, unknown>;
+    },
     nowMs: number,
-  ) {
-    const delivery = checkIn.deliveredCount + 1;
-    yield* engine
+  ) =>
+    engine
       .dispatch({
         type: "thread.turn.start",
-        // Fixed per delivery, so a retry after a crash between dispatch and the write below
-        // is deduplicated by the engine instead of sending the check-in twice.
-        commandId: CommandId.make(`server:check-in:${checkIn.id}:${delivery}`),
+        commandId: CommandId.make(`server:${notice.key}`),
         threadId: shell.id,
         message: {
-          messageId: MessageId.make(`check-in:${checkIn.id}:${delivery}`),
+          messageId: MessageId.make(notice.key),
           role: "user",
-          text: checkInMessageText(checkIn, nowMs),
+          text: notice.text,
           attachments: [],
           context: decodeMessageContext({
             version: 1,
             records: [
               {
                 version: 1,
-                contextId: `check-in-${checkIn.id}-${delivery}`,
-                label: "Check-in",
+                contextId: notice.key.replace(/[^a-z0-9_-]/gi, "-"),
+                label: notice.label,
                 kind: CHECK_IN_CONTEXT_KIND,
-                payload: { checkInId: checkIn.id },
+                payload: notice.payload,
               },
             ],
           }),
@@ -276,17 +301,120 @@ const make = Effect.gen(function* () {
         createdAt: isoAt(nowMs),
       })
       .pipe(
+        Effect.asVoid,
         // The thread refused the turn; retrying the same message would be refused again.
         Effect.catchTag("OrchestrationCommandInvariantError", (error) =>
           Effect.logWarning("check-in delivery refused", {
-            checkInId: checkIn.id,
+            key: notice.key,
             detail: error.message,
           }),
         ),
       );
+
+  /** Sends one due check-in into its thread and records the delivery. */
+  const deliver = Effect.fn("CheckInScheduler.deliver")(function* (
+    shell: OrchestrationThreadShell,
+    checkIn: ThreadCheckIn,
+    nowMs: number,
+  ) {
+    const delivery = checkIn.deliveredCount + 1;
+    yield* dispatchNotice(
+      shell,
+      {
+        key: `check-in:${checkIn.id}:${delivery}`,
+        text: checkInMessageText(checkIn, nowMs),
+        label: "Check-in",
+        payload: { checkInId: checkIn.id },
+      },
+      nowMs,
+    );
     yield* isLastDelivery(checkIn)
       ? repository.remove(checkIn.id).pipe(Effect.asVoid)
       : repository.update({ ...checkIn, dueSince: null, deliveredCount: delivery });
+  });
+
+  /** A background command's output file as a message reports it. */
+  const noticedOutput = (filePath: string, bytesBefore: number, tailLines: number) =>
+    Effect.gen(function* () {
+      const bytes = yield* fs.stat(filePath).pipe(
+        Effect.map((info) => Number(info.size)),
+        Effect.orElseSucceed(() => 0),
+      );
+      const tail =
+        tailLines > 0 && bytes > 0 ? yield* readTail(filePath, bytes, tailLines) : undefined;
+      return { path: filePath, bytes, bytesBefore, tail } satisfies NoticedOutput;
+    });
+
+  /** The last `lines` lines within the file's last few KB, so one huge line cannot flood a turn. */
+  const readTail = (filePath: string, bytes: number, lines: number) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const length = Math.min(bytes, BACKGROUND_COMMAND_TAIL_MAX_BYTES);
+        const file = yield* fs.open(filePath, { flag: "r" });
+        yield* file.seek(BigInt(bytes - length), "start");
+        const chunk = yield* file.readAlloc(length);
+        const all = (Option.isSome(chunk) ? new TextDecoder().decode(chunk.value) : "").split("\n");
+        // Read from the middle of the file, the first line is partial.
+        const whole = length < bytes ? all.slice(1) : all;
+        while (whole.length > 0 && whole.at(-1) === "") whole.pop();
+        return whole.slice(-lines).join("\n") || undefined;
+      }),
+    ).pipe(Effect.orElseSucceed(() => undefined));
+
+  /** Tells the agent how a background command ended, then records that it was told. */
+  const deliverCommandEnd = Effect.fn("CheckInScheduler.deliverCommandEnd")(function* (
+    shell: OrchestrationThreadShell,
+    row: ThreadBackgroundCommands.BackgroundCommandRow,
+    nowMs: number,
+  ) {
+    const stdout = yield* noticedOutput(row.stdoutPath, row.stdoutBytesNoticed, row.tailLines);
+    const stderr = yield* noticedOutput(row.stderrPath, row.stderrBytesNoticed, row.tailLines);
+    yield* dispatchNotice(
+      shell,
+      {
+        key: `background-command:${row.id}:end`,
+        text: backgroundCommandEndText(row, stdout, stderr),
+        label: "Background command",
+        payload: { backgroundCommandId: row.id },
+      },
+      nowMs,
+    );
+    yield* commands.markEndNoticeSent(row.id);
+    yield* PubSub.publish(commandChanges, row.threadId);
+  });
+
+  /** A status update for a running command, unless it has in fact just ended. */
+  const deliverCommandStatus = Effect.fn("CheckInScheduler.deliverCommandStatus")(function* (
+    shell: OrchestrationThreadShell,
+    row: ThreadBackgroundCommands.BackgroundCommandRow,
+    nowMs: number,
+  ) {
+    const ended = yield* fs
+      .exists(`${row.jobDir}/exit-status`)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (ended) return false;
+    const stdout = yield* noticedOutput(row.stdoutPath, row.stdoutBytesNoticed, row.tailLines);
+    const stderr = yield* noticedOutput(row.stderrPath, row.stderrBytesNoticed, row.tailLines);
+    yield* dispatchNotice(
+      shell,
+      {
+        key: `background-command:${row.id}:status:${row.statusNoticesSent + 1}`,
+        text: backgroundCommandStatusText(row, stdout, stderr, nowMs),
+        label: "Status update",
+        payload: { backgroundCommandId: row.id },
+      },
+      nowMs,
+    );
+    yield* commands.recordStatusNotice(row.id, {
+      nextStatusAt:
+        row.statusEveryMinutes === null || row.nextStatusAt === null
+          ? null
+          : nextRepeatAt(row.nextStatusAt, row.statusEveryMinutes, nowMs),
+      stdoutBytes: stdout.bytes,
+      stderrBytes: stderr.bytes,
+    });
+    yield* PubSub.publish(commandChanges, row.threadId);
+    return true;
   });
 
   const sweep = Effect.gen(function* () {
@@ -306,20 +434,50 @@ const make = Effect.gen(function* () {
         waiting.set(row.threadId, due);
       }
     }
-    for (const [threadId, due] of waiting) {
+    // Background commands whose end the agent has not heard, and due status updates.
+    const commandNotices = new Map<ThreadId, Array<CommandNotice>>();
+    for (const row of yield* commands.listActive) {
+      const notice: CommandNotice | undefined =
+        row.status !== "running"
+          ? { kind: "end", row }
+          : row.nextStatusAt !== null && Date.parse(row.nextStatusAt) <= nowMs
+            ? { kind: "status", row }
+            : undefined;
+      if (notice === undefined) continue;
+      const due = commandNotices.get(row.threadId) ?? [];
+      due.push(notice);
+      commandNotices.set(row.threadId, due);
+    }
+    for (const threadId of new Set([...waiting.keys(), ...commandNotices.keys()])) {
       const shell = yield* snapshots.getThreadShellById(threadId);
       if (Option.isNone(shell)) {
         // Archived or deleted while the check-in waited; the domain event normally got here first.
-        yield* repository.removeByThread(threadId);
-        changed.add(threadId);
+        if (waiting.has(threadId)) {
+          yield* repository.removeByThread(threadId);
+          changed.add(threadId);
+        }
         continue;
       }
       if (!threadReadyForCheckIn(shell.value, nowMs)) continue;
-      // One per sweep: the delivery starts a turn, and the next waits until that one ends.
-      const [first] = due.toSorted((a, b) => timestampMs(a.dueSince) - timestampMs(b.dueSince));
-      if (first === undefined) continue;
-      yield* deliver(shell.value, first, nowMs);
-      changed.add(threadId);
+      // One per sweep: the delivery starts a turn, and the next waits until that one ends. A
+      // command's end comes first, then check-ins in the order they fell due, then status.
+      const notices = commandNotices.get(threadId) ?? [];
+      const end = notices.find((notice) => notice.kind === "end");
+      if (end) {
+        yield* deliverCommandEnd(shell.value, end.row, nowMs);
+        continue;
+      }
+      const [first] = (waiting.get(threadId) ?? []).toSorted(
+        (a, b) => timestampMs(a.dueSince) - timestampMs(b.dueSince),
+      );
+      if (first !== undefined) {
+        yield* deliver(shell.value, first, nowMs);
+        changed.add(threadId);
+        continue;
+      }
+      for (const notice of notices) {
+        if (yield* deliverCommandStatus(shell.value, notice.row, nowMs)) break;
+      }
     }
     yield* publish(changed);
   }).pipe(
@@ -381,6 +539,7 @@ const make = Effect.gen(function* () {
     start,
     drain: worker.drain,
     runDueNow: worker.enqueue(undefined).pipe(Effect.andThen(worker.drain)),
+    wake: worker.enqueue(undefined).pipe(Effect.asVoid),
   });
 });
 

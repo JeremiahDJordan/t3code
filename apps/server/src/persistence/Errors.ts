@@ -135,5 +135,6 @@ export type AuthPairingLinkRepositoryError = PersistenceSqlError | PersistenceDe
 export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ThreadCheckInRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type ThreadBackgroundCommandRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;

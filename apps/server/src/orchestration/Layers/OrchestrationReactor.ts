@@ -10,6 +10,7 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import * as ThreadSettlementReactor from "../ThreadSettlementReactor.ts";
+import * as BackgroundCommands from "../../checkIns/BackgroundCommands.ts";
 import * as CheckInScheduler from "../../checkIns/CheckInScheduler.ts";
 import * as PullRequestSyncReactor from "../PullRequestSyncReactor.ts";
 import * as ThreadPullRequestReactor from "../ThreadPullRequestReactor.ts";
@@ -23,6 +24,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
   const threadDeletionReactor = yield* ThreadDeletionReactor;
   const threadSettlementReactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
   const checkInScheduler = yield* CheckInScheduler.CheckInScheduler;
+  const backgroundCommands = yield* BackgroundCommands.BackgroundCommands;
   const pullRequestSyncReactor = yield* PullRequestSyncReactor.PullRequestSyncReactor;
   const threadPullRequestReactor = yield* ThreadPullRequestReactor.ThreadPullRequestReactor;
   const agentAwarenessRelay = yield* AgentAwarenessRelay.AgentAwarenessRelay;
@@ -36,6 +38,7 @@ export const makeOrchestrationReactor = Effect.gen(function* () {
     yield* threadPullRequestReactor.start();
     yield* threadSettlementReactor.start();
     yield* checkInScheduler.start();
+    yield* backgroundCommands.watch();
     yield* pullRequestSyncReactor.start();
     yield* agentAwarenessRelay.start();
     yield* storageCleanup.start();
