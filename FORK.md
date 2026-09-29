@@ -276,6 +276,16 @@ either. Telling them apart needs new state on the wire, and showing both brings 
 Stops with different scope in the common case. Sending a message and using the composer's
 Stop, or stopping the command, covers the overlap.
 
+### Deliver T3's notices at least once (reviews 7 and 8)
+
+T3 records a notice as told only after its message is in, so a crash or a failed database
+write between the two leaves the notice due. A retry of the same notices reuses the
+message's id and is dropped, but if another notice falls due meanwhile the retry is a new
+message that repeats the earlier ones, in a turn the new notice needed anyway. Holding a
+batch together across retries needs a pending-batch record on both notice tables, and
+recording before sending would lose notices instead, which is worse than an agent reading
+one twice.
+
 ### Show the Bob usage setting row everywhere
 
 The row also shows when this fork's client views an upstream server. Upstream

@@ -33,6 +33,14 @@ const file = (path: string, bytes: number, bytesBefore = 0, tail?: string) => ({
   tail,
 });
 
+const running: ThreadBackgroundCommand = {
+  ...base,
+  status: "running",
+  exitStatus: null,
+  endedAt: null,
+  nextStatusAt: "2026-09-28T13:00:00.000Z",
+};
+
 describe("background command messages", () => {
   it("formats sizes and durations for a person to scan", () => {
     expect(formatBytes(0)).toBe("0 bytes");
@@ -86,7 +94,7 @@ describe("background command messages", () => {
 
   it("says exactly where the output the agent has not seen starts", () => {
     const text = backgroundCommandStatusText(
-      { ...base, status: "running", exitStatus: null, endedAt: null },
+      running,
       file(base.stdoutPath, 3 * 1024, 1024),
       file(base.stderrPath, 40, 40),
       Date.parse("2026-09-28T12:40:00.000Z"),
@@ -100,7 +108,6 @@ describe("background command messages", () => {
   });
 
   it("quotes new matching lines with where each starts, and points to the rest", () => {
-    const running = { ...base, status: "running" as const, exitStatus: null, endedAt: null };
     const text = backgroundCommandMatchText(
       { ...running, notifyOn: "FAILED" },
       file(base.stdoutPath, 900, 100),
@@ -124,5 +131,29 @@ describe("background command messages", () => {
     expect(
       backgroundCommandStatusText(running, file(base.stdoutPath, 0), file(base.stderrPath, 0), 0),
     ).not.toContain("matching");
+  });
+
+  it("says which status update is the last, and promises none after it", () => {
+    const ended = { ...running, notifyOn: "FAILED", nextStatusAt: null };
+    const last = backgroundCommandStatusText(
+      ended,
+      file(base.stdoutPath, 0),
+      file(base.stderrPath, 0),
+      0,
+      undefined,
+      24,
+    );
+    expect(last).toContain(
+      "This is the last status update: they end 24 hours after the command starts. You will still be told the moment it ends, and about new lines matching `FAILED` at most every 5 minutes.",
+    );
+    const match = backgroundCommandMatchText(
+      ended,
+      file(base.stdoutPath, 0),
+      file(base.stderrPath, 0),
+      0,
+      { path: "/repo/.t3/jobs/bg-1/matches.log", shown: [], more: false },
+    );
+    expect(match).not.toContain("check-in");
+    expect(match).toContain("You will be told the moment it ends");
   });
 });
