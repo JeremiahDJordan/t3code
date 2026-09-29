@@ -59,6 +59,11 @@ export const ThreadBackgroundCommand = Schema.Struct({
    */
   notifyOn: Schema.optionalKey(Schema.NullOr(Schema.String)),
   stopRequestedBy: Schema.NullOr(BackgroundCommandStopper),
+  /**
+   * Whether its status updates and matching-line messages are held back; the agent is still
+   * told when it ends. Absent from servers that cannot mute.
+   */
+  muted: Schema.optionalKey(Schema.Boolean),
 });
 export type ThreadBackgroundCommand = typeof ThreadBackgroundCommand.Type;
 
@@ -66,6 +71,12 @@ export const ThreadBackgroundCommandsInput = Schema.Struct({ threadId: ThreadId 
 export type ThreadBackgroundCommandsInput = typeof ThreadBackgroundCommandsInput.Type;
 
 export const BackgroundCommandInput = Schema.Struct({ backgroundCommandId: BackgroundCommandId });
+
+export const SetBackgroundCommandMutedInput = Schema.Struct({
+  backgroundCommandId: BackgroundCommandId,
+  muted: Schema.Boolean,
+});
+export type SetBackgroundCommandMutedInput = typeof SetBackgroundCommandMutedInput.Type;
 export type BackgroundCommandInput = typeof BackgroundCommandInput.Type;
 
 export class BackgroundCommandError extends Schema.TaggedError<BackgroundCommandError>()(

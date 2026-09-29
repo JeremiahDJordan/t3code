@@ -80,6 +80,9 @@ const BackgroundCommandSummary = Schema.Struct({
   stderrPath: Schema.String,
   statusEveryMinutes: Schema.NullOr(Schema.Int),
   notifyOn: Schema.NullOr(Schema.String),
+  muted: Schema.Boolean.annotate({
+    description: "True while its status updates and matching-line messages are held back.",
+  }),
 });
 
 export const ListScheduledResult = Schema.Struct({
@@ -141,6 +144,18 @@ export const StopBackgroundCommandInput = Schema.Struct({
 });
 export const StopBackgroundCommandResult = Schema.Struct({
   stopping: Schema.Boolean.annotate({
+    description: "False when no running command of this thread has that id.",
+  }),
+});
+
+export const MuteBackgroundCommandInput = Schema.Struct({
+  backgroundCommandId: BackgroundCommandId,
+  muted: Schema.Boolean.annotate({
+    description: "True to hold its messages back, false to resume them.",
+  }),
+});
+export const MuteBackgroundCommandResult = Schema.Struct({
+  updated: Schema.Boolean.annotate({
     description: "False when no running command of this thread has that id.",
   }),
 });
@@ -217,10 +232,25 @@ const StopBackgroundCommandTool = Tool.make("stop_background_command", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
+const MuteBackgroundCommandTool = Tool.make("mute_background_command", {
+  description:
+    "Hold back, or resume, the status updates and matching-line messages of one of this thread's running background commands without stopping it, for example when its notifyOn pattern matches more than you need. You are still told the moment it ends. The user can mute and unmute it too.",
+  parameters: MuteBackgroundCommandInput,
+  success: MuteBackgroundCommandResult,
+  failure: CheckInToolError,
+  dependencies,
+})
+  .annotate(Tool.Title, "Mute a background command")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
+
 export const CheckInsToolkit = Toolkit.make(
   ScheduleCheckInTool,
   ListScheduledTool,
   CancelCheckInTool,
   StartBackgroundCommandTool,
   StopBackgroundCommandTool,
+  MuteBackgroundCommandTool,
 );

@@ -5,6 +5,10 @@ import type {
   ThreadCheckIn,
   ThreadId,
 } from "@t3tools/contracts";
+import {
+  backgroundCommandStatusLabel,
+  canMuteBackgroundCommand,
+} from "@t3tools/client-runtime/state/checkIns";
 import { AlarmClockIcon, SquareTerminalIcon } from "lucide-react";
 import { useMemo } from "react";
 import {
@@ -18,7 +22,7 @@ import { checkInEnvironment } from "../../state/checkIns";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useTerminalUiStateStore } from "../../terminalUiStateStore";
-import { formatShortTimestamp, formatUpcomingTimestamp } from "../../timestampFormat";
+import { formatDayAwareTimestamp, formatUpcomingTimestamp } from "../../timestampFormat";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -136,28 +140,17 @@ export function useCheckInBannerItem(
 
 function commandStatusLabel(
   command: ThreadBackgroundCommand,
-  timestampFormat: Parameters<typeof formatShortTimestamp>[1],
+  timestampFormat: Parameters<typeof formatDayAwareTimestamp>[1],
 ): string {
-  if (command.status !== "running") {
-    const how =
-      command.status === "lost"
-        ? "Ended, exit unknown"
-        : command.status === "stopped"
-          ? "Stopped"
-          : `Finished (${command.exitStatus ?? "exit unknown"})`;
-    return `${how} · telling the agent`;
-  }
-  const since = `Running since ${formatShortTimestamp(command.startedAt, timestampFormat)}`;
-  const checkIns =
-    command.statusEveryMinutes === null
-      ? ""
-      : ` · status updates every ${everyLabel(command.statusEveryMinutes)}`;
-  return `${since}${checkIns}${command.stopRequestedBy === null ? "" : " · stopping"}`;
+  return backgroundCommandStatusLabel(
+    command,
+    formatDayAwareTimestamp(command.startedAt, timestampFormat),
+  );
 }
 
 /**
  * The agent's background commands in this thread, above the composer: each with a way to watch
- * it in a terminal and to stop it. Nothing shows on servers without them or while none run.
+ * it in a terminal, to mute the updates it sends while it runs, and to stop it. Nothing shows on servers without them or while none run.
  */
 export function useBackgroundCommandBannerItem(
   thread: ScopedThreadRef | null,
@@ -172,6 +165,7 @@ export function useBackgroundCommandBannerItem(
       : null,
   );
   const stop = useAtomCommand(checkInEnvironment.stopBackgroundCommand);
+  const setMuted = useAtomCommand(checkInEnvironment.setBackgroundCommandMuted);
   const openTerminal = useAtomCommand(checkInEnvironment.openBackgroundCommandTerminal);
   const ensureTerminal = useTerminalUiStateStore((state) => state.ensureTerminal);
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
@@ -201,6 +195,31 @@ export function useBackgroundCommandBannerItem(
           >
             Terminal
           </Button>
+          {canMuteBackgroundCommand(command) ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              aria-label={`${command.muted ? "Unmute" : "Mute"} ${command.command}`}
+              title={
+                command.muted
+                  ? "Send the agent this command's status updates and matching lines again"
+                  : "Stop sending the agent this command's status updates and matching lines; it still hears when it ends"
+              }
+              onClick={() =>
+                void setMuted({
+                  environmentId: thread.environmentId,
+                  input: { backgroundCommandId: command.id, muted: !command.muted },
+                }).then((result) =>
+                  toastFailure(
+                    result,
+                    command.muted ? "Could not unmute the command" : "Could not mute the command",
+                  ),
+                )
+              }
+            >
+              {command.muted ? "Unmute" : "Mute"}
+            </Button>
+          ) : null}
           <Button
             size="xs"
             variant="ghost"
@@ -270,5 +289,5 @@ export function useBackgroundCommandBannerItem(
         </ComposerBanner.Body>
       ),
     };
-  }, [commands, ensureTerminal, openTerminal, stop, thread, timestampFormat]);
+  }, [commands, ensureTerminal, openTerminal, setMuted, stop, thread, timestampFormat]);
 }

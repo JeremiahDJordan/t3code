@@ -3355,6 +3355,14 @@ const makeWsRpcLayer = (
               .pipe(Effect.map((stopping) => ({ stopping }))),
             { "rpc.aggregate": "orchestration" },
           ),
+        [WS_METHODS.backgroundCommandSetMuted]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.backgroundCommandSetMuted,
+            backgroundCommands
+              .setMuted(input.backgroundCommandId, input.muted)
+              .pipe(Effect.map((updated) => ({ updated }))),
+            { "rpc.aggregate": "orchestration" },
+          ),
         [WS_METHODS.backgroundCommandOpenTerminal]: (input) =>
           observeRpcEffect(
             WS_METHODS.backgroundCommandOpenTerminal,

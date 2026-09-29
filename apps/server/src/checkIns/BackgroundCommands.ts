@@ -78,6 +78,15 @@ export class BackgroundCommands extends Context.Service<
       by: BackgroundCommandStopper,
       threadId?: ThreadId,
     ) => Effect.Effect<boolean, BackgroundCommandError>;
+    /**
+     * Holds back or resumes a running command's status updates and matching-line messages;
+     * whether it was running. With `threadId`, only that thread's commands.
+     */
+    readonly setMuted: (
+      id: BackgroundCommandId,
+      muted: boolean,
+      threadId?: ThreadId,
+    ) => Effect.Effect<boolean, BackgroundCommandError>;
     /** Opens (or reuses) a thread terminal attached to the command's tmux session. */
     readonly openTerminal: (
       id: BackgroundCommandId,
@@ -112,6 +121,7 @@ export function toThreadBackgroundCommand(row: BackgroundCommandRow): ThreadBack
     tailLines: row.tailLines,
     stopRequestedBy: row.stopRequestedBy,
     notifyOn: row.notifyOn,
+    muted: row.muted,
   };
 }
 
@@ -291,6 +301,7 @@ const make = Effect.gen(function* () {
         matchNoticesSent: 0,
         matchBytesNoticed: 0,
         lastMatchNoticeAt: null,
+        muted: false,
       };
       const added = yield* repository
         .insertIfUnder(row, BACKGROUND_COMMANDS_PER_THREAD_MAX)
@@ -497,6 +508,24 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const setMuted: BackgroundCommands["Service"]["setMuted"] = Effect.fn(
+    "BackgroundCommands.setMuted",
+  )(function* (id, muted, threadId) {
+    const row = yield* repository
+      .get(id)
+      .pipe(Effect.catch(failure("Could not read the background command.")));
+    if (row === undefined || (threadId !== undefined && row.threadId !== threadId)) return false;
+    const updated = yield* repository
+      .setMuted(id, muted)
+      .pipe(Effect.catch(failure("Could not mute the background command.")));
+    if (updated) {
+      yield* publish(row.threadId);
+      // Unmuted, what fell due meanwhile goes out now.
+      if (!muted) yield* scheduler.wake;
+    }
+    return updated;
+  });
+
   const openTerminal: BackgroundCommands["Service"]["openTerminal"] = Effect.fn(
     "BackgroundCommands.openTerminal",
   )(function* (id) {
@@ -602,6 +631,7 @@ const make = Effect.gen(function* () {
   return BackgroundCommands.of({
     start,
     stop,
+    setMuted,
     openTerminal,
     list,
     stream,

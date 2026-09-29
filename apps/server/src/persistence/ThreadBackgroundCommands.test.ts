@@ -59,6 +59,7 @@ describe("ThreadBackgroundCommandRepository", () => {
       assert.lengthOf(old, 1);
       assert.strictEqual(old[0]?.notifyOn, null);
       assert.strictEqual(old[0]?.matchBytesNoticed, 0);
+      assert.strictEqual(old[0]?.muted, false);
 
       yield* repository.recordNotice(BackgroundCommandId.make("bg-old"), {
         kind: "match",
