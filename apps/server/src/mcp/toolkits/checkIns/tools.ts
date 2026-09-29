@@ -1,5 +1,7 @@
 import {
+  BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES,
   BACKGROUND_COMMAND_MAX_CHARS,
+  BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS,
   BACKGROUND_COMMAND_TAIL_MAX_LINES,
   BACKGROUND_COMMANDS_PER_THREAD_MAX,
   BackgroundCommandError,
@@ -77,6 +79,7 @@ const BackgroundCommandSummary = Schema.Struct({
   stdoutPath: Schema.String,
   stderrPath: Schema.String,
   statusEveryMinutes: Schema.NullOr(Schema.Int),
+  notifyOn: Schema.NullOr(Schema.String),
 });
 
 export const ListScheduledResult = Schema.Struct({
@@ -115,6 +118,13 @@ export const StartBackgroundCommandInput = Schema.Struct({
     ).annotate({
       description:
         "Quote this many of the last lines of stdout and stderr in each message about it (at most a few KB). Default 0: read the files yourself.",
+    }),
+  ),
+  notifyOn: Schema.optional(
+    TrimmedNonEmptyString.check(
+      Schema.isMaxLength(BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS),
+    ).annotate({
+      description: `A JavaScript regular expression tested against each line of stdout and stderr, such as FAILED|ERROR for a test run; start it with (?i) to ignore case. While the command runs, T3 Code sends you the new matching lines with where each starts in its file, at most every ${BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES} minutes, so you can look into failures before it ends. Make it specific: every message is a turn.`,
     }),
   ),
 });
@@ -181,7 +191,7 @@ const CancelCheckInTool = Tool.make("cancel_check_in", {
   .annotate(Tool.OpenWorld, false);
 
 const StartBackgroundCommandTool = Tool.make("start_background_command", {
-  description: `Run a long shell command (a build, a long test suite, a deploy) in the background on the machine running T3 Code, in this thread's folder. Use it instead of your shell tool for anything that may take more than a few minutes: it keeps running after your turn ends and even if T3 Code restarts. Its stdout and stderr go to the files whose paths are returned; read them with your own tools when you need to. T3 Code tells you the moment it ends, as a new turn with how it ended and the file sizes, and with statusEveryMinutes also how it is doing on that schedule. After starting it, end your turn and wait to be told; do not poll. It needs this thread in Full access and tmux on the machine. A thread runs at most ${BACKGROUND_COMMANDS_PER_THREAD_MAX} at once.`,
+  description: `Run a long shell command (a build, a long test suite, a deploy) in the background on the machine running T3 Code, in this thread's folder. Use it instead of your shell tool for anything that may take more than a few minutes: it keeps running after your turn ends and even if T3 Code restarts. Its stdout and stderr go to the files whose paths are returned; read them with your own tools when you need to. T3 Code tells you the moment it ends, as a new turn with how it ended and the file sizes; with statusEveryMinutes also how it is doing on that schedule; and with notifyOn the output lines you asked for, soon after they appear. Each message says exactly where the output you have not seen starts. After starting it, end your turn and wait to be told; do not poll. It needs this thread in Full access and tmux on the machine. A thread runs at most ${BACKGROUND_COMMANDS_PER_THREAD_MAX} at once.`,
   parameters: StartBackgroundCommandInput,
   success: StartBackgroundCommandResult,
   failure: CheckInToolError,

@@ -166,6 +166,7 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
           statusEveryMinutes: null,
           note: "Look at the failure.",
           tailLines: 5,
+          notifyOn: null,
         });
         yield* untilEnded(commands, scheduler);
 
@@ -200,6 +201,7 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
               statusEveryMinutes: null,
               note: "",
               tailLines: 0,
+              notifyOn: null,
             });
           }),
         );
@@ -225,12 +227,75 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
           statusEveryMinutes: null,
           note: "",
           tailLines: 0,
+          notifyOn: null,
         });
         // Give the wrapper a moment to record the command's process group.
         yield* Effect.sleep("300 millis");
         expect(yield* commands.stop(started.id, "user")).toBe(true);
         yield* untilEnded(commands, scheduler);
         expect(texts(yield* Ref.get(dispatched))[0]).toContain("The user stopped `sleep 30`");
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("sends matching lines while it runs, spaced out, and the rest with its end", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const { commands, scheduler, dispatched } = yield* makeHarness({ ...dirs, persistence });
+        // One failure now, a second once the test creates `go`.
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command:
+            "printf 'ok 1\\nFAILED test_a\\nok 2\\n'; while [ ! -f go ]; do sleep 0.1; done; echo 'failed test_b'; sleep 30",
+          statusEveryMinutes: null,
+          note: "Triage each failure.",
+          tailLines: 0,
+          notifyOn: "(?i)FAILED",
+        });
+        const matchesPath = NodePath.join(NodePath.dirname(started.stdoutPath), "matches.log");
+        const untilMatches = (count: number) =>
+          Effect.gen(function* () {
+            for (let attempt = 0; attempt < 100; attempt += 1) {
+              const text = NodeFS.existsSync(matchesPath)
+                ? NodeFS.readFileSync(matchesPath, "utf8")
+                : "";
+              if (text.split("\n").filter(Boolean).length >= count) return;
+              yield* Effect.sleep("100 millis");
+            }
+          });
+
+        yield* untilMatches(1);
+        yield* commands.pollNow;
+        yield* scheduler.runDueNow;
+        const [first] = texts(yield* Ref.get(dispatched));
+        expect(first).toContain("printed lines you asked to hear about");
+        // "ok 1\n" is 5 bytes, so the failing line starts at the 6th.
+        expect(first).toContain("stdout byte 6: FAILED test_a");
+        expect(first).toContain("Your note: Triage each failure.");
+        expect(first).toContain("at most every 5 minutes");
+
+        // A second failure within five minutes waits.
+        NodeFS.writeFileSync(NodePath.join(dirs.workspace, "go"), "");
+        yield* untilMatches(2);
+        yield* commands.pollNow;
+        yield* scheduler.runDueNow;
+        expect(texts(yield* Ref.get(dispatched))).toHaveLength(1);
+
+        // Its end brings the failure not yet told, and where the unread output starts.
+        yield* Effect.sleep("300 millis");
+        expect(yield* commands.stop(started.id, "user")).toBe(true);
+        yield* untilEnded(commands, scheduler);
+        const all = texts(yield* Ref.get(dispatched));
+        expect(all).toHaveLength(2);
+        expect(all[1]).toContain("stdout byte 25: failed test_b");
+        // The first failure was told already.
+        expect(all[1]).not.toContain("byte 6: FAILED test_a");
+        expect(all[1]).toContain(
+          `new since you last heard, from byte 25: tail -c +25 '${started.stdoutPath}'`,
+        );
         stopTestTmux(dirs.home);
       }),
     ),
@@ -253,6 +318,7 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
             statusEveryMinutes: null,
             note: "",
             tailLines: 0,
+            notifyOn: null,
           }),
         );
         expect(refused.detail).toContain("Full access");

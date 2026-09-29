@@ -20,6 +20,9 @@ export type BackgroundCommandId = typeof BackgroundCommandId.Type;
 export const BACKGROUND_COMMAND_MAX_CHARS = 4_000;
 export const BACKGROUND_COMMANDS_PER_THREAD_MAX = 3;
 export const BACKGROUND_COMMAND_TAIL_MAX_LINES = 200;
+export const BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS = 500;
+/** How often, at most, T3 tells the agent about new output lines matching `notifyOn`. */
+export const BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES = 5;
 
 /**
  * `running`, `exited` on its own, `stopped` by the user or agent, or `lost` when T3 found neither
@@ -50,6 +53,11 @@ export const ThreadBackgroundCommand = Schema.Struct({
   note: Schema.String,
   /** How many of each file's last lines the messages quote; 0 quotes none. */
   tailLines: NonNegativeInt,
+  /**
+   * A regular expression for output lines to hear about while it runs, such as test failures;
+   * absent for commands started before T3 Code had it.
+   */
+  notifyOn: Schema.optionalKey(Schema.NullOr(Schema.String)),
   stopRequestedBy: Schema.NullOr(BackgroundCommandStopper),
 });
 export type ThreadBackgroundCommand = typeof ThreadBackgroundCommand.Type;
