@@ -9,6 +9,8 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 
@@ -71,6 +73,26 @@ export class TmuxServer extends Context.Service<
 function tmuxEnvironment(): NodeJS.ProcessEnv {
   const { TMUX: _tmux, TMUX_PANE: _pane, ...rest } = process.env;
   return rest;
+}
+
+/**
+ * The command that runs `tmux <args>` for a command that may start T3's tmux server. Under a
+ * systemd service it runs in its own scope, so the server tmux forks lands outside the unit's
+ * cgroup and a restart of the unit (which by default kills the whole cgroup) leaves it, and
+ * every command running in it, alone.
+ */
+export function tmuxLaunchCommand(input: {
+  readonly tmux: string;
+  readonly args: ReadonlyArray<string>;
+  /** `systemd-run` when T3 runs as a systemd service and scopes work, else undefined. */
+  readonly systemdRun: string | undefined;
+}): { readonly command: string; readonly args: ReadonlyArray<string> } {
+  return input.systemdRun === undefined
+    ? { command: input.tmux, args: input.args }
+    : {
+        command: input.systemdRun,
+        args: ["--user", "--scope", "--quiet", "--collect", "--", input.tmux, ...input.args],
+      };
 }
 
 // A Unix socket path must fit in `sun_path` (104 bytes on macOS, 108 on Linux).
@@ -136,6 +158,27 @@ export const make = Effect.gen(function* () {
   );
   const resolved = Cache.get(lookups, undefined);
 
+  // `systemd-run`, when T3 runs as a systemd service (which sets INVOCATION_ID) on Linux.
+  const platform = yield* HostProcessPlatform;
+  const scopeRunner = yield* Effect.cached(
+    platform !== "linux" || !process.env.INVOCATION_ID
+      ? Effect.undefined
+      : runner
+          .run({
+            command: "/bin/sh",
+            args: ["-c", "command -v systemd-run"],
+            env: tmuxEnvironment(),
+            timeout: "5 seconds",
+          })
+          .pipe(
+            Effect.map((output) => output.stdout.trim()),
+            Effect.map((found) => (found.startsWith("/") ? found : undefined)),
+            Effect.orElseSucceed(() => undefined),
+          ),
+  );
+  // Set once a scope could not be made (no user manager, say), so later starts go direct.
+  let scopesFailed = false;
+
   const binary = resolved.pipe(
     Effect.flatMap((found) =>
       found === undefined
@@ -160,18 +203,54 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const run: TmuxServer["Service"]["run"] = (args) =>
-    exec(args).pipe(
-      Effect.flatMap((output) =>
-        output.code === 0
-          ? Effect.succeed(output.stdout)
-          : Effect.fail(
-              new TmuxError({
-                detail: `tmux ${args[0] ?? ""} failed: ${output.stderr.trim() || `exit ${output.code}`}`,
-              }),
-            ),
-      ),
+  /**
+   * `exec` for a command that may start the server: in its own systemd scope when T3 runs as a
+   * systemd service. A scope that cannot be made falls back to running tmux directly, and later
+   * starts skip it.
+   */
+  const execStarting = (args: ReadonlyArray<string>) =>
+    Effect.gen(function* () {
+      const systemdRun = scopesFailed ? undefined : yield* scopeRunner;
+      if (systemdRun === undefined) return yield* exec(args);
+      const tmux = yield* binary;
+      const launch = tmuxLaunchCommand({
+        tmux,
+        args: [...socketArgs, "-f", "/dev/null", ...args],
+        systemdRun,
+      });
+      const scoped = yield* runner
+        .run({
+          command: launch.command,
+          args: launch.args,
+          env: tmuxEnvironment(),
+          timeout: "15 seconds",
+        })
+        .pipe(Effect.option);
+      if (scoped._tag === "Some" && scoped.value.code === 0) return scoped.value;
+      const direct = yield* exec(args);
+      if (direct.code === 0) {
+        scopesFailed = true;
+        yield* Effect.logWarning(
+          "Could not start T3's tmux server in its own systemd scope; restarting the T3 unit will stop it unless the unit sets KillMode=process.",
+        );
+      }
+      return direct;
+    });
+
+  const checked = (args: ReadonlyArray<string>) =>
+    Effect.flatMap((output: ProcessRunner.ProcessRunOutput) =>
+      output.code === 0
+        ? Effect.succeed(output.stdout)
+        : Effect.fail(
+            new TmuxError({
+              detail: `tmux ${args[0] ?? ""} failed: ${output.stderr.trim() || `exit ${output.code}`}`,
+            }),
+          ),
     );
+
+  const runStarting = (args: ReadonlyArray<string>) => execStarting(args).pipe(checked(args));
+
+  const run: TmuxServer["Service"]["run"] = (args) => exec(args).pipe(checked(args));
 
   const listSessions: TmuxServer["Service"]["listSessions"] = exec([
     "list-sessions",
@@ -199,7 +278,7 @@ export const make = Effect.gen(function* () {
     run,
     listSessions,
     newSession: ({ name, argv, env }) =>
-      run([
+      runStarting([
         // Options first: a pane takes the history limit in force when it is created. They set
         // the look for anyone attaching: no status bar, mouse scrolling, a long history.
         "start-server",

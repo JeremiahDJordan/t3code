@@ -71,8 +71,9 @@ there, and Bob keeps T3 Code's own tools, such as check-ins. If the server came 
 different address, Bob cannot use those tools until the turn ends, and the thread's next
 message starts Bob again on the same conversation. T3 Code closes a Bob that was idle when it
 stopped, or whose instance was removed, turned off or set back to run with T3 Code, and a Bob
-that no T3 Code comes back to stops after a day. If you run the server
-from your own systemd unit, set `KillMode=process`, or restarting the unit stops Bob too.
+that no T3 Code comes back to stops after a day. Under a systemd service, T3 Code starts tmux
+in its own scope, so restarting the service leaves Bob running; that needs your user's systemd
+instance, and a service without one needs `KillMode=process`.
 
 ## Usage
 
