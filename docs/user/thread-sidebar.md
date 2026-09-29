@@ -196,7 +196,9 @@ An agent can also run a long command in the background, such as a build or a lon
 It runs on T3 Code's own tmux server, so it keeps going after the agent's turn and even if T3
 Code restarts, and its output goes to files in the folder's `.t3/jobs` (git ignores them). T3
 Code tells the agent the moment the command ends, and on a schedule while it runs if the agent
-asks. Running commands show above the composer with **Terminal**, which opens a terminal on the
+asks. The agent can also ask to hear about certain lines as they appear, such as failing tests,
+so it can look into them before a long run finishes; those messages come at most every five
+minutes. Running commands show above the composer with **Terminal**, which opens a terminal on the
 command (scroll with the mouse wheel; hold Shift to select text), and **Stop**. Background
 commands need tmux 3.2 or later on the machine running T3 Code, and the thread in Full access,
 since they run outside the agent's sandbox. Archiving a thread stops its commands; deleting it

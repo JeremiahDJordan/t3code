@@ -26,6 +26,7 @@ import {
 /** A background command with the server's own bookkeeping, which clients never see. */
 export const BackgroundCommandRow = Schema.Struct({
   ...ThreadBackgroundCommand.fields,
+  notifyOn: Schema.NullOr(Schema.String),
   jobDir: TrimmedNonEmptyString,
   tmuxSession: TrimmedNonEmptyString,
   stopRequestedAt: Schema.NullOr(IsoDateTime),
@@ -37,6 +38,11 @@ export const BackgroundCommandRow = Schema.Struct({
   stderrBytesNoticed: NonNegativeInt,
   /** Consecutive polls that found neither the session nor an exit status. */
   missingObservations: NonNegativeInt,
+  matchNoticesSent: NonNegativeInt,
+  /** How much of the matches file the agent has heard about. */
+  matchBytesNoticed: NonNegativeInt,
+  /** When the agent was last told about matches, which spaces those messages out. */
+  lastMatchNoticeAt: Schema.NullOr(IsoDateTime),
 });
 export type BackgroundCommandRow = typeof BackgroundCommandRow.Type;
 
@@ -81,13 +87,26 @@ export class ThreadBackgroundCommandRepository extends Context.Service<
     readonly markEndNoticeSent: (
       id: BackgroundCommandId,
     ) => Effect.Effect<void, ThreadBackgroundCommandRepositoryError>;
-    readonly recordStatusNotice: (
+    /**
+     * Records a message about a running command: a status update, which moves the next one,
+     * or one about matching lines. Either may report matches, recorded with `matchBytes`.
+     */
+    readonly recordNotice: (
       id: BackgroundCommandId,
       notice: {
+        readonly kind: "status" | "match";
         readonly nextStatusAt: string | null;
         readonly stdoutBytes: number;
         readonly stderrBytes: number;
+        readonly matchBytes: number;
+        /** When matches were reported, or null when this message had none. */
+        readonly matchesAt: string | null;
       },
+    ) => Effect.Effect<void, ThreadBackgroundCommandRepositoryError>;
+    /** Records the matches an end message reported. */
+    readonly recordEndMatches: (
+      id: BackgroundCommandId,
+      matchBytes: number,
     ) => Effect.Effect<void, ThreadBackgroundCommandRepositoryError>;
     readonly setMissingObservations: (
       id: BackgroundCommandId,
@@ -144,9 +163,31 @@ const make = Effect.gen(function* () {
       status_notices_sent INTEGER NOT NULL DEFAULT 0,
       stdout_bytes_noticed INTEGER NOT NULL DEFAULT 0,
       stderr_bytes_noticed INTEGER NOT NULL DEFAULT 0,
-      missing_observations INTEGER NOT NULL DEFAULT 0
+      missing_observations INTEGER NOT NULL DEFAULT 0,
+      notify_on TEXT,
+      match_notices_sent INTEGER NOT NULL DEFAULT 0,
+      match_bytes_noticed INTEGER NOT NULL DEFAULT 0,
+      last_match_notice_at TEXT
     )
   `.pipe(Effect.orDie);
+  // Columns added after the table first shipped.
+  const existing = new Set(
+    (yield* sql<{ readonly name: string }>`PRAGMA table_info(thread_background_commands)`.pipe(
+      Effect.orDie,
+    )).map((column) => column.name),
+  );
+  for (const [name, definition] of [
+    ["notify_on", "TEXT"],
+    ["match_notices_sent", "INTEGER NOT NULL DEFAULT 0"],
+    ["match_bytes_noticed", "INTEGER NOT NULL DEFAULT 0"],
+    ["last_match_notice_at", "TEXT"],
+  ] as const) {
+    if (!existing.has(name)) {
+      yield* sql
+        .unsafe(`ALTER TABLE thread_background_commands ADD COLUMN ${name} ${definition}`)
+        .pipe(Effect.orDie);
+    }
+  }
   yield* sql`
     CREATE INDEX IF NOT EXISTS idx_thread_background_commands_thread_id
     ON thread_background_commands (thread_id)
@@ -175,7 +216,11 @@ const make = Effect.gen(function* () {
     status_notices_sent AS "statusNoticesSent",
     stdout_bytes_noticed AS "stdoutBytesNoticed",
     stderr_bytes_noticed AS "stderrBytesNoticed",
-    missing_observations AS "missingObservations"
+    missing_observations AS "missingObservations",
+    notify_on AS "notifyOn",
+    match_notices_sent AS "matchNoticesSent",
+    match_bytes_noticed AS "matchBytesNoticed",
+    last_match_notice_at AS "lastMatchNoticeAt"
   `;
 
   const findById = SqlSchema.findAll({
@@ -222,14 +267,17 @@ const make = Effect.gen(function* () {
                 tmux_session, status, exit_status, started_at, ended_at, check_in_every_minutes,
                 next_check_in_at, note, tail_lines, stop_requested_by, stop_requested_at,
                 end_notice_sent, status_notices_sent, stdout_bytes_noticed, stderr_bytes_noticed,
-                missing_observations
+                missing_observations, notify_on, match_notices_sent, match_bytes_noticed,
+                last_match_notice_at
               ) VALUES (
                 ${row.id}, ${row.threadId}, ${row.command}, ${row.cwd}, ${row.jobDir},
                 ${row.stdoutPath}, ${row.stderrPath}, ${row.tmuxSession}, ${row.status},
                 ${row.exitStatus}, ${row.startedAt}, ${row.endedAt}, ${row.statusEveryMinutes},
                 ${row.nextStatusAt}, ${row.note}, ${row.tailLines}, ${row.stopRequestedBy},
                 ${row.stopRequestedAt}, ${row.endNoticeSent ? 1 : 0}, ${row.statusNoticesSent},
-                ${row.stdoutBytesNoticed}, ${row.stderrBytesNoticed}, ${row.missingObservations}
+                ${row.stdoutBytesNoticed}, ${row.stderrBytesNoticed}, ${row.missingObservations},
+                ${row.notifyOn}, ${row.matchNoticesSent}, ${row.matchBytesNoticed},
+                ${row.lastMatchNoticeAt}
               )
             `;
             return true;
@@ -280,15 +328,23 @@ const make = Effect.gen(function* () {
         UPDATE thread_background_commands SET end_notice_sent = 1
         WHERE background_command_id = ${id}
       `.pipe(Effect.asVoid, Effect.mapError(write("markBackgroundCommandNotified"))),
-    recordStatusNotice: (id, notice) =>
+    recordNotice: (id, notice) =>
       sql`
         UPDATE thread_background_commands SET
           next_check_in_at = ${notice.nextStatusAt},
-          status_notices_sent = status_notices_sent + 1,
+          status_notices_sent = status_notices_sent + ${notice.kind === "status" ? 1 : 0},
+          match_notices_sent = match_notices_sent + ${notice.kind === "match" ? 1 : 0},
           stdout_bytes_noticed = ${notice.stdoutBytes},
-          stderr_bytes_noticed = ${notice.stderrBytes}
+          stderr_bytes_noticed = ${notice.stderrBytes},
+          match_bytes_noticed = ${notice.matchBytes},
+          last_match_notice_at = COALESCE(${notice.matchesAt}, last_match_notice_at)
         WHERE background_command_id = ${id} AND status = 'running'
-      `.pipe(Effect.asVoid, Effect.mapError(write("recordBackgroundCommandStatus"))),
+      `.pipe(Effect.asVoid, Effect.mapError(write("recordBackgroundCommandNotice"))),
+    recordEndMatches: (id, matchBytes) =>
+      sql`
+        UPDATE thread_background_commands SET match_bytes_noticed = ${matchBytes}
+        WHERE background_command_id = ${id}
+      `.pipe(Effect.asVoid, Effect.mapError(write("recordBackgroundCommandEndMatches"))),
     setMissingObservations: (id, count) =>
       sql`
         UPDATE thread_background_commands SET missing_observations = ${count}

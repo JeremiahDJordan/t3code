@@ -1,5 +1,6 @@
 import {
   BACKGROUND_COMMAND_MAX_CHARS,
+  BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS,
   BACKGROUND_COMMANDS_PER_THREAD_MAX,
   BackgroundCommandError,
   BackgroundCommandId,
@@ -39,9 +40,11 @@ import { createTerminalSpawnEnv, TerminalManager } from "../terminal/Manager.ts"
 import { TMUX_MISSING_MESSAGE, TmuxServer } from "../tmux/TmuxServer.ts";
 import {
   BACKGROUND_COMMAND_WRAPPER_SOURCE,
+  backgroundCommandMatchesPath,
   backgroundCommandShell,
   describeBackgroundCommandExit,
   encodeBackgroundCommandSpec,
+  notifyOnPatternProblem,
   parseBackgroundCommandExit,
 } from "./backgroundCommandWrapper.ts";
 import * as CheckInScheduler from "./CheckInScheduler.ts";
@@ -52,6 +55,8 @@ export interface StartBackgroundCommandInput {
   readonly statusEveryMinutes: number | null;
   readonly note: string;
   readonly tailLines: number;
+  /** A regular expression for output lines the agent hears about as they appear. */
+  readonly notifyOn: string | null;
 }
 
 /**
@@ -106,6 +111,7 @@ export function toThreadBackgroundCommand(row: BackgroundCommandRow): ThreadBack
     note: row.note,
     tailLines: row.tailLines,
     stopRequestedBy: row.stopRequestedBy,
+    notifyOn: row.notifyOn,
   };
 }
 
@@ -212,6 +218,18 @@ const make = Effect.gen(function* () {
           `The command must be 1 to ${BACKGROUND_COMMAND_MAX_CHARS} characters long.`,
         );
       }
+      const notifyOn = input.notifyOn?.trim() || null;
+      if (notifyOn !== null) {
+        if (notifyOn.length > BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS) {
+          return yield* refuse(
+            `notifyOn must be at most ${BACKGROUND_COMMAND_NOTIFY_ON_MAX_CHARS} characters long.`,
+          );
+        }
+        const problem = notifyOnPatternProblem(notifyOn);
+        if (problem !== undefined) {
+          return yield* refuse(`notifyOn is not a valid JavaScript regular expression: ${problem}`);
+        }
+      }
       const shell = yield* snapshots
         .getThreadShellById(input.threadId)
         .pipe(Effect.catch(failure("Could not read this thread.")));
@@ -269,6 +287,10 @@ const make = Effect.gen(function* () {
         stdoutBytesNoticed: 0,
         stderrBytesNoticed: 0,
         missingObservations: 0,
+        notifyOn,
+        matchNoticesSent: 0,
+        matchBytesNoticed: 0,
+        lastMatchNoticeAt: null,
       };
       const added = yield* repository
         .insertIfUnder(row, BACKGROUND_COMMANDS_PER_THREAD_MAX)
@@ -300,6 +322,8 @@ const make = Effect.gen(function* () {
             stderrPath: row.stderrPath,
             exitPath: path.join(jobDir, "exit-status"),
             pidPath: path.join(jobDir, "pid"),
+            notifyOn,
+            matchesPath: backgroundCommandMatchesPath(jobDir),
           }),
           { mode: 0o600 },
         );
@@ -367,7 +391,23 @@ const make = Effect.gen(function* () {
 
   // Stop escalation already applied, per command, so each signal goes once per server run.
   const stopStage = new Map<string, number>();
+  // Matches file sizes seen, so the scheduler is woken once per growth rather than every poll.
+  const matchSizes = new Map<string, number>();
   let polls = 0;
+
+  /** Whether a command's wrapper recorded matches since the last poll. */
+  const matchesGrew = (row: BackgroundCommandRow) =>
+    row.notifyOn === null
+      ? Effect.succeed(false)
+      : fs.stat(backgroundCommandMatchesPath(row.jobDir)).pipe(
+          Effect.map((info) => {
+            const size = Number(info.size);
+            const grew = size > row.matchBytesNoticed && size !== matchSizes.get(row.id);
+            matchSizes.set(row.id, size);
+            return grew;
+          }),
+          Effect.orElseSucceed(() => false),
+        );
 
   const poll = Effect.gen(function* () {
     const running = (yield* repository.listActive).filter((row) => row.status === "running");
@@ -376,7 +416,9 @@ const make = Effect.gen(function* () {
     polls += 1;
     const sessions = checkSessions ? yield* tmux.listSessions : undefined;
     const nowMs = yield* Clock.currentTimeMillis;
+    let newMatches = false;
     for (const row of running) {
+      if (yield* matchesGrew(row)) newMatches = true;
       const exit = yield* readExit(row);
       if (exit !== undefined) {
         // Read again: a stop requested since this poll listed the command ended it.
@@ -410,6 +452,8 @@ const make = Effect.gen(function* () {
       }
       yield* finish(row, row.stopRequestedBy === null ? "lost" : "stopped", null, isoAt(nowMs));
     }
+    // Matching lines are what the agent asked to hear about soon; don't wait for the timer.
+    if (newMatches) yield* scheduler.wake;
   }).pipe(Effect.catch((error) => Effect.logWarning("background command poll failed", { error })));
 
   /** Ctrl-C first; then SIGTERM, SIGKILL and the session, if the command does not end. */

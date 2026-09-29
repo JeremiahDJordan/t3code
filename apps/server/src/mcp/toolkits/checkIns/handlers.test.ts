@@ -149,6 +149,7 @@ describe("check-in toolkit handlers", () => {
           statusEveryMinutes: null,
           note: "",
           tailLines: 0,
+          notifyOn: null,
         },
       ]);
     }),
