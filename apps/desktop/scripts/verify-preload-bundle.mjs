@@ -14,6 +14,8 @@ const expectedDesktopBridgeApis = [
 ];
 const clerkPasskeysGlobal = "__clerk_internal_electron_passkeys";
 const preloadExecutionTimeoutMs = 1_000;
+// The preload is loaded as each, so a platform branch is checked on every host, not only its own.
+const preloadPlatforms = ["darwin", "linux", "win32"];
 const desktopPackage = JSON.parse(
   NodeFS.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
 );
@@ -87,11 +89,21 @@ const createSandboxModules = (exposedGlobals) => {
   ]);
 };
 
-const executeBundle = (source, sandboxModules) => {
+// What a preload may touch in its page while it loads: it can add listeners, which never run here.
+const createPageGlobals = () => {
+  const document = { documentElement: { style: { setProperty: () => undefined } } };
+  const window = {
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    document,
+  };
+  return { window, document };
+};
+
+const executeBundle = (source, sandboxModules, platform) => {
   const sandboxProcess = {
     contextIsolated: true,
-    // oxlint-disable-next-line t3code/no-global-process-runtime -- This standalone CI verifier supplies the preload's host platform without loading Effect.
-    platform: process.platform,
+    platform,
     versions: { electron: electronVersion },
   };
   const requireSandboxModule = (moduleName) => {
@@ -106,6 +118,7 @@ const executeBundle = (source, sandboxModules) => {
   NodeVM.runInNewContext(
     source,
     {
+      ...createPageGlobals(),
       process: sandboxProcess,
       require: requireSandboxModule,
     },
@@ -118,10 +131,9 @@ const executeBundle = (source, sandboxModules) => {
 
 export const verifyPreloadBundle = (source) => {
   const runtimeImports = inspectBundle(source);
-  const exposedGlobals = new Map();
-  const sandboxModules = createSandboxModules(exposedGlobals);
+  const supportedModules = createSandboxModules(new Map());
   const unsupportedImports = [...new Set(runtimeImports)]
-    .filter((moduleName) => !sandboxModules.has(moduleName))
+    .filter((moduleName) => !supportedModules.has(moduleName))
     .toSorted();
 
   if (unsupportedImports.length > 0) {
@@ -130,17 +142,24 @@ export const verifyPreloadBundle = (source) => {
     );
   }
 
-  executeBundle(source, sandboxModules);
+  for (const platform of preloadPlatforms) {
+    const exposedGlobals = new Map();
+    executeBundle(source, createSandboxModules(exposedGlobals), platform);
 
-  const desktopBridge = exposedGlobals.get("desktopBridge");
-  const missingApis = expectedDesktopBridgeApis.filter(
-    (api) => typeof desktopBridge?.[api] !== "function",
-  );
-  if (!exposedGlobals.has("desktopBridge")) missingApis.unshift("desktopBridge exposure");
-  if (!exposedGlobals.has(clerkPasskeysGlobal)) missingApis.push(`${clerkPasskeysGlobal} exposure`);
+    const desktopBridge = exposedGlobals.get("desktopBridge");
+    const missingApis = expectedDesktopBridgeApis.filter(
+      (api) => typeof desktopBridge?.[api] !== "function",
+    );
+    if (!exposedGlobals.has("desktopBridge")) missingApis.unshift("desktopBridge exposure");
+    if (!exposedGlobals.has(clerkPasskeysGlobal)) {
+      missingApis.push(`${clerkPasskeysGlobal} exposure`);
+    }
 
-  if (missingApis.length > 0) {
-    throw new Error(`Desktop preload bundle is missing executable APIs: ${missingApis.join(", ")}`);
+    if (missingApis.length > 0) {
+      throw new Error(
+        `Desktop preload bundle is missing executable APIs: ${missingApis.join(", ")} (loaded as ${platform})`,
+      );
+    }
   }
 };
 
