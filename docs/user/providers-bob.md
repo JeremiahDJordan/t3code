@@ -59,6 +59,21 @@ approvals follow
 call, and **Auto-accept edits** approves file edits. **Supervised** asks before Bob
 acts, and so does **Auto**, since Bob has no automatic reviewer.
 
+## Keep Bob running when T3 Code restarts
+
+An instance can run Bob in tmux, so quitting, updating or restarting T3 Code does not stop
+Bob or the commands it runs, such as a long test suite. Set **Where Bob runs** to **In tmux**
+on an instance in **Settings → Providers**, or add a second Bob instance for it with **Add
+provider**. It needs tmux 3.2 or later on the machine running T3 Code.
+
+When T3 Code starts again, a turn that was running carries on in its thread and finishes
+there, and Bob keeps T3 Code's own tools, such as check-ins. If the server came back at a
+different address, Bob cannot use those tools until the turn ends, and the thread's next
+message starts Bob again on the same conversation. T3 Code closes a Bob that was idle when it
+stopped, or whose instance was removed, turned off or set back to run with T3 Code, and a Bob
+that no T3 Code comes back to stops after a day. If you run the server
+from your own systemd unit, set `KillMode=process`, or restarting the unit stops Bob too.
+
 ## Usage
 
 **Usage → Limits** and `/usage-limits` in the composer show your Bob team's
