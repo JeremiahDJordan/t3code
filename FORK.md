@@ -27,8 +27,11 @@ don't reopen them without new information. Add to it when a decision changes.
   `mcp/toolkits/checkIns/`, contracts `checkIns.ts` and `backgroundCommands.ts`,
   client-runtime `state/checkIns.ts`, web `useCheckInBannerItem.tsx` and
   `AgentCheckInsSettings.tsx`, mobile `ThreadCheckIns.tsx` and `CheckInHoursField.tsx`.
-  Upstream files carry only registration lines, plus `export` on the terminal manager's
-  `createTerminalSpawnEnv`.
+  Upstream files mostly carry registration lines, plus `export` on the terminal manager's
+  `createTerminalSpawnEnv`. A few carry behavior: `ThreadBackgroundLiveness.ts` counts a
+  running command as its thread's work, web `ChatView.tsx` hides the Monitoring banner
+  while a command's row shows, and web `MessagesTimeline.tsx` and mobile `ThreadFeed.tsx`
+  label the messages T3 sends. The [rebase checklist](#rebase-checklist) lists every such site.
 - **Upstream clients** (the App Store app, app.t3.codes) cannot decode `bob` in the
   usage and onboarding-scan responses. This fork's clients add `clientBobSupport=1`
   to their connection; for any other client the server leaves `bob` out of the scan
@@ -264,6 +267,15 @@ paces it, and measured queues stayed around 8 MiB for 32 MiB to 1 GiB of output.
 would instead risk losing output still in the pipe when the post-exit drain ends, on the
 same slow disks it targets.
 
+### Keep hiding the Monitoring banner while a command's row shows (reviews 6 and 7)
+
+Liveness does not tell a provider's own watch loop from T3's command, so an idle thread
+running both loses the banner's thread-wide Stop until the command ends, and for the
+seconds between a command's end and the turn its end notice starts, its row has no Stop
+either. Telling them apart needs new state on the wire, and showing both brings back two
+Stops with different scope in the common case. Sending a message and using the composer's
+Stop, or stopping the command, covers the overlap.
+
 ### Show the Bob usage setting row everywhere
 
 The row also shows when this fork's client views an upstream server. Upstream
@@ -338,6 +350,9 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   subscribing), `BackgroundCommands.watch` in `OrchestrationReactor.ts`, web `ChatView.tsx`,
   `MessagesTimeline.tsx` and `IntegrationsSettings.tsx`, mobile
   `ThreadDetailScreen.tsx`, `ThreadFeed.tsx` and `SettingsServerControlsRouteScreen.tsx`.
+- Background commands: `ThreadBackgroundLiveness.ts` (`setServerWork`, and its part in
+  `getThreadBackgroundLiveness`); without it a thread with a running command looks idle
+  and can settle.
 - Bob in tmux: `ProviderService.ts` saves the resume cursor on `turn.completed` for `bob`
   as it does for `claudeAgent`; without it a Bob turn finished after a restart leaves the
   cursor behind.
