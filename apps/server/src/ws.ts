@@ -147,6 +147,7 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as NewProject from "./project/NewProject.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import {
   agentSessionScanForUpstreamClient,
@@ -635,6 +636,7 @@ const makeWsRpcLayer = (
       });
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const checkInScheduler = yield* CheckInScheduler.CheckInScheduler;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -3614,6 +3616,20 @@ const makeWsRpcLayer = (
               .cancel(input.threadId)
               .pipe(Effect.map((cancelled) => ({ cancelled }))),
             { "rpc.aggregate": "vcs" },
+          ),
+        [WS_METHODS.subscribeThreadCheckIns]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeThreadCheckIns,
+            checkInScheduler.stream(input.threadId),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.checkInCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.checkInCancel,
+            checkInScheduler
+              .cancel(input.checkInId)
+              .pipe(Effect.map((cancelled) => ({ cancelled }))),
+            { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.vcsRefreshStatus]: (input) =>
           observeRpcEffect(
