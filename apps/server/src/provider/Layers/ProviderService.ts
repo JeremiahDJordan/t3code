@@ -1131,9 +1131,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         canonicalEvent.type === "turn.aborted"
       ) {
         yield* recordTurnCompletedAnalytics(source, canonicalEvent);
-        if (source.provider === "claudeAgent") {
-          // Background Claude turns have no sendTurn response to persist their
-          // new native boundary. Save it before clients can checkpoint the turn.
+        if (source.provider === "claudeAgent" || source.provider === "bob") {
+          // Background Claude turns, and a Bob turn finished after a restart, have no
+          // sendTurn response to persist their new native boundary. Save it before
+          // clients can checkpoint the turn.
           yield* Effect.gen(function* () {
             const adapter = yield* registry.getByInstance(source.instanceId);
             const session = (yield* adapter.listSessions()).find(

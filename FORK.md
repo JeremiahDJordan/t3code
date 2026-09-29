@@ -18,8 +18,9 @@ don't reopen them without new information. Add to it when a decision changes.
 - **Upstream files** carry registration lines (driver, icons, labels, settings,
   provider lists), a few generic features Bob needed (Bobcoin `credits` on usage
   buckets, Bobcoin `amount` on limit windows, per-folder `usageLimits`, the meter's
-  count when the limit is unknown), and Bob branches in onboarding import and the
-  usage scan.
+  count when the limit is unknown), Bob branches in onboarding import and the
+  usage scan, and a way back into onboarding import after setup (`/welcome?step=import`,
+  from the command palette and Settings → General), since Bob is usually enabled later.
 - **Check-ins and background commands** are the fork's features beyond Bob, for every
   provider. Their own files: `apps/server/src/checkIns/`, `apps/server/src/tmux/`,
   `persistence/ThreadCheckIns.ts` and `ThreadBackgroundCommands.ts`,
@@ -217,9 +218,42 @@ launchd and the desktop app leave tmux alone.
 A warning before quitting mid-turn would be a custom Electron change the fork does
 not want to carry. Long work goes through background commands instead.
 
-### Run Bob in tmux as a separate `bob-tmux` provider (owner, 2026-09-28)
+### Run Bob in tmux as a Bob instance setting (owner, 2026-09-28; reviews 4 and 5)
 
-So the two can be tested side by side. The existing Bob provider stays as it is.
+The owner asked for a separate `bob-tmux` provider, to test the two side by side. Both design
+reviewers recommended a setting instead, and that is what shipped: **Where Bob runs** on a
+Bob instance (`BobSettings.sessionHost`), with a second instance for tmux. It gives the same
+side-by-side testing without a new driver kind, which would have needed its own manifest,
+contracts, icons, usage and import branches, and upstream-client handling. Instances without
+the setting behave exactly as before.
+
+A small Node relay (`provider/acp/bobRelaySource.ts`) runs in a tmux pane and holds `bob acp`
+on plain pipes; T3 talks to it over a 0600 Unix socket (`provider/acp/BobRelay.ts`), which the
+ACP runtime sees as an ordinary child process, so effect-acp and `AcpSessionRuntime` are
+unchanged. The relay gives T3's requests its own JSON-RPC ids, answers `initialize` and
+`session/resume` itself for a T3 that attaches, keeps what Bob says until T3 acknowledges it,
+and hands the answer to the running prompt to the next T3's prompt. On SIGTERM or SIGINT, T3
+lets go of every relay running a turn before shutdown can cancel it; the desktop app stops
+its backend with SIGTERM. At startup such a thread counts as a live session, so startup does
+not mark its turn lost, and T3 attaches after activation, when the turn's events have a
+subscriber. Bob still holds the previous server's MCP credential, which the relay keeps too;
+the new server takes it back (`McpSessionRegistry.restore`) when it runs in the same
+environment at the same address, so Bob keeps its T3 tools and stays. Otherwise T3 closes
+that Bob quietly once the adopted turn ends, and the next message resumes the task on a
+fresh Bob. Idle relays, and relays of instances since removed, disabled or moved off tmux,
+are stopped at startup.
+
+The attach relies on `AcpSessionRuntime.start()` sending only `initialize` and
+`session/resume` for Bob. Recheck `bobRelaySource.ts` if upstream adds a handshake request.
+
+### Ack Bob relay output on receipt (reviews 6 and 7)
+
+T3 acknowledges what it reads from a Bob relay at once, so the relay drops its copy before
+T3 has persisted it. A restart or crash in that moment can leave a fragment of streamed
+text, or an event in flight, out of the thread; Bob's requests and the prompt's answer are
+still replayed, and Bob's task keeps the whole conversation. Acking after persistence
+needs a persisted watermark or replay deduplication, which changes relay and ingestion
+semantics for a tail fragment.
 
 ### Show the Bob usage setting row everywhere
 
@@ -295,8 +329,13 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   subscribing), `BackgroundCommands.watch` in `OrchestrationReactor.ts`, web `ChatView.tsx`,
   `MessagesTimeline.tsx` and `IntegrationsSettings.tsx`, mobile
   `ThreadDetailScreen.tsx`, `ThreadFeed.tsx` and `SettingsServerControlsRouteScreen.tsx`.
+- Bob in tmux: `ProviderService.ts` saves the resume cursor on `turn.completed` for `bob`
+  as it does for `claudeAgent`; without it a Bob turn finished after a restart leaves the
+  cursor behind.
 - Clients: web `providerDriverMeta.ts`, `Icons.tsx`, `providerIconUtils.ts`,
-  `usageProviders.ts`, `WelcomeWizard.tsx` (the Bob icon column); mobile
+  `usageProviders.ts`, `WelcomeWizard.tsx` (the Bob icon column, and `initialStep` for
+  `/welcome?step=import`), `welcome.tsx`, `CommandPalette.tsx` and `SettingsPanels.tsx` (the
+  import entries); mobile
   `ProviderIcon.tsx`, `usageProviders.ts`, `UsageLimitsPooled.tsx` (`DRIVER_LABEL`).
 
 **Conflict hazards:** `ws.ts` around `makeWsRpcLayer`'s parameters; the scanner's

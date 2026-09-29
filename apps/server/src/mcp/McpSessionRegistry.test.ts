@@ -163,3 +163,28 @@ it.effect("does not keep credentials of other threads alive", () =>
     expect(yield* registry.resolve(token)).toBeUndefined();
   }),
 );
+
+it.effect("takes back a credential issued before a restart, only at the same endpoint", () =>
+  Effect.gen(function* () {
+    // What a provider process still holds, issued by the server before the restart.
+    const before = yield* makeRegistry(() => 1_000);
+    const issued = yield* before.issue({
+      threadId: ThreadId.make("thread-kept"),
+      providerInstanceId: ProviderInstanceId.make("bob_tmux"),
+      capabilities: new Set(["check-ins"]),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+
+    const after = yield* makeRegistry(() => 2_000);
+    expect(yield* after.resolve(token)).toBeUndefined();
+    expect(yield* after.restore(issued.config)).toBe(true);
+    const scope = yield* after.resolve(token);
+    expect(scope?.threadId).toBe(ThreadId.make("thread-kept"));
+    expect([...(scope?.capabilities ?? [])].sort()).toEqual(["check-ins", "pull-requests"]);
+
+    // A server now at another address cannot honour it: the provider would call the old one.
+    const moved = yield* makeRegistry(() => 2_000, makeFakeHttpServer("127.0.0.1", 43124));
+    expect(yield* moved.restore(issued.config)).toBe(false);
+    expect(yield* moved.resolve(token)).toBeUndefined();
+  }),
+);

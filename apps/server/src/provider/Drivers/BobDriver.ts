@@ -9,10 +9,11 @@
  *
  * @module provider/Drivers/BobDriver
  */
-import { BobSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { BobSettings, ProviderDriverKind, type ServerSettings } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
@@ -20,6 +21,9 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ProcessRunner from "../../processRunner.ts";
+import * as TmuxServer from "../../tmux/TmuxServer.ts";
+import { makeBobRelayHost, sweepBobRelays } from "../acp/BobRelay.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeBobTextGeneration } from "../../textGeneration/BobTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
@@ -30,6 +34,7 @@ import {
   enrichBobSnapshot,
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
+  withBobSessionHostStatus,
 } from "../Layers/BobProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import {
@@ -52,6 +57,31 @@ import {
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
 const decodeBobSettings = Schema.decodeSync(BobSettings);
+const decodeBobSettingsOption = Schema.decodeUnknownOption(BobSettings);
+
+/**
+ * The Bob instances set to run Bob in tmux: those whose relays are theirs to take back. The
+ * built-in instance takes its settings from `providers.bob` unless `providerInstances` has it.
+ */
+export function tmuxBobInstanceIds(settings: ServerSettings): ReadonlySet<string> {
+  const instances: Record<string, { readonly driver: string; readonly config?: unknown }> = {
+    ...(!Object.hasOwn(settings.providerInstances, DRIVER_KIND)
+      ? { [DRIVER_KIND]: { driver: DRIVER_KIND, config: settings.providers.bob } }
+      : {}),
+    ...settings.providerInstances,
+  };
+  return new Set(
+    Object.entries(instances).flatMap(([instanceId, instance]) =>
+      instance.driver === DRIVER_KIND &&
+      Option.exists(
+        decodeBobSettingsOption(instance.config ?? {}),
+        (config) => config.sessionHost === "tmux",
+      )
+        ? [instanceId]
+        : [],
+    ),
+  );
+}
 
 const DRIVER_KIND = ProviderDriverKind.make("bob");
 const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
@@ -102,6 +132,28 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       const effectiveConfig = { ...config, enabled } satisfies BobSettings;
       const textGeneration = yield* makeBobTextGeneration(effectiveConfig, processEnv);
 
+      // An instance that runs Bob in tmux uses T3's private tmux server, as background
+      // commands do.
+      const relay =
+        effectiveConfig.sessionHost === "tmux"
+          ? yield* Effect.gen(function* () {
+              const config = yield* ServerConfig;
+              const tmux = yield* TmuxServer.make.pipe(
+                Effect.provideServiceEffect(ProcessRunner.ProcessRunner, ProcessRunner.make()),
+              );
+              return yield* makeBobRelayHost({ tmux, stateDir: config.stateDir });
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderDriverError({
+                    driver: DRIVER_KIND,
+                    instanceId,
+                    detail: `Could not prepare Bob's tmux sessions: ${cause.message}`,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
       const checkProvider = checkBobProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.flatMap((snapshot) =>
           effectiveConfig.enabled && snapshot.installed && snapshot.auth.status === "authenticated"
@@ -112,6 +164,13 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
                   ...(plan ? { auth: { ...snapshot.auth, label: plan } } : {}),
                   usageLimits,
                 })),
+              )
+            : Effect.succeed(snapshot),
+        ),
+        Effect.flatMap((snapshot) =>
+          relay
+            ? relay.available.pipe(
+                Effect.map((tmuxAvailable) => withBobSessionHostStatus(snapshot, tmuxAvailable)),
               )
             : Effect.succeed(snapshot),
         ),
@@ -173,6 +232,12 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         setWorkspaceUsageLimits,
       });
       const driverScope = yield* Effect.scope;
+      // Relays a T3 left running for an instance since removed, or switched away from tmux.
+      yield* Effect.gen(function* () {
+        const config = yield* ServerConfig;
+        const keeps = tmuxBobInstanceIds(yield* serverSettings.getSettings);
+        yield* sweepBobRelays({ stateDir: config.stateDir, keeps: (id) => keeps.has(id) });
+      }).pipe(Effect.ignore, Effect.forkIn(driverScope));
       const adapter = yield* makeBobAdapter(effectiveConfig, {
         environment: processEnv,
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
@@ -180,6 +245,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         onAvailableCommands,
         onAvailableModes,
         refreshUsageLimits,
+        ...(relay ? { relay } : {}),
       });
 
       return {

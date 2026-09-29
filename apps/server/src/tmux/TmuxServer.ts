@@ -76,7 +76,7 @@ function tmuxEnvironment(): NodeJS.ProcessEnv {
 // A Unix socket path must fit in `sun_path` (104 bytes on macOS, 108 on Linux).
 const MAX_SOCKET_PATH = 100;
 
-const make = Effect.gen(function* () {
+export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const runner = yield* ProcessRunner.ProcessRunner;
   const fs = yield* FileSystem.FileSystem;

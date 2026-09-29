@@ -174,7 +174,7 @@ describe("moveBobTask", () => {
     }),
   );
 
-  it.effect("deletes the original only once the copy exists", () =>
+  it.effect("returns the copy and leaves the original for the caller to delete once it opens", () =>
     Effect.gen(function* () {
       const bob = fakeBob({
         "_bob/task/export": exported,
@@ -182,7 +182,7 @@ describe("moveBobTask", () => {
         "session/delete": {},
       });
       expect(yield* moveBobTask(bob.runtime, "old", "/new")).toBe("copy");
-      expect(bob.requests).toEqual(["_bob/task/export", "_bob/task/import", "session/delete"]);
+      expect(bob.requests).toEqual(["_bob/task/export", "_bob/task/import"]);
     }),
   );
 });

@@ -33,6 +33,12 @@ export interface McpSessionRegistryShape {
    * credential even when it goes a long time without touching an MCP tool.
    */
   readonly touch: (threadId: ThreadId) => Effect.Effect<void>;
+  /**
+   * Takes back a credential a provider process still holds from before this server restarted,
+   * as a Bob kept running under a relay does. Only one issued for this environment at this
+   * endpoint; whether it was taken back.
+   */
+  readonly restore: (config: McpProviderSession.McpProviderSessionConfig) => Effect.Effect<boolean>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
@@ -73,6 +79,15 @@ export interface McpSessionRegistryOptions {
  * the only thing guarding the `t3-code` toolkits on a remote-reachable server.
  */
 const DEFAULT_LIVENESS_WINDOW_MS = 24 * 60 * 60 * 1_000;
+
+const MCP_CAPABILITIES: ReadonlySet<string> = new Set<McpInvocationContext.McpCapability>([
+  "preview",
+  "device",
+  "pull-requests",
+  "check-ins",
+]);
+const isMcpCapability = (value: string): value is McpInvocationContext.McpCapability =>
+  MCP_CAPABILITIES.has(value);
 
 const bytesToHex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -182,6 +197,36 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     },
   );
 
+  const restore: McpSessionRegistryShape["restore"] = Effect.fn("McpSessionRegistry.restore")(
+    function* (config) {
+      const rawToken = config.authorizationHeader.startsWith("Bearer ")
+        ? config.authorizationHeader.slice("Bearer ".length)
+        : "";
+      if (!rawToken || config.environmentId !== environmentId || config.endpoint !== endpoint) {
+        return false;
+      }
+      const restoredAt = yield* currentTimeMillis;
+      const tokenHash = yield* hashToken(rawToken);
+      const scope: McpInvocationContext.McpInvocationScope = {
+        environmentId,
+        threadId: config.threadId,
+        providerSessionId: config.providerSessionId,
+        providerInstanceId: config.providerInstanceId,
+        capabilities: new Set<McpInvocationContext.McpCapability>([
+          "pull-requests",
+          ...[...config.capabilities].filter(isMcpCapability),
+        ]),
+        issuedAt: restoredAt,
+      };
+      yield* SynchronizedRef.update(state, ({ records }) => {
+        const next = new Map(pruneDead(records, restoredAt));
+        next.set(tokenHash, { tokenHash, scope, lastAliveAt: restoredAt });
+        return { records: next };
+      });
+      return true;
+    },
+  );
+
   const revokeWhere = (predicate: (record: CredentialRecord) => boolean) =>
     SynchronizedRef.update(state, ({ records }) => ({
       records: new Map(Array.from(records).filter(([, record]) => !predicate(record))),
@@ -191,6 +236,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     issue,
     resolve,
     touch,
+    restore,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
       function* (providerSessionId) {
         yield* revokeWhere((record) => record.scope.providerSessionId === providerSessionId);
@@ -231,6 +277,12 @@ export const issueActiveMcpCredential = (
         .revokeThread(request.threadId)
         .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
     : Effect.undefined;
+
+/** Takes back a credential issued before a restart; see `McpSessionRegistryShape.restore`. */
+export const restoreActiveMcpCredential = (
+  config: McpProviderSession.McpProviderSessionConfig,
+): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry ? activeMcpSessionRegistry.restore(config) : Effect.succeed(false);
 
 /**
  * Refreshes the liveness of a thread's MCP credential. Called on every provider

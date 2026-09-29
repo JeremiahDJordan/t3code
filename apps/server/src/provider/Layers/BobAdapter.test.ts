@@ -864,18 +864,58 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
           primaryWorkspace: cwd,
           systemInfo: {},
         });
-        // The original goes, so Bob counts the conversation once.
-        assert.deepStrictEqual(paramsOf(requests, "session/delete"), [
-          { sessionId: "task-in-old-folder" },
-        ]);
+        // The original goes once the copy is open, so Bob counts the conversation once.
         assert.deepStrictEqual(
-          paramsOf(requests, "session/resume").map((params) => params.sessionId),
-          ["task-in-old-folder", "bob-imported-1"],
+          requests.flatMap((entry) =>
+            entry.method === "session/resume" || entry.method === "session/delete"
+              ? [[entry.method, (entry.params as { readonly sessionId: string }).sessionId]]
+              : [],
+          ),
+          [
+            ["session/resume", "task-in-old-folder"],
+            ["session/resume", "bob-imported-1"],
+            ["session/delete", "task-in-old-folder"],
+          ],
         );
         assert.lengthOf(paramsOf(requests, "session/new"), 0);
 
         yield* adapter.stopSession(threadId);
       }),
+    ),
+  );
+
+  it.effect("keeps the original Bob task when the moved copy cannot open", () =>
+    withMockBob(
+      { T3_ACP_BOB: "1", T3_ACP_BOB_TASK_TRANSFER: "1", T3_ACP_BOB_SIGNED_OUT: "1" },
+      ({ adapter, requestLogPath }) =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("bob-moved-folder-signed-out");
+          // Bob checks the folder before the sign-in, so the move goes ahead and the copy fails.
+          const error = yield* adapter
+            .startSession({
+              threadId,
+              cwd: process.cwd(),
+              runtimeMode: "full-access",
+              resumeCursor: { schemaVersion: 1, sessionId: "task-in-old-folder" },
+            })
+            .pipe(Effect.flip);
+          assert.equal(
+            error._tag === "ProviderAdapterRequestError" && error.detail,
+            BOB_SSO_SIGN_IN_MESSAGE,
+          );
+          assert.isFalse(yield* adapter.hasSession(threadId));
+
+          const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+          assert.deepStrictEqual(
+            paramsOf(requests, "session/resume").map((params) => params.sessionId),
+            ["task-in-old-folder", "bob-imported-1"],
+          );
+          // The copy goes and the original stays, so the next start moves it again.
+          assert.deepStrictEqual(paramsOf(requests, "session/delete"), [
+            { sessionId: "bob-imported-1" },
+          ]);
+          assert.lengthOf(paramsOf(requests, "session/new"), 0);
+        }),
     ),
   );
 
@@ -941,6 +981,57 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
         yield* adapter.stopSession(threadId);
       }),
     ),
+  );
+
+  it.effect("deletes the rewound Bob task when it cannot open, and keeps the original", () =>
+    Effect.gen(function* () {
+      const loginDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "bob-login-")),
+      );
+      const signedOutFile = NodePath.join(loginDir, "signed-out");
+      yield* withMockBob(
+        {
+          T3_ACP_BOB: "1",
+          T3_ACP_BOB_TASK_TRANSFER: "1",
+          T3_ACP_BOB_SIGNED_OUT_FILE: signedOutFile,
+        },
+        ({ adapter, requestLogPath }) =>
+          Effect.gen(function* () {
+            const threadId = ThreadId.make("bob-rollback-copy-fails");
+            yield* adapter.startSession({
+              threadId,
+              cwd: process.cwd(),
+              runtimeMode: "full-access",
+            });
+            // Bob stamps its messages with the wall clock, which the test clock follows here.
+            // @effect-diagnostics-next-line globalDateInEffect:off
+            yield* TestClock.setTime(Date.now());
+            yield* adapter.sendTurn({ threadId, input: "first" });
+            // @effect-diagnostics-next-line globalDateInEffect:off
+            yield* TestClock.setTime(Date.now());
+            yield* adapter.sendTurn({ threadId, input: "second" });
+            // Bob's login expires, so the rewound task cannot open.
+            yield* Effect.promise(() => NodeFSP.writeFile(signedOutFile, ""));
+
+            const error = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.flip);
+            assert.equal(
+              error._tag === "ProviderAdapterRequestError" && error.detail,
+              BOB_SSO_SIGN_IN_MESSAGE,
+            );
+
+            const requests = yield* Effect.promise(() => readRequestLog(requestLogPath));
+            assert.deepStrictEqual(
+              paramsOf(requests, "session/resume").map((params) => params.sessionId),
+              ["bob-imported-1"],
+            );
+            // The rewound task goes, so Usage does not count its Bobcoins twice, and the
+            // original stays.
+            assert.deepStrictEqual(paramsOf(requests, "session/delete"), [
+              { sessionId: "bob-imported-1" },
+            ]);
+          }),
+      );
+    }),
   );
 
   it.effect("starts a new Bob conversation when every turn is rolled back", () =>
@@ -1726,15 +1817,18 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
-  it.effect("ends what Bob said before a turn failed in that turn, before it settles", () =>
+  it.effect("counts what Bob said and spent before an error in the turn that failed", () =>
     withMockBob(
       { T3_ACP_BOB: "1", T3_ACP_FAIL_PROMPT: "1", T3_ACP_PROMPT_RESPONSE_TEXT: "Half an answer" },
-      ({ adapter }) =>
+      ({ adapter, taskDatabasePath }) =>
         Effect.gen(function* () {
           const threadId = ThreadId.make("bob-prompt-error-reply");
+          writeBobTaskCosts(taskDatabasePath, "mock-session-1", { cost: 0.05 });
           yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
           const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
 
+          // Bob spent before the turn failed.
+          writeBobTaskCosts(taskDatabasePath, "mock-session-1", { cost: 0.07 });
           yield* adapter.sendTurn({ threadId, input: "hello" }).pipe(Effect.flip);
           const collected = Array.from(yield* events);
           const turnId = collected.find((event) => event.type === "turn.started")?.turnId;
@@ -1744,16 +1838,19 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
               (event.type === "content.delta" ||
                 (event.type === "item.completed" &&
                   event.payload.itemType === "assistant_message") ||
+                event.type === "thread.token-usage.updated" ||
                 event.type === "turn.completed") &&
               event.turnId === turnId
                 ? [event.type]
                 : [],
             ),
-            ["content.delta", "item.completed", "turn.completed"],
+            ["content.delta", "item.completed", "thread.token-usage.updated", "turn.completed"],
           );
 
           yield* adapter.stopSession(threadId);
         }),
+      // A home without Bob settings, so the test never reads the developer's `~/.bob`.
+      { authMethod: "sso", environment: { ...process.env, HOME: "/nonexistent-t3code-bob-home" } },
     ),
   );
 
