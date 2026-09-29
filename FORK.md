@@ -213,9 +213,11 @@ how a command ended even if it was down. The server's socket is `<stateDir>/tmux
 (the system's temp cleanup would remove one in `/tmp`). Commands need the thread in Full
 access: they run outside every provider's sandbox. Reviewed by two agents before building.
 
-If you run the server from your own systemd unit, set `KillMode=process`: the default
-kills the unit's whole cgroup on restart, including tmux and every background command.
-launchd and the desktop app leave tmux alone.
+Under systemd (which sets `INVOCATION_ID`), T3 starts its tmux server through `systemd-run
+--user --scope`, so it lands outside the unit's cgroup and a restart of the unit, which by
+default kills the whole cgroup, leaves tmux and every command in it alone. Without a user
+systemd instance (a system unit, say) the scope fails, T3 logs a warning and starts tmux
+directly; such a unit needs `KillMode=process`. launchd and the desktop app leave tmux alone.
 
 ### No desktop-app changes for a quit warning (owner, 2026-09-28)
 
