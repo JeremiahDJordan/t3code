@@ -20,6 +20,14 @@ don't reopen them without new information. Add to it when a decision changes.
   buckets, Bobcoin `amount` on limit windows, per-folder `usageLimits`, the meter's
   count when the limit is unknown), and Bob branches in onboarding import and the
   usage scan.
+- **Check-ins and background commands** are the fork's features beyond Bob, for every
+  provider. Their own files: `apps/server/src/checkIns/`, `apps/server/src/tmux/`,
+  `persistence/ThreadCheckIns.ts` and `ThreadBackgroundCommands.ts`,
+  `mcp/toolkits/checkIns/`, contracts `checkIns.ts` and `backgroundCommands.ts`,
+  client-runtime `state/checkIns.ts`, web `useCheckInBannerItem.tsx` and
+  `AgentCheckInsSettings.tsx`, mobile `ThreadCheckIns.tsx` and `CheckInHoursField.tsx`.
+  Upstream files carry only registration lines, plus `export` on the terminal manager's
+  `createTerminalSpawnEnv`.
 - **Upstream clients** (the App Store app, app.t3.codes) cannot decode `bob` in the
   usage and onboarding-scan responses. This fork's clients add `clientBobSupport=1`
   to their connection; for any other client the server leaves `bob` out of the scan
@@ -132,8 +140,8 @@ separate `fix` commit, as the effect-acp one does. `rerere.enabled` and
 
 Candidates, kept in the fork for now: the meter's count when the limit is unknown,
 `UsageBucket.credits` as provider billing units, `amount` on limit windows,
-per-folder `usageLimits`, the optional ACP `authMethodId`, and
-`supportsCustomModels`. Already open:
+per-folder `usageLimits`, the optional ACP `authMethodId`, `supportsCustomModels`,
+and check-ins. Already open:
 pingdotgg/t3code#13451 (effect-acp bare JSON-RPC errors). Revisit when the owner
 decides to upstream.
 
@@ -172,6 +180,46 @@ thread count, and importing it brings Bob threads the upstream app shows with a
 fallback icon. The relabel modes count each Bobcoin as $1 in the chosen provider's
 dollar totals. Both are opt-in or cosmetic; the setting defaults to hidden and
 says so.
+
+Also accepted: upstream apps replace a project's whole settings override when they
+edit it, from a copy without `enableAgentCheckIns` and `checkInRepeatLimitHours`, so
+that project's check-in overrides fall back to the environment's (on, 24 hours).
+
+### Create the fork's tables in their repositories, not as numbered migrations
+
+The migrator runs only ids above the highest one a database has applied. A fork
+migration numbered 55 would make that database skip upstream's own 55 whenever it
+lands; a high number would skip every later upstream migration. So a fork table is
+created with `CREATE TABLE IF NOT EXISTS` when its repository layer starts
+(`persistence/ThreadCheckIns.ts`). If upstream takes the feature, it becomes a
+normal migration there.
+
+### Keep check-ins and background commands inside T3 (owner, 2026-09-28)
+
+An outside MCP server cannot start a turn, so it cannot wake an idle agent; only
+the server that owns the thread can. Background commands stay in T3 too, for the
+terminal view and Stop in the thread.
+
+### Run background commands on T3's own tmux server (owner, 2026-09-28)
+
+tmux keeps a command alive when T3 stops or is killed; a small Node wrapper in the pane
+splits stdout and stderr into files and records the exit status in a file, so T3 learns
+how a command ended even if it was down. The server's socket is `<stateDir>/tmux/t3.sock`
+(the system's temp cleanup would remove one in `/tmp`). Commands need the thread in Full
+access: they run outside every provider's sandbox. Reviewed by two agents before building.
+
+If you run the server from your own systemd unit, set `KillMode=process`: the default
+kills the unit's whole cgroup on restart, including tmux and every background command.
+launchd and the desktop app leave tmux alone.
+
+### No desktop-app changes for a quit warning (owner, 2026-09-28)
+
+A warning before quitting mid-turn would be a custom Electron change the fork does
+not want to carry. Long work goes through background commands instead.
+
+### Run Bob in tmux as a separate `bob-tmux` provider (owner, 2026-09-28)
+
+So the two can be tested side by side. The existing Bob provider stays as it is.
 
 ### Show the Bob usage setting row everywhere
 
@@ -240,6 +288,13 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
 - `apps/server/src/provider/Layers/bobDatabase.ts`: the one read-only helper all three
   Bob readers share. Dropping its busy timeout degrades usage, import and the Usage
   page at once.
+- Check-ins: `server.ts` (`CheckInScheduler.layer`), `OrchestrationReactor.ts`
+  (starting it; without that nothing is ever delivered), `McpHttpServer.ts` (the
+  toolkit), `ProviderService.ts` (the `check-ins` capability), `ServerEnvironment.ts`
+  (`threadCheckIns` and `threadBackgroundCommands`, which clients check before
+  subscribing), `BackgroundCommands.watch` in `OrchestrationReactor.ts`, web `ChatView.tsx`,
+  `MessagesTimeline.tsx` and `IntegrationsSettings.tsx`, mobile
+  `ThreadDetailScreen.tsx`, `ThreadFeed.tsx` and `SettingsServerControlsRouteScreen.tsx`.
 - Clients: web `providerDriverMeta.ts`, `Icons.tsx`, `providerIconUtils.ts`,
   `usageProviders.ts`, `WelcomeWizard.tsx` (the Bob icon column); mobile
   `ProviderIcon.tsx`, `usageProviders.ts`, `UsageLimitsPooled.tsx` (`DRIVER_LABEL`).
@@ -250,12 +305,15 @@ an upstream change there into both); `ContextWindowMeter.tsx`; the `UsagePage.ts
 table; `UsageProviderSettings.tsx`, whose Bob row always renders among upstream's rows.
 
 **After each rebase:** run `vp check` (seconds; upstream adds lint rules, and one
-flagged Bob's icon after a rebase), then the Bob tests:
+flagged Bob's icon after a rebase), then the fork's server tests:
 
 ```bash
 cd apps/server && vp test run src/provider/Layers/Bob src/provider/Layers/bob \
-  src/provider/acp/Bob src/textGeneration/BobTextGeneration src/usage \
-  src/upstreamClientCompatibility src/project
+  src/provider/Drivers/Bob src/provider/acp/Bob src/textGeneration/BobTextGeneration \
+  src/usage src/upstreamClientCompatibility src/project src/checkIns src/tmux \
+  src/mcp/toolkits/checkIns src/mcp/McpSessionRegistry \
+  src/persistence/ThreadBackgroundCommands src/orchestration/ThreadBackgroundLiveness \
+  src/orchestration/Layers/OrchestrationReactor src/provider/Layers/ProviderService
 ```
 
 - `upstreamClientCompatibility.test.ts` decodes the adapted summary with
