@@ -1,5 +1,9 @@
-import type { ThreadBackgroundCommand } from "@t3tools/contracts";
+import {
+  BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES,
+  type ThreadBackgroundCommand,
+} from "@t3tools/contracts";
 
+import type { BackgroundCommandMatch } from "./backgroundCommandWrapper.ts";
 import { formatCheckInMinutes } from "./checkInMessage.ts";
 
 /** One output file as a message reports it. */
@@ -10,6 +14,16 @@ export interface NoticedOutput {
   readonly bytesBefore: number;
   /** The file's last lines, when the agent asked for them. */
   readonly tail?: string | undefined;
+}
+
+/** Output lines that matched the command's `notifyOn` since the agent last heard. */
+export interface NoticedMatches {
+  /** The matches file, JSON lines of stream, byte offset and line. */
+  readonly path: string;
+  /** The new matches a message shows, oldest first. */
+  readonly shown: ReadonlyArray<BackgroundCommandMatch>;
+  /** Whether more new matches are in the file than are shown. */
+  readonly more: boolean;
 }
 
 /** `0 bytes`, `812 bytes`, `4 KB`, `1.2 MB`, `3.4 GB`. */
@@ -51,16 +65,29 @@ function shownCommand(command: string): string {
   return `\`${shown.replaceAll("`", "'")}\``;
 }
 
-function outputLines(
-  stdout: NoticedOutput,
-  stderr: NoticedOutput,
-  sinceLastCheckIn: boolean,
-): string {
+/** A path quoted for a POSIX shell command the agent may copy. */
+function shellQuoted(path: string): string {
+  return `'${path.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Each file's size and, once the agent has heard about it before, exactly where the output it
+ * has not seen starts, with the command that reads just that part.
+ */
+function outputLines(stdout: NoticedOutput, stderr: NoticedOutput): string {
   const line = (name: string, file: NoticedOutput) => {
+    const size =
+      file.bytes < 1024
+        ? formatBytes(file.bytes)
+        : `${formatBytes(file.bytes)}, ${file.bytes} bytes`;
     const growth = file.bytes - file.bytesBefore;
     const since =
-      sinceLastCheckIn && growth > 0 ? `, +${formatBytes(growth)} since the last update` : "";
-    return `${name}: ${file.path} (${formatBytes(file.bytes)}${since})`;
+      file.bytesBefore === 0
+        ? ""
+        : growth > 0
+          ? `; ${growth} new since you last heard, from byte ${file.bytesBefore + 1}: tail -c +${file.bytesBefore + 1} ${shellQuoted(file.path)}`
+          : "; nothing new since you last heard";
+    return `${name}: ${file.path} (${size}${since})`;
   };
   const tails = [
     ["stdout", stdout.tail],
@@ -78,6 +105,31 @@ function outputLines(
   return [line("stdout", stdout), line("stderr", stderr), ...quoted].join("\n");
 }
 
+function patternShown(pattern: string): string {
+  return `\`${pattern.replaceAll("`", "'")}\``;
+}
+
+/** The new matching lines, each with its stream and where it starts in that stream's file. */
+function matchLines(command: ThreadBackgroundCommand, matches: NoticedMatches | undefined): string {
+  if (!command.notifyOn || !matches || matches.shown.length === 0) return "";
+  const shown = matches.shown
+    .map((match) => `${match.stream} byte ${match.offset + 1}: ${match.line.slice(0, 300)}`)
+    .join("\n");
+  const more = matches.more ? `\nMore new matches are in ${matches.path}.` : "";
+  return `New lines matching ${patternShown(command.notifyOn)}:\n\`\`\`\n${shown}\n\`\`\`${more}\n`;
+}
+
+/** When the agent hears about the command next, while it runs. */
+function nextLine(command: ThreadBackgroundCommand): string {
+  const matches = command.notifyOn
+    ? `about new lines matching ${patternShown(command.notifyOn)} at most every ${formatCheckInMinutes(BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES)}`
+    : undefined;
+  if (command.statusEveryMinutes !== null) {
+    return `\nThe next status update is in ${formatCheckInMinutes(command.statusEveryMinutes)}; you will also be told the moment it ends${matches ? `, and ${matches}` : ""}.`;
+  }
+  return matches ? `\nYou will be told the moment it ends, and ${matches}.` : "";
+}
+
 function noteLine(command: ThreadBackgroundCommand): string {
   return command.note.trim() ? `\nYour note: ${command.note.trim()}` : "";
 }
@@ -87,6 +139,7 @@ export function backgroundCommandEndText(
   command: ThreadBackgroundCommand,
   stdout: NoticedOutput,
   stderr: NoticedOutput,
+  matches?: NoticedMatches,
 ): string {
   const ran =
     command.endedAt === null
@@ -98,7 +151,7 @@ export function backgroundCommandEndText(
       : command.status === "lost"
         ? `[T3 Code] ${shownCommand(command.command)} is no longer running, and T3 Code could not find how it ended.`
         : `[T3 Code] ${shownCommand(command.command)} finished: ${command.exitStatus ?? "exit unknown"}${ran}.`;
-  return `${header}\n${outputLines(stdout, stderr, false)}${noteLine(command)}`;
+  return `${header}\n${matchLines(command, matches)}${outputLines(stdout, stderr)}${noteLine(command)}`;
 }
 
 /** What T3 tells the agent at a status update while a background command runs. */
@@ -107,11 +160,20 @@ export function backgroundCommandStatusText(
   stdout: NoticedOutput,
   stderr: NoticedOutput,
   nowMs: number,
+  matches?: NoticedMatches,
 ): string {
   const running = formatElapsed(nowMs - Date.parse(command.startedAt));
-  const every =
-    command.statusEveryMinutes === null
-      ? ""
-      : `\nThe next status update is in ${formatCheckInMinutes(command.statusEveryMinutes)}; you will also be told the moment it ends.`;
-  return `[T3 Code] ${shownCommand(command.command)} is still running (${running}).\n${outputLines(stdout, stderr, true)}${noteLine(command)}${every}`;
+  return `[T3 Code] ${shownCommand(command.command)} is still running (${running}).\n${matchLines(command, matches)}${outputLines(stdout, stderr)}${noteLine(command)}${nextLine(command)}`;
+}
+
+/** What T3 tells the agent when a running command prints lines matching its `notifyOn`. */
+export function backgroundCommandMatchText(
+  command: ThreadBackgroundCommand,
+  stdout: NoticedOutput,
+  stderr: NoticedOutput,
+  nowMs: number,
+  matches: NoticedMatches,
+): string {
+  const running = formatElapsed(nowMs - Date.parse(command.startedAt));
+  return `[T3 Code] ${shownCommand(command.command)} is still running (${running}) and printed lines you asked to hear about.\n${matchLines(command, matches)}${outputLines(stdout, stderr)}${noteLine(command)}${nextLine(command)}`;
 }
