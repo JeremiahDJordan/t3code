@@ -521,14 +521,17 @@ const make = Effect.gen(function* () {
     // Background commands whose end the agent has not heard, and due status updates.
     const commandNotices = new Map<ThreadId, Array<CommandNotice>>();
     for (const row of yield* commands.listActive) {
+      // A muted command still reports how it ended; its messages while it runs wait.
       const notice: CommandNotice | undefined =
         row.status !== "running"
           ? { kind: "end", row }
-          : row.nextStatusAt !== null && Date.parse(row.nextStatusAt) <= nowMs
-            ? { kind: "status", row }
-            : (yield* matchesDue(row, nowMs))
-              ? { kind: "match", row }
-              : undefined;
+          : row.muted
+            ? undefined
+            : row.nextStatusAt !== null && Date.parse(row.nextStatusAt) <= nowMs
+              ? { kind: "status", row }
+              : (yield* matchesDue(row, nowMs))
+                ? { kind: "match", row }
+                : undefined;
       if (notice === undefined) continue;
       const due = commandNotices.get(row.threadId) ?? [];
       due.push(notice);

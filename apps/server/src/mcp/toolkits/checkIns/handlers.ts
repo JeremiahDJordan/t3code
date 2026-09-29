@@ -29,6 +29,7 @@ function commandSummaryOf(command: ThreadBackgroundCommand) {
     stderrPath: command.stderrPath,
     statusEveryMinutes: command.statusEveryMinutes,
     notifyOn: command.notifyOn ?? null,
+    muted: command.muted ?? false,
   };
 }
 
@@ -91,6 +92,17 @@ const make = Effect.gen(function* () {
           threadId,
         );
         return { stopping };
+      }),
+    mute_background_command: (input) =>
+      Effect.gen(function* () {
+        const { threadId } = yield* scope;
+        // An agent may mute only its own thread's commands.
+        const updated = yield* backgroundCommands.setMuted(
+          input.backgroundCommandId,
+          input.muted,
+          threadId,
+        );
+        return { updated };
       }),
   });
 });

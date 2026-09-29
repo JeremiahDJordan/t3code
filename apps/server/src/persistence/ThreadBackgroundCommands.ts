@@ -27,6 +27,7 @@ import {
 export const BackgroundCommandRow = Schema.Struct({
   ...ThreadBackgroundCommand.fields,
   notifyOn: Schema.NullOr(Schema.String),
+  muted: Schema.Boolean,
   jobDir: TrimmedNonEmptyString,
   tmuxSession: TrimmedNonEmptyString,
   stopRequestedAt: Schema.NullOr(IsoDateTime),
@@ -103,6 +104,11 @@ export class ThreadBackgroundCommandRepository extends Context.Service<
         readonly matchesAt: string | null;
       },
     ) => Effect.Effect<void, ThreadBackgroundCommandRepositoryError>;
+    /** Holds back or resumes a running command's messages; whether it was running. */
+    readonly setMuted: (
+      id: BackgroundCommandId,
+      muted: boolean,
+    ) => Effect.Effect<boolean, ThreadBackgroundCommandRepositoryError>;
     /** Records the matches an end message reported. */
     readonly recordEndMatches: (
       id: BackgroundCommandId,
@@ -122,10 +128,11 @@ export class ThreadBackgroundCommandRepository extends Context.Service<
 const RowFromSql = Schema.Struct({
   ...BackgroundCommandRow.fields,
   endNoticeSent: Schema.Number,
+  muted: Schema.Number,
 });
 
 function fromSql(row: typeof RowFromSql.Type): BackgroundCommandRow {
-  return { ...row, endNoticeSent: row.endNoticeSent !== 0 };
+  return { ...row, endNoticeSent: row.endNoticeSent !== 0, muted: row.muted !== 0 };
 }
 
 function toSqlOrDecodeError(sqlOperation: string) {
@@ -167,7 +174,8 @@ const make = Effect.gen(function* () {
       notify_on TEXT,
       match_notices_sent INTEGER NOT NULL DEFAULT 0,
       match_bytes_noticed INTEGER NOT NULL DEFAULT 0,
-      last_match_notice_at TEXT
+      last_match_notice_at TEXT,
+      muted INTEGER NOT NULL DEFAULT 0
     )
   `.pipe(Effect.orDie);
   // Columns added after the table first shipped.
@@ -181,6 +189,7 @@ const make = Effect.gen(function* () {
     ["match_notices_sent", "INTEGER NOT NULL DEFAULT 0"],
     ["match_bytes_noticed", "INTEGER NOT NULL DEFAULT 0"],
     ["last_match_notice_at", "TEXT"],
+    ["muted", "INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     if (!existing.has(name)) {
       yield* sql
@@ -220,7 +229,8 @@ const make = Effect.gen(function* () {
     notify_on AS "notifyOn",
     match_notices_sent AS "matchNoticesSent",
     match_bytes_noticed AS "matchBytesNoticed",
-    last_match_notice_at AS "lastMatchNoticeAt"
+    last_match_notice_at AS "lastMatchNoticeAt",
+    muted AS "muted"
   `;
 
   const findById = SqlSchema.findAll({
@@ -268,7 +278,7 @@ const make = Effect.gen(function* () {
                 next_check_in_at, note, tail_lines, stop_requested_by, stop_requested_at,
                 end_notice_sent, status_notices_sent, stdout_bytes_noticed, stderr_bytes_noticed,
                 missing_observations, notify_on, match_notices_sent, match_bytes_noticed,
-                last_match_notice_at
+                last_match_notice_at, muted
               ) VALUES (
                 ${row.id}, ${row.threadId}, ${row.command}, ${row.cwd}, ${row.jobDir},
                 ${row.stdoutPath}, ${row.stderrPath}, ${row.tmuxSession}, ${row.status},
@@ -277,7 +287,7 @@ const make = Effect.gen(function* () {
                 ${row.stopRequestedAt}, ${row.endNoticeSent ? 1 : 0}, ${row.statusNoticesSent},
                 ${row.stdoutBytesNoticed}, ${row.stderrBytesNoticed}, ${row.missingObservations},
                 ${row.notifyOn}, ${row.matchNoticesSent}, ${row.matchBytesNoticed},
-                ${row.lastMatchNoticeAt}
+                ${row.lastMatchNoticeAt}, ${row.muted ? 1 : 0}
               )
             `;
             return true;
@@ -340,6 +350,15 @@ const make = Effect.gen(function* () {
           last_match_notice_at = COALESCE(${notice.matchesAt}, last_match_notice_at)
         WHERE background_command_id = ${id} AND status = 'running'
       `.pipe(Effect.asVoid, Effect.mapError(write("recordBackgroundCommandNotice"))),
+    setMuted: (id, muted) =>
+      sql<{ readonly id: string }>`
+        UPDATE thread_background_commands SET muted = ${muted ? 1 : 0}
+        WHERE background_command_id = ${id} AND status = 'running'
+        RETURNING background_command_id AS "id"
+      `.pipe(
+        Effect.map((rows) => rows.length > 0),
+        Effect.mapError(write("muteBackgroundCommand")),
+      ),
     recordEndMatches: (id, matchBytes) =>
       sql`
         UPDATE thread_background_commands SET match_bytes_noticed = ${matchBytes}
