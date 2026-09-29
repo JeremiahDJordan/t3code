@@ -76,10 +76,9 @@ if (child.pid !== undefined) {
   try { writeFileSync(spec.pidPath, String(child.pid)); } catch {}
 }
 
-// Lines are tested on their first 4 KB, and at most 10,000 matches are recorded.
+// Lines are tested on their first 4 KB, so a huge line cannot stall the output behind a slow
+// pattern. Every match is recorded; the server reads the file a bounded piece at a time.
 const LINE_TEST_BYTES = 4096;
-const MAX_MATCHES = 10000;
-let matchCount = 0;
 const watchLines = (stream) => {
   if (!spec.notifyOn) return undefined;
   const ignoreCase = spec.notifyOn.startsWith("(?i)");
@@ -89,10 +88,9 @@ const watchLines = (stream) => {
   let pieces = [];
   let kept = 0;
   const test = () => {
-    if (kept === 0 || matchCount >= MAX_MATCHES) return;
+    if (kept === 0) return;
     const text = Buffer.concat(pieces).toString("utf8").replace(/\r$/, "");
     if (!pattern.test(text)) return;
-    matchCount += 1;
     try {
       appendFileSync(spec.matchesPath, JSON.stringify({ stream, offset: lineStart, line: text.slice(0, 500) }) + "\n");
     } catch {}
