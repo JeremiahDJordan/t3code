@@ -1000,6 +1000,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                   environmentId={props.environmentId}
                   threadId={props.selectedThread.id}
                   supported={props.serverConfig?.environment.capabilities.threadCheckIns === true}
+                  commandsSupported={
+                    props.serverConfig?.environment.capabilities.threadBackgroundCommands === true
+                  }
                 />
                 {usageLimitsReport && activeUserInputRequestId === null ? (
                   <Animated.View

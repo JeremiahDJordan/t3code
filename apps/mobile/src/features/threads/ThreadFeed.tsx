@@ -16,7 +16,7 @@ import type {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { isCheckInMessage } from "@t3tools/contracts";
+import { checkInMessageLabel } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import {
@@ -1640,8 +1640,8 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-foreground-secondary">
               {entry.pendingMessage && !entry.acknowledged
                 ? "Pending"
-                : isCheckInMessage(message.context?.records)
-                  ? `Check-in · ${timestampLabel}`
+                : checkInMessageLabel(message.context?.records)
+                  ? `${checkInMessageLabel(message.context?.records)} · ${timestampLabel}`
                   : timestampLabel}
             </Text>
             {entry.pendingMessage &&

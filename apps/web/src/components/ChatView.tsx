@@ -9,7 +9,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
-import { useCheckInBannerItem } from "./chat/useCheckInBannerItem";
+import { useBackgroundCommandBannerItem, useCheckInBannerItem } from "./chat/useCheckInBannerItem";
 import { derivePendingRequests } from "@t3tools/client-runtime/pending-requests";
 import {
   questionAttachmentDraftId,
@@ -6524,6 +6524,10 @@ export default function ChatView(props: ChatViewProps) {
     isServerThread ? routeThreadRef : null,
     serverConfig?.environment.capabilities.threadCheckIns === true,
   );
+  const backgroundCommandBannerItem = useBackgroundCommandBannerItem(
+    isServerThread ? routeThreadRef : null,
+    serverConfig?.environment.capabilities.threadBackgroundCommands === true,
+  );
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const backgroundLivenessItems =
       backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
@@ -6534,7 +6538,9 @@ export default function ChatView(props: ChatViewProps) {
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
-    const checkInItems = checkInBannerItem === null ? [] : [checkInBannerItem];
+    const checkInItems = [backgroundCommandBannerItem, checkInBannerItem].filter(
+      (item): item is ComposerBannerStackItem => item !== null,
+    );
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...feedbackBannerItems,
@@ -6599,6 +6605,7 @@ export default function ChatView(props: ChatViewProps) {
     ];
   }, [
     activeBranchMismatchKey,
+    backgroundCommandBannerItem,
     backgroundLivenessBannerItem,
     checkInBannerItem,
     feedbackBannerItems,

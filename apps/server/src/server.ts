@@ -91,8 +91,11 @@ import { ProviderCommandReactorLive } from "./orchestration/Layers/ProviderComma
 import { CheckpointReactorLive } from "./orchestration/Layers/CheckpointReactor.ts";
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReactor.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
 import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
+import * as ThreadBackgroundCommands from "./persistence/ThreadBackgroundCommands.ts";
 import * as ThreadCheckIns from "./persistence/ThreadCheckIns.ts";
+import * as TmuxServer from "./tmux/TmuxServer.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as PullRequestSyncReactor from "./orchestration/PullRequestSyncReactor.ts";
 import * as ThreadPullRequestReactor from "./orchestration/ThreadPullRequestReactor.ts";
@@ -264,6 +267,20 @@ const HttpServerLive = Layer.unwrap(
 
 const PlatformServicesLive = NodeServices.layer;
 
+// Check-ins and background commands share a change feed and the command repository, so they
+// are built together; background commands also need T3's private tmux server.
+const CheckInsLayerLive = BackgroundCommands.layer.pipe(
+  Layer.provideMerge(CheckInScheduler.layer),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      ThreadCheckIns.layer,
+      ThreadBackgroundCommands.layer,
+      ThreadBackgroundCommands.changesLayer,
+    ),
+  ),
+  Layer.provide(TmuxServer.layer.pipe(Layer.provide(ProcessRunner.layer))),
+);
+
 const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(OrchestrationReactorLive),
   Layer.provideMerge(ProviderRuntimeIngestionLive),
@@ -272,7 +289,7 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(StorageCleanup.layer),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
-  Layer.provideMerge(CheckInScheduler.layer.pipe(Layer.provide(ThreadCheckIns.layer))),
+  Layer.provideMerge(CheckInsLayerLive),
   Layer.provideMerge(PullRequestSyncReactor.layer),
   Layer.provideMerge(ThreadPullRequestReactor.layer),
   Layer.provideMerge(AgentAwarenessRelay.layer.pipe(Layer.provide(ServerSecretStore.layer))),
