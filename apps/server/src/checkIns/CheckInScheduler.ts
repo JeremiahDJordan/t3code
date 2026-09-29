@@ -1,4 +1,5 @@
 import {
+  BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES,
   CHECK_IN_CONTEXT_KIND,
   CHECK_INS_PER_THREAD_MAX,
   CheckInError,
@@ -38,9 +39,15 @@ import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   backgroundCommandEndText,
+  backgroundCommandMatchText,
   backgroundCommandStatusText,
+  type NoticedMatches,
   type NoticedOutput,
 } from "./backgroundCommandMessage.ts";
+import {
+  backgroundCommandMatchesPath,
+  parseBackgroundCommandMatches,
+} from "./backgroundCommandWrapper.ts";
 import { checkInMessageText } from "./checkInMessage.ts";
 
 export interface ScheduleCheckInInput {
@@ -92,8 +99,12 @@ const SWEEP_INTERVAL = "15 seconds";
 /** How much of an output file's end a message may quote, whatever the line count asked for. */
 const BACKGROUND_COMMAND_TAIL_MAX_BYTES = 4_096;
 
+/** How much of the matches file one message reads, and how many matches it quotes. */
+const MATCHES_READ_BYTES = 64 * 1024;
+const MATCHES_SHOWN = 20;
+
 type CommandNotice = {
-  readonly kind: "end" | "status";
+  readonly kind: "end" | "status" | "match";
   readonly row: ThreadBackgroundCommands.BackgroundCommandRow;
 };
 
@@ -361,6 +372,59 @@ const make = Effect.gen(function* () {
       }),
     ).pipe(Effect.orElseSucceed(() => undefined));
 
+  const matchesSize = (row: ThreadBackgroundCommands.BackgroundCommandRow) =>
+    fs.stat(backgroundCommandMatchesPath(row.jobDir)).pipe(
+      Effect.map((info) => Number(info.size)),
+      Effect.orElseSucceed(() => 0),
+    );
+
+  /**
+   * The matches the agent has not heard about: the first ones to quote, and how far into the
+   * matches file the message covers. A message that cannot quote them all points to the file
+   * and covers it to the end, so a pattern that matches too much cannot flood the thread.
+   */
+  const readNewMatches = (row: ThreadBackgroundCommands.BackgroundCommandRow) =>
+    Effect.gen(function* () {
+      if (row.notifyOn === null) return undefined;
+      const size = yield* matchesSize(row);
+      if (size <= row.matchBytesNoticed) return undefined;
+      const path = backgroundCommandMatchesPath(row.jobDir);
+      const length = Math.min(size - row.matchBytesNoticed, MATCHES_READ_BYTES);
+      const bytes = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const file = yield* fs.open(path, { flag: "r" });
+          yield* file.seek(BigInt(row.matchBytesNoticed), "start");
+          return Option.getOrElse(yield* file.readAlloc(length), () => new Uint8Array());
+        }),
+      ).pipe(Effect.orElseSucceed(() => new Uint8Array()));
+      // Only whole lines: the wrapper may be writing the last one.
+      const end = bytes.lastIndexOf(10);
+      if (end === -1) return undefined;
+      const all = parseBackgroundCommandMatches(new TextDecoder().decode(bytes.subarray(0, end)));
+      const readToEnd = row.matchBytesNoticed + length >= size;
+      return {
+        matches: {
+          path,
+          shown: all.slice(0, MATCHES_SHOWN),
+          more: all.length > MATCHES_SHOWN || !readToEnd,
+        } satisfies NoticedMatches,
+        bytes: readToEnd ? row.matchBytesNoticed + end + 1 : size,
+      };
+    });
+
+  /** Whether new matches are waiting and the last message about matches is far enough back. */
+  const matchesDue = (row: ThreadBackgroundCommands.BackgroundCommandRow, nowMs: number) =>
+    Effect.gen(function* () {
+      if (row.notifyOn === null) return false;
+      if (
+        row.lastMatchNoticeAt !== null &&
+        nowMs - Date.parse(row.lastMatchNoticeAt) < BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES * 60_000
+      ) {
+        return false;
+      }
+      return (yield* matchesSize(row)) > row.matchBytesNoticed;
+    });
+
   /** Tells the agent how a background command ended, then records that it was told. */
   const deliverCommandEnd = Effect.fn("CheckInScheduler.deliverCommandEnd")(function* (
     shell: OrchestrationThreadShell,
@@ -369,49 +433,69 @@ const make = Effect.gen(function* () {
   ) {
     const stdout = yield* noticedOutput(row.stdoutPath, row.stdoutBytesNoticed, row.tailLines);
     const stderr = yield* noticedOutput(row.stderrPath, row.stderrBytesNoticed, row.tailLines);
+    const found = yield* readNewMatches(row);
     yield* dispatchNotice(
       shell,
       {
         key: `background-command:${row.id}:end`,
-        text: backgroundCommandEndText(row, stdout, stderr),
+        text: backgroundCommandEndText(row, stdout, stderr, found?.matches),
         label: "Background command",
         payload: { backgroundCommandId: row.id },
       },
       nowMs,
     );
+    if (found) yield* commands.recordEndMatches(row.id, found.bytes);
     yield* commands.markEndNoticeSent(row.id);
     yield* PubSub.publish(commandChanges, row.threadId);
   });
 
-  /** A status update for a running command, unless it has in fact just ended. */
-  const deliverCommandStatus = Effect.fn("CheckInScheduler.deliverCommandStatus")(function* (
+  /**
+   * A message about a running command: a status update, or new lines matching its pattern.
+   * A status update also quotes new matches. Nothing is sent for a command that has in fact
+   * just ended, whose end message says it all.
+   */
+  const deliverCommandUpdate = Effect.fn("CheckInScheduler.deliverCommandUpdate")(function* (
     shell: OrchestrationThreadShell,
     row: ThreadBackgroundCommands.BackgroundCommandRow,
     nowMs: number,
+    kind: "status" | "match",
   ) {
     const ended = yield* fs
       .exists(`${row.jobDir}/exit-status`)
       .pipe(Effect.orElseSucceed(() => false));
     if (ended) return false;
+    const found = yield* readNewMatches(row);
+    if (kind === "match" && found === undefined) return false;
     const stdout = yield* noticedOutput(row.stdoutPath, row.stdoutBytesNoticed, row.tailLines);
     const stderr = yield* noticedOutput(row.stderrPath, row.stderrBytesNoticed, row.tailLines);
+    const status = kind === "status" || found === undefined;
     yield* dispatchNotice(
       shell,
-      {
-        key: `background-command:${row.id}:status:${row.statusNoticesSent + 1}`,
-        text: backgroundCommandStatusText(row, stdout, stderr, nowMs),
-        label: "Status update",
-        payload: { backgroundCommandId: row.id },
-      },
+      status
+        ? {
+            key: `background-command:${row.id}:status:${row.statusNoticesSent + 1}`,
+            text: backgroundCommandStatusText(row, stdout, stderr, nowMs, found?.matches),
+            label: "Status update",
+            payload: { backgroundCommandId: row.id },
+          }
+        : {
+            key: `background-command:${row.id}:match:${row.matchNoticesSent + 1}`,
+            text: backgroundCommandMatchText(row, stdout, stderr, nowMs, found.matches),
+            label: "Background command",
+            payload: { backgroundCommandId: row.id },
+          },
       nowMs,
     );
-    yield* commands.recordStatusNotice(row.id, {
+    yield* commands.recordNotice(row.id, {
+      kind: status ? "status" : "match",
       nextStatusAt:
-        row.statusEveryMinutes === null || row.nextStatusAt === null
-          ? null
-          : nextRepeatAt(row.nextStatusAt, row.statusEveryMinutes, nowMs),
+        status && row.statusEveryMinutes !== null && row.nextStatusAt !== null
+          ? nextRepeatAt(row.nextStatusAt, row.statusEveryMinutes, nowMs)
+          : row.nextStatusAt,
       stdoutBytes: stdout.bytes,
       stderrBytes: stderr.bytes,
+      matchBytes: found?.bytes ?? row.matchBytesNoticed,
+      matchesAt: found ? isoAt(nowMs) : null,
     });
     yield* PubSub.publish(commandChanges, row.threadId);
     return true;
@@ -442,7 +526,9 @@ const make = Effect.gen(function* () {
           ? { kind: "end", row }
           : row.nextStatusAt !== null && Date.parse(row.nextStatusAt) <= nowMs
             ? { kind: "status", row }
-            : undefined;
+            : (yield* matchesDue(row, nowMs))
+              ? { kind: "match", row }
+              : undefined;
       if (notice === undefined) continue;
       const due = commandNotices.get(row.threadId) ?? [];
       due.push(notice);
@@ -460,7 +546,8 @@ const make = Effect.gen(function* () {
       }
       if (!threadReadyForCheckIn(shell.value, nowMs)) continue;
       // One per sweep: the delivery starts a turn, and the next waits until that one ends. A
-      // command's end comes first, then check-ins in the order they fell due, then status.
+      // command's end comes first, then check-ins in the order they fell due, then a command's
+      // status or its matching lines.
       const notices = commandNotices.get(threadId) ?? [];
       const end = notices.find((notice) => notice.kind === "end");
       if (end) {
@@ -476,7 +563,8 @@ const make = Effect.gen(function* () {
         continue;
       }
       for (const notice of notices) {
-        if (yield* deliverCommandStatus(shell.value, notice.row, nowMs)) break;
+        if (notice.kind === "end") continue;
+        if (yield* deliverCommandUpdate(shell.value, notice.row, nowMs, notice.kind)) break;
       }
     }
     yield* publish(changed);

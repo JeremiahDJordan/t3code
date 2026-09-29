@@ -28,6 +28,7 @@ function commandSummaryOf(command: ThreadBackgroundCommand) {
     stdoutPath: command.stdoutPath,
     stderrPath: command.stderrPath,
     statusEveryMinutes: command.statusEveryMinutes,
+    notifyOn: command.notifyOn ?? null,
   };
 }
 
@@ -71,6 +72,7 @@ const make = Effect.gen(function* () {
           statusEveryMinutes: input.statusEveryMinutes ?? null,
           note: input.note ?? "",
           tailLines: input.tailLines ?? 0,
+          notifyOn: input.notifyOn ?? null,
         });
         return {
           backgroundCommandId: command.id,

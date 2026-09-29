@@ -192,8 +192,9 @@ The migrator runs only ids above the highest one a database has applied. A fork
 migration numbered 55 would make that database skip upstream's own 55 whenever it
 lands; a high number would skip every later upstream migration. So a fork table is
 created with `CREATE TABLE IF NOT EXISTS` when its repository layer starts
-(`persistence/ThreadCheckIns.ts`). If upstream takes the feature, it becomes a
-normal migration there.
+(`persistence/ThreadCheckIns.ts`), and a column added later is added there too, when
+`PRAGMA table_info` lacks it (`persistence/ThreadBackgroundCommands.ts`). If upstream
+takes the feature, it becomes a normal migration there.
 
 ### Keep check-ins and background commands inside T3 (owner, 2026-09-28)
 
@@ -254,6 +255,14 @@ text, or an event in flight, out of the thread; Bob's requests and the prompt's 
 still replayed, and Bob's task keeps the whole conversation. Acking after persistence
 needs a persisted watermark or replay deduplication, which changes relay and ingestion
 semantics for a tail fragment.
+
+### No write backpressure in the background-command wrapper (review 7)
+
+The wrapper writes a command's output to its log files without pausing the command when
+the writes fall behind. It also writes to its tmux pane, a synchronous TTY that already
+paces it, and measured queues stayed around 8 MiB for 32 MiB to 1 GiB of output. Pausing
+would instead risk losing output still in the pipe when the post-exit drain ends, on the
+same slow disks it targets.
 
 ### Show the Bob usage setting row everywhere
 
