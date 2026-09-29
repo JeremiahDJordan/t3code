@@ -1,4 +1,4 @@
-import { ArrowUpIcon, ClockIcon } from "lucide-react";
+import { AlarmClockIcon, ArrowUpIcon, ClockIcon } from "lucide-react";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -13,6 +13,7 @@ import {
 } from "./timelineMinimapItems";
 import {
   COMPOSER_CONTEXT_KINDS,
+  isCheckInMessage,
   type AssistantCitation,
   type EnvironmentId,
   type MessageId,
@@ -1985,6 +1986,8 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const resolvedContext = useMemo(() => resolveUserMessageContext(row.message), [row.message]);
+  // T3 sent it for a check-in the agent scheduled, not the user.
+  const isCheckIn = isCheckInMessage(resolvedContext.records);
   const previewImages = useMemo(
     () => userImages.filter((image) => image.name.startsWith("preview-annotation-")),
     [userImages],
@@ -2110,7 +2113,16 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   return (
     <div className="group flex flex-col items-end gap-1">
       <div className="relative max-w-[80%] rounded-2xl bg-message p-3 text-message-foreground">
-        <MessageAuthorHeading>You</MessageAuthorHeading>
+        <MessageAuthorHeading>{isCheckIn ? "T3 Code check-in" : "You"}</MessageAuthorHeading>
+        {isCheckIn ? (
+          <div
+            aria-hidden
+            className="mb-1.5 flex items-center gap-1 text-xs text-muted-foreground select-none"
+          >
+            <AlarmClockIcon className="size-3.5" />
+            Check-in
+          </div>
+        ) : null}
         {(regularImages.length > 0 || userVideos.length > 0) && (
           <div className="mb-2 grid max-w-[210px] grid-cols-2 gap-2">
             {regularImages.map((image) => (

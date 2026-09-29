@@ -42,6 +42,7 @@ import {
   type ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
+import { CheckInRepeatLimitHours, DEFAULT_CHECK_IN_REPEAT_LIMIT_HOURS } from "./checkIns.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -1100,6 +1101,8 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "defaultProjectScripts",
   "enableAgentBrowserAccess",
   "enableAgentDeviceAccess",
+  "enableAgentCheckIns",
+  "checkInRepeatLimitHours",
   "textGenerationModelSelection",
   "sourceControlWriterModelSelection",
   "sourceControlWritingStyle",
@@ -1127,6 +1130,8 @@ export const ProjectSettingsOverrides = Schema.Struct({
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableAgentCheckIns: Schema.optionalKey(Schema.Boolean),
+  checkInRepeatLimitHours: Schema.optionalKey(CheckInRepeatLimitHours),
   textGenerationModelSelection: Schema.optionalKey(ModelSelection),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   sourceControlWritingStyle: Schema.optionalKey(SourceControlWritingStyleSettings),
@@ -1254,6 +1259,15 @@ export const ServerSettings = Schema.Struct({
    * unaffected.
    */
   enableAgentDeviceAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Whether agents get T3's check-in tools, which schedule a message back into their own
+   * thread later. Each delivery is a turn, so it spends the provider's quota.
+   */
+  enableAgentCheckIns: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** How many hours a repeating check-in keeps going before it stops on its own. */
+  checkInRepeatLimitHours: CheckInRepeatLimitHours.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECK_IN_REPEAT_LIMIT_HOURS)),
+  ),
   /**
    * Whether this server may install and run T3's device helper processes.
    * Kept separate from agent access so enabling the user's Device panel does
@@ -1613,6 +1627,8 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableAgentCheckIns: Schema.optionalKey(Schema.Boolean),
+  checkInRepeatLimitHours: Schema.optionalKey(CheckInRepeatLimitHours),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),

@@ -5065,7 +5065,9 @@ describe("agent browser access", () => {
   const startSessionWith = (
     access: boolean | { readonly browser: boolean; readonly device: boolean },
     threadId: ThreadId,
-    projectOverride?: boolean | { readonly browser?: boolean; readonly device?: boolean },
+    projectOverride?:
+      | boolean
+      | { readonly browser?: boolean; readonly device?: boolean; readonly checkIns?: boolean },
     options?: { readonly withoutOrchestration?: boolean },
   ) =>
     Effect.gen(function* () {
@@ -5158,6 +5160,9 @@ describe("agent browser access", () => {
                         ...(projectOverride.browser !== undefined
                           ? { enableAgentBrowserAccess: projectOverride.browser }
                           : {}),
+                        ...(projectOverride.checkIns !== undefined
+                          ? { enableAgentCheckIns: projectOverride.checkIns }
+                          : {}),
                         ...(projectOverride.device !== undefined
                           ? { enableAgentDeviceAccess: projectOverride.device }
                           : {}),
@@ -5197,7 +5202,7 @@ describe("agent browser access", () => {
 
       const issued = yield* startSessionWith(false, threadId);
 
-      assert.deepEqual(issued, [{ threadId, capabilities: ["pull-requests"] }]);
+      assert.deepEqual(issued, [{ threadId, capabilities: ["check-ins", "pull-requests"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -5208,7 +5213,7 @@ describe("agent browser access", () => {
       const issued = yield* startSessionWith(true, threadId);
 
       assert.deepEqual(issued, [
-        { threadId, capabilities: ["device", "preview", "pull-requests"] },
+        { threadId, capabilities: ["check-ins", "device", "preview", "pull-requests"] },
       ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -5219,7 +5224,9 @@ describe("agent browser access", () => {
 
       const issued = yield* startSessionWith({ browser: false, device: true }, threadId);
 
-      assert.deepEqual(issued, [{ threadId, capabilities: ["device", "pull-requests"] }]);
+      assert.deepEqual(issued, [
+        { threadId, capabilities: ["check-ins", "device", "pull-requests"] },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -5227,7 +5234,7 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-project-browser-off");
       const issued = yield* startSessionWith({ browser: true, device: false }, threadId, false);
-      assert.deepEqual(issued, [{ threadId, capabilities: ["pull-requests"] }]);
+      assert.deepEqual(issued, [{ threadId, capabilities: ["check-ins", "pull-requests"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -5235,7 +5242,9 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-project-browser-off-device-on");
       const issued = yield* startSessionWith(true, threadId, false);
-      assert.deepEqual(issued, [{ threadId, capabilities: ["device", "pull-requests"] }]);
+      assert.deepEqual(issued, [
+        { threadId, capabilities: ["check-ins", "device", "pull-requests"] },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -5243,7 +5252,17 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-project-browser-on");
       const issued = yield* startSessionWith({ browser: false, device: false }, threadId, true);
-      assert.deepEqual(issued, [{ threadId, capabilities: ["preview", "pull-requests"] }]);
+      assert.deepEqual(issued, [
+        { threadId, capabilities: ["check-ins", "preview", "pull-requests"] },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a project can turn off agent check-ins", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-project-check-ins-off");
+      const issued = yield* startSessionWith(false, threadId, { checkIns: false });
+      assert.deepEqual(issued, [{ threadId, capabilities: ["pull-requests"] }]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -5253,7 +5272,9 @@ describe("agent browser access", () => {
       const issued = yield* startSessionWith({ browser: false, device: false }, threadId, {
         device: true,
       });
-      assert.deepEqual(issued, [{ threadId, capabilities: ["device", "pull-requests"] }]);
+      assert.deepEqual(issued, [
+        { threadId, capabilities: ["check-ins", "device", "pull-requests"] },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -5268,7 +5289,9 @@ describe("agent browser access", () => {
         { device: false },
         { withoutOrchestration: true },
       );
-      assert.deepEqual(issued, [{ threadId, capabilities: ["preview", "pull-requests"] }]);
+      assert.deepEqual(issued, [
+        { threadId, capabilities: ["check-ins", "preview", "pull-requests"] },
+      ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

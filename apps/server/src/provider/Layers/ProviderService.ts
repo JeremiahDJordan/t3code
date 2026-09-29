@@ -882,17 +882,20 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         (entry) => entry.enableAgentBrowserAccess !== undefined,
       );
       const deviceOverridden = entries.some((entry) => entry.enableAgentDeviceAccess !== undefined);
+      const checkInsOverridden = entries.some((entry) => entry.enableAgentCheckIns !== undefined);
       const environment = {
         browser: settings.enableAgentBrowserAccess,
         device: settings.enableAgentDeviceAccess,
+        checkIns: settings.enableAgentCheckIns,
       };
-      if (!browserOverridden && !deviceOverridden) return environment;
+      if (!browserOverridden && !deviceOverridden && !checkInsOverridden) return environment;
       // Provider-only runtimes may omit orchestration. An unresolved project
       // must not bypass an explicit project override, but a capability no
       // project overrides keeps its environment value.
       const denied = {
         browser: browserOverridden ? false : environment.browser,
         device: deviceOverridden ? false : environment.device,
+        checkIns: checkInsOverridden ? false : environment.checkIns,
       };
       if (Option.isNone(projectionQuery)) return denied;
       const thread = yield* projectionQuery.value.getThreadShellById(threadId);
@@ -901,13 +904,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return {
         browser: resolved.enableAgentBrowserAccess,
         device: resolved.enableAgentDeviceAccess,
+        checkIns: resolved.enableAgentCheckIns,
       };
     },
     Effect.catch((cause) =>
       Effect.logWarning(
         "Could not read server settings; withholding agent browser and device access for this session.",
         { cause },
-      ).pipe(Effect.as({ browser: false, device: false })),
+      ).pipe(Effect.as({ browser: false, device: false, checkIns: false })),
     ),
   );
 
@@ -918,6 +922,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const access = yield* agentAccessSettings(threadId);
     if (access.browser) capabilities.add("preview");
     if (access.device) capabilities.add("device");
+    if (access.checkIns) capabilities.add("check-ins");
     return capabilities;
   });
 

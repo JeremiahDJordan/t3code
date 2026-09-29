@@ -54,6 +54,7 @@ import {
   WorktreeSetupStreamEvent,
   WorktreeSetupSubscribeInput,
 } from "./worktreeSetup.ts";
+import { CancelCheckInInput, CheckInError, ThreadCheckIn, ThreadCheckInsInput } from "./checkIns.ts";
 import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
@@ -433,6 +434,8 @@ export const WS_METHODS = {
   subscribeVcsStatus: "subscribeVcsStatus",
   subscribeWorktreeSetup: "subscribeWorktreeSetup",
   worktreeSetupCancel: "worktreeSetup.cancel",
+  subscribeThreadCheckIns: "subscribeThreadCheckIns",
+  checkInCancel: "checkIns.cancel",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribePreviewEvents: "subscribePreviewEvents",
@@ -1038,6 +1041,20 @@ const WsWorktreeSetupCancelRpc = Rpc.make(WS_METHODS.worktreeSetupCancel, {
   error: EnvironmentAuthorizationError,
 });
 
+/** A thread's pending check-ins: the whole list first, then again after every change. */
+const WsSubscribeThreadCheckInsRpc = Rpc.make(WS_METHODS.subscribeThreadCheckIns, {
+  payload: ThreadCheckInsInput,
+  success: Schema.Array(ThreadCheckIn),
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsCheckInCancelRpc = Rpc.make(WS_METHODS.checkInCancel, {
+  payload: CancelCheckInInput,
+  success: Schema.Struct({ cancelled: Schema.Boolean }),
+  error: Schema.Union([CheckInError, EnvironmentAuthorizationError]),
+});
+
 const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
   payload: GitRunStackedActionInput,
   success: GitActionProgressEvent,
@@ -1480,6 +1497,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
   WsWorktreeSetupCancelRpc,
+  WsSubscribeThreadCheckInsRpc,
+  WsCheckInCancelRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,
