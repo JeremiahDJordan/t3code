@@ -61,7 +61,17 @@ export class ThreadBackgroundLivenessService extends Context.Service<
       readonly agentId?: string | undefined;
     }) => void;
 
-    /** Session death orphans all of a thread's background work. */
+    /**
+     * Work T3 runs for a thread itself, such as an agent's background command. It counts as
+     * "monitoring", and a provider session ending does not orphan it; T3 says when it ends.
+     */
+    readonly setServerWork: (input: {
+      readonly threadId: string;
+      readonly workId: string;
+      readonly live: boolean;
+    }) => void;
+
+    /** Session death orphans all of a thread's provider background work. */
     readonly clearThreadLiveness: (threadId: string) => void;
 
     /**
@@ -74,6 +84,7 @@ export class ThreadBackgroundLivenessService extends Context.Service<
 
 export function make(): ThreadBackgroundLivenessService["Service"] {
   const stateByThreadId = new Map<string, ThreadLivenessState>();
+  const serverWorkByThreadId = new Map<string, Set<string>>();
 
   const stateFor = (threadId: string): ThreadLivenessState => {
     const existing = stateByThreadId.get(threadId);
@@ -149,19 +160,24 @@ export function make(): ThreadBackgroundLivenessService["Service"] {
       bucket.add(input.taskId);
     },
 
+    setServerWork: ({ threadId, workId, live }) => {
+      const work = serverWorkByThreadId.get(threadId) ?? new Set<string>();
+      if (live) work.add(workId);
+      else work.delete(workId);
+      if (work.size > 0) serverWorkByThreadId.set(threadId, work);
+      else serverWorkByThreadId.delete(threadId);
+    },
+
     clearThreadLiveness: (threadId) => {
       stateByThreadId.delete(threadId);
     },
 
     getThreadBackgroundLiveness: (threadId) => {
       const state = stateByThreadId.get(threadId);
-      if (!state) {
-        return null;
-      }
-      if (state.agents.size > 0) {
+      if (state && state.agents.size > 0) {
         return "working";
       }
-      if (state.monitors.size > 0) {
+      if ((state && state.monitors.size > 0) || serverWorkByThreadId.has(threadId)) {
         return "monitoring";
       }
       return null;

@@ -226,4 +226,23 @@ describe("ThreadBackgroundLiveness", () => {
     a.clearThreadLiveness("t");
     expect(a.getThreadBackgroundLiveness("t")).toBeNull();
   });
+
+  it("keeps work T3 runs itself live when the provider session ends", () => {
+    const liveness = ThreadBackgroundLiveness.make();
+    liveness.setServerWork({ threadId: "t", workId: "bg-1", live: true });
+    expect(liveness.getThreadBackgroundLiveness("t")).toBe("monitoring");
+    // Agent work still reads as working while it runs.
+    liveness.recordTaskLiveness({
+      threadId: "t",
+      taskId: "a1",
+      taskType: "local_agent",
+      status: undefined,
+      kind: "started",
+    });
+    expect(liveness.getThreadBackgroundLiveness("t")).toBe("working");
+    liveness.clearThreadLiveness("t");
+    expect(liveness.getThreadBackgroundLiveness("t")).toBe("monitoring");
+    liveness.setServerWork({ threadId: "t", workId: "bg-1", live: false });
+    expect(liveness.getThreadBackgroundLiveness("t")).toBeNull();
+  });
 });
