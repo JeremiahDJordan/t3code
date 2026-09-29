@@ -27,6 +27,7 @@ import {
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsControlRow } from "./components/SettingsControlRow";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { CheckInHoursField } from "./components/CheckInHoursField";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
@@ -48,7 +49,12 @@ const PAGE_TITLES: Record<SettingsPage, string> = {
 const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettingKey[]> = {
   "new-threads": ["defaultThreadEnvMode", "worktreeSubmodules", "defaultRuntimeMode"],
   "source-control": ["defaultAutoPull", "newWorktreesStartFromOrigin"],
-  "agent-behavior": ["responseStreamingMode", "enableAgentBrowserAccess"],
+  "agent-behavior": [
+    "responseStreamingMode",
+    "enableAgentBrowserAccess",
+    "enableAgentCheckIns",
+    "checkInRepeatLimitHours",
+  ],
   maintenance: ["continueThreadsAfterServerUpdate"],
 };
 
@@ -395,6 +401,27 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       disabled={disabledFor("enableAgentBrowserAccess")}
                       onValueChange={(value) => write({ enableAgentBrowserAccess: value })}
                     />
+                  </SettingsSection>
+                  <SettingsSection title="Check-ins">
+                    <FanoutSwitchRow
+                      icon="clock"
+                      label="Agent check-ins"
+                      subtitle="Let agents schedule a message back into their thread later. Each check-in is a turn."
+                      value={uniform("enableAgentCheckIns")}
+                      disabled={disabledFor("enableAgentCheckIns")}
+                      onValueChange={(value) => write({ enableAgentCheckIns: value })}
+                    />
+                    <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
+                      <View className="w-[22px] android:w-6" />
+                      <Text className="flex-1 text-foreground text-lg android:text-base">
+                        Repeats end after (hours)
+                      </Text>
+                      <CheckInHoursField
+                        value={uniform("checkInRepeatLimitHours")}
+                        disabled={disabledFor("checkInRepeatLimitHours")}
+                        onValueChange={(hours) => write({ checkInRepeatLimitHours: hours })}
+                      />
+                    </View>
                   </SettingsSection>
                 </>
               ) : null}

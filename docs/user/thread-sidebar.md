@@ -176,3 +176,18 @@ Choose **Snooze → Custom…** from a thread's menu to pick a date and time in 
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
 several selected threads together. Choose **Wake thread** to bring a thread back early.
+
+## Let the agent check back later
+
+An agent can schedule a check-in: a message T3 Code sends back into the thread later, once or
+on repeat, so it can look at a long build, CI run or deploy without you asking. Ask in your own
+words, such as "check on the build every 20 minutes". A check-in arrives as a new turn once the
+agent is idle and never interrupts a turn; a repeat that falls due while the agent is still
+working is skipped. Each check-in is a turn, so it uses your provider's quota.
+
+Scheduled check-ins show above the composer, each with **Cancel**, and the messages they send are
+labeled **Check-in**. A thread holds at most five, and archiving it cancels them. Repeating
+check-ins stop after 24 hours unless you change that in **Settings → Integrations → Check-ins**,
+where you can also turn check-ins off for all projects or one. On mobile, open **Settings →
+Server settings → Agent behavior**. Turning check-ins off stops agents scheduling new ones;
+cancel any already scheduled from the thread.
