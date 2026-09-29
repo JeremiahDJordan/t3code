@@ -48,8 +48,8 @@ let ended = false;
 const writeStatus = (status) => {
   if (ended) return;
   ended = true;
+  // Never recreates the job folder: it is gone only when its thread was deleted.
   try {
-    mkdirSync(dirname(spec.exitPath), { recursive: true });
     writeFileSync(spec.exitPath + ".tmp", JSON.stringify({ startedAt, endedAt: new Date().toISOString(), ...status }));
     renameSync(spec.exitPath + ".tmp", spec.exitPath);
   } catch {}

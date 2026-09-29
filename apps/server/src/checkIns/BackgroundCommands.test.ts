@@ -8,22 +8,29 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationCommand,
+  type OrchestrationEvent,
   type OrchestrationThreadShell,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as ThreadBackgroundCommands from "../persistence/ThreadBackgroundCommands.ts";
 import * as ThreadCheckIns from "../persistence/ThreadCheckIns.ts";
@@ -76,10 +83,15 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
     | ThreadBackgroundCommands.ThreadBackgroundCommandRepository
   >;
   readonly runtimeMode?: RuntimeMode;
+  /** Domain events the services see, for tests that drive them. */
+  readonly events?: Stream.Stream<OrchestrationEvent>;
+  /** Changes the thread as the services read it, each time they do. */
+  readonly adjustThread?: (shell: OrchestrationThreadShell) => OrchestrationThreadShell;
 }) {
   const dispatched = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
   const layer = BackgroundCommands.layer.pipe(
     Layer.provideMerge(CheckInScheduler.layer),
+    Layer.provideMerge(ThreadBackgroundLiveness.layer),
     Layer.provideMerge(ThreadBackgroundCommands.changesLayer),
     Layer.provide(Layer.succeedContext(options.persistence)),
     Layer.provide(TmuxServer.layer.pipe(Layer.provide(ProcessRunner.layer))),
@@ -90,13 +102,14 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
         Layer.mock(OrchestrationEngineService)({
           dispatch: (command) =>
             Ref.update(dispatched, (all) => [...all, command]).pipe(Effect.as({ sequence: 1 })),
-          subscribeDomainEvents: Effect.succeed(Stream.empty),
+          subscribeDomainEvents: Effect.succeed(options.events ?? Stream.empty),
         }),
         Layer.mock(ProjectionSnapshotQuery)({
           getThreadShellById: () =>
-            Effect.succeed(
-              Option.some(thread(options.workspace, options.runtimeMode ?? "full-access")),
-            ),
+            Effect.sync(() => {
+              const shell = thread(options.workspace, options.runtimeMode ?? "full-access");
+              return Option.some(options.adjustThread?.(shell) ?? shell);
+            }),
           getProjectShellById: () => Effect.succeed(Option.none()),
         }),
         Layer.mock(TerminalManager)({}),
@@ -108,13 +121,14 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
   return {
     commands: Context.get(context, BackgroundCommands.BackgroundCommands),
     scheduler: Context.get(context, CheckInScheduler.CheckInScheduler),
+    liveness: Context.get(context, ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
     dispatched,
   };
 });
 
 const buildPersistence = Layer.build(
   Layer.mergeAll(ThreadCheckIns.layer, ThreadBackgroundCommands.layer).pipe(
-    Layer.provide(SqlitePersistenceMemory),
+    Layer.provideMerge(SqlitePersistenceMemory),
   ),
 );
 
@@ -131,6 +145,39 @@ const untilEnded = (
       yield* Effect.sleep("100 millis");
     }
     yield* scheduler.runDueNow;
+  });
+
+/** The command's process group, once its wrapper has recorded it; nothing announces that. */
+const untilPid = (jobDir: string) =>
+  Effect.gen(function* () {
+    const pidPath = NodePath.join(jobDir, "pid");
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const pid = NodeFS.existsSync(pidPath)
+        ? Number.parseInt(NodeFS.readFileSync(pidPath, "utf8"), 10)
+        : Number.NaN;
+      if (Number.isInteger(pid) && pid > 1) return pid;
+      yield* Effect.sleep("50 millis");
+    }
+    return yield* Effect.die(new Error(`no pid recorded in ${jobDir}`));
+  });
+
+function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/** Whether a process has gone, allowing its parent a moment to reap it. */
+const untilGone = (pid: number) =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (processGone(pid)) return true;
+      yield* Effect.sleep("50 millis");
+    }
+    return false;
   });
 
 const texts = (commands: ReadonlyArray<OrchestrationCommand>) =>
@@ -206,7 +253,10 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
           }),
         );
         const second = yield* makeHarness({ ...dirs, persistence });
+        // The thread shows as monitoring from the moment the new server is up, until it ends.
+        expect(second.liveness.getThreadBackgroundLiveness(THREAD_ID)).toBe("monitoring");
         yield* untilEnded(second.commands, second.scheduler);
+        expect(second.liveness.getThreadBackgroundLiveness(THREAD_ID)).toBeNull();
 
         expect(NodeFS.readFileSync(started.stdoutPath, "utf8")).toBe("done\n");
         expect(texts(yield* Ref.get(second.dispatched))[0]).toContain("finished: exit 0");
@@ -338,6 +388,40 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
     ),
   );
 
+  it.live("stops an idle thread's commands when the thread is interrupted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        const { commands, scheduler, dispatched } = yield* makeHarness({
+          ...dirs,
+          persistence,
+          events: Stream.fromQueue(events),
+        });
+        yield* commands.watch();
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        yield* Effect.sleep("300 millis");
+        // The Monitoring banner's Stop: an interrupt while no turn runs.
+        yield* Queue.offer(events, {
+          type: "thread.turn-interrupt-requested",
+          payload: { threadId: THREAD_ID, createdAt: "2026-09-28T12:00:00.000Z" },
+        } as OrchestrationEvent);
+        yield* untilEnded(commands, scheduler);
+        expect(texts(yield* Ref.get(dispatched))[0]).toContain("The user stopped `sleep 30`");
+        expect(NodeFS.existsSync(started.stdoutPath)).toBe(true);
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
   it.live("refuses a thread that is not in Full access", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -359,6 +443,331 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
           }),
         );
         expect(refused.detail).toContain("Full access");
+      }),
+    ),
+  );
+
+  it.live("never signals or waits on a pid recorded before the last boot", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const { commands } = yield* makeHarness({ ...dirs, persistence });
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        const jobDir = NodePath.dirname(started.stdoutPath);
+        const exitPath = NodePath.join(jobDir, "exit-status");
+        // The machine restarts: the command ends without T3 hearing how...
+        process.kill(-(yield* untilPid(jobDir)), "SIGKILL");
+        for (let attempt = 0; attempt < 100 && !NodeFS.existsSync(exitPath); attempt += 1) {
+          yield* Effect.sleep("50 millis");
+        }
+        NodeFS.rmSync(exitPath);
+        yield* SqlClient.SqlClient.pipe(
+          Effect.flatMap(
+            (sql) => sql`
+              UPDATE thread_background_commands SET started_at = '2000-01-01T00:00:00.000Z'
+              WHERE background_command_id = ${started.id}
+            `,
+          ),
+          Effect.provide(persistence),
+        );
+        // ...and its old pid now leads an unrelated process group.
+        const unrelated = NodeChildProcess.spawn("sleep", ["30"], {
+          detached: true,
+          stdio: "ignore",
+        });
+        NodeFS.writeFileSync(NodePath.join(jobDir, "pid"), String(unrelated.pid));
+
+        // The stop leaves that process alone, and the command still counts as ended.
+        expect(yield* commands.stop(started.id, "user")).toBe(true);
+        for (let poll = 0; poll < 100; poll += 1) {
+          yield* commands.pollNow;
+          if ((yield* commands.list(THREAD_ID))[0]?.status !== "running") break;
+        }
+        expect((yield* commands.list(THREAD_ID))[0]?.status).toBe("stopped");
+        expect(unrelated.exitCode).toBeNull();
+        expect(unrelated.signalCode).toBeNull();
+        unrelated.kill("SIGKILL");
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("kills an archived thread's commands at once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        const { commands } = yield* makeHarness({
+          ...dirs,
+          persistence,
+          events: Stream.fromQueue(events),
+        });
+        yield* commands.watch();
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        const pid = yield* untilPid(NodePath.dirname(started.stdoutPath));
+        const lists = yield* Stream.toQueue(commands.stream(THREAD_ID), { capacity: "unbounded" });
+        expect(yield* Queue.take(lists)).toHaveLength(1);
+
+        yield* Queue.offer(events, {
+          type: "thread.archived",
+          payload: {
+            threadId: THREAD_ID,
+            archivedAt: "2026-09-28T12:00:00.000Z",
+            updatedAt: "2026-09-28T12:00:00.000Z",
+          },
+        } as OrchestrationEvent);
+        expect(yield* Queue.take(lists)).toEqual([]);
+        expect(yield* untilGone(pid)).toBe(true);
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("kills a deleted thread's commands and leaves no output folder behind", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        const { commands } = yield* makeHarness({
+          ...dirs,
+          persistence,
+          events: Stream.fromQueue(events),
+        });
+        yield* commands.watch();
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        const jobDir = NodePath.dirname(started.stdoutPath);
+        const pid = yield* untilPid(jobDir);
+        // The wrapper outlives its session, so it is what could write into the folder later.
+        const wrapperPid = Number.parseInt(
+          NodeChildProcess.execFileSync("ps", ["-o", "ppid=", "-p", String(pid)]).toString(),
+          10,
+        );
+        const lists = yield* Stream.toQueue(commands.stream(THREAD_ID), { capacity: "unbounded" });
+        expect(yield* Queue.take(lists)).toHaveLength(1);
+
+        yield* Queue.offer(events, {
+          type: "thread.deleted",
+          payload: { threadId: THREAD_ID, deletedAt: "2026-09-28T12:00:00.000Z" },
+        } as OrchestrationEvent);
+        expect(yield* Queue.take(lists)).toEqual([]);
+        expect(yield* untilGone(pid)).toBe(true);
+        expect(yield* untilGone(wrapperPid)).toBe(true);
+        expect(NodeFS.existsSync(jobDir)).toBe(false);
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("kills a command whose stop is first seen past the last stage", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const repository = Context.get(
+          persistence,
+          ThreadBackgroundCommands.ThreadBackgroundCommandRepository,
+        );
+        const { commands, scheduler, dispatched } = yield* makeHarness({ ...dirs, persistence });
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        const pid = yield* untilPid(NodePath.dirname(started.stdoutPath));
+        // Asked a minute ago, by a server that went down before it signalled anything.
+        const askedAt = DateTime.formatIso(
+          DateTime.makeUnsafe((yield* Clock.currentTimeMillis) - 60_000),
+        );
+        expect(yield* repository.requestStop(started.id, "user", askedAt)).toBe(true);
+
+        yield* untilEnded(commands, scheduler);
+        expect((yield* repository.get(started.id))?.status).toBe("stopped");
+        expect(yield* untilGone(pid)).toBe(true);
+        expect(texts(yield* Ref.get(dispatched))[0]).toContain("The user stopped `sleep 30`");
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("forgets an archived thread's command ends the agent has not heard about", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        // The agent waits on the user, so it hears nothing yet.
+        let waitingOnUser = true;
+        const { commands, scheduler, dispatched } = yield* makeHarness({
+          ...dirs,
+          persistence,
+          events: Stream.fromQueue(events),
+          adjustThread: (shell) => ({ ...shell, hasPendingUserInput: waitingOnUser }),
+        });
+        yield* commands.watch();
+        yield* commands.start({
+          threadId: THREAD_ID,
+          command: "exit 0",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        // It ends while the agent waits.
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          yield* commands.pollNow;
+          if ((yield* commands.list(THREAD_ID))[0]?.status !== "running") break;
+          yield* Effect.sleep("50 millis");
+        }
+        yield* scheduler.runDueNow;
+        expect(texts(yield* Ref.get(dispatched))).toEqual([]);
+        const lists = yield* Stream.toQueue(commands.stream(THREAD_ID), { capacity: "unbounded" });
+        expect(yield* Queue.take(lists)).toMatchObject([{ status: "exited" }]);
+
+        yield* Queue.offer(events, {
+          type: "thread.archived",
+          payload: {
+            threadId: THREAD_ID,
+            archivedAt: "2026-09-28T12:00:00.000Z",
+            updatedAt: "2026-09-28T12:00:00.000Z",
+          },
+        } as OrchestrationEvent);
+        expect(yield* Queue.take(lists)).toEqual([]);
+        // Unarchived and answered later, the thread gets no turn about it.
+        waitingOnUser = false;
+        yield* scheduler.runDueNow;
+        expect(texts(yield* Ref.get(dispatched))).toEqual([]);
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("leaves the commands running when an interrupt names a turn that has just ended", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const events = yield* Queue.unbounded<OrchestrationEvent>();
+        const { commands, scheduler, dispatched } = yield* makeHarness({
+          ...dirs,
+          persistence,
+          events: Stream.fromQueue(events),
+        });
+        yield* commands.watch();
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        const pid = yield* untilPid(NodePath.dirname(started.stdoutPath));
+        // Events are handled in order, so another thread's archive marks when this one is done.
+        const otherThread = ThreadId.make("thread-2");
+        const otherLists = yield* Stream.toQueue(commands.stream(otherThread), {
+          capacity: "unbounded",
+        });
+        yield* Queue.take(otherLists);
+
+        // The composer's Stop, which lost the race with the turn's end.
+        yield* Queue.offer(events, {
+          type: "thread.turn-interrupt-requested",
+          payload: {
+            threadId: THREAD_ID,
+            turnId: TurnId.make("turn-1"),
+            createdAt: "2026-09-28T12:00:00.000Z",
+          },
+        } as OrchestrationEvent);
+        yield* Queue.offer(events, {
+          type: "thread.archived",
+          payload: {
+            threadId: otherThread,
+            archivedAt: "2026-09-28T12:00:00.000Z",
+            updatedAt: "2026-09-28T12:00:00.000Z",
+          },
+        } as OrchestrationEvent);
+        yield* Queue.take(otherLists);
+        expect(yield* commands.list(THREAD_ID)).toMatchObject([
+          { status: "running", stopRequestedBy: null },
+        ]);
+        expect(() => process.kill(pid, 0)).not.toThrow();
+
+        // The Monitoring banner's Stop names no turn, and still stops it.
+        yield* Queue.offer(events, {
+          type: "thread.turn-interrupt-requested",
+          payload: { threadId: THREAD_ID, createdAt: "2026-09-28T12:00:01.000Z" },
+        } as OrchestrationEvent);
+        yield* untilEnded(commands, scheduler);
+        expect(texts(yield* Ref.get(dispatched))[0]).toContain("The user stopped `sleep 30`");
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
+  it.live("notes a command's end in its thread, even when no turn follows", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const { commands, scheduler, liveness, dispatched } = yield* makeHarness({
+          ...dirs,
+          persistence,
+        });
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        expect(liveness.getThreadBackgroundLiveness(THREAD_ID)).toBe("monitoring");
+        yield* untilPid(NodePath.dirname(started.stdoutPath));
+        // The agent stops it itself, so it is told nothing and no turn starts.
+        expect(yield* commands.stop(started.id, "agent")).toBe(true);
+        yield* untilEnded(commands, scheduler);
+
+        // The event this makes is what has clients reload the thread, no longer monitoring.
+        expect(yield* Ref.get(dispatched)).toMatchObject([
+          {
+            type: "thread.activity.append",
+            threadId: THREAD_ID,
+            activity: {
+              kind: "background-command.ended",
+              summary: "Background command stopped",
+              payload: { backgroundCommandId: started.id, data: { command: "sleep 30" } },
+            },
+          },
+        ]);
+        expect(liveness.getThreadBackgroundLiveness(THREAD_ID)).toBeNull();
+        stopTestTmux(dirs.home);
       }),
     ),
   );
