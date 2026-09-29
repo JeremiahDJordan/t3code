@@ -63,6 +63,7 @@ import {
 import {
   BackgroundCommandError,
   BackgroundCommandInput,
+  SetBackgroundCommandMutedInput,
   ThreadBackgroundCommand,
   ThreadBackgroundCommandsInput,
 } from "./backgroundCommands.ts";
@@ -449,6 +450,7 @@ export const WS_METHODS = {
   checkInCancel: "checkIns.cancel",
   subscribeThreadBackgroundCommands: "subscribeThreadBackgroundCommands",
   backgroundCommandStop: "backgroundCommands.stop",
+  backgroundCommandSetMuted: "backgroundCommands.setMuted",
   backgroundCommandOpenTerminal: "backgroundCommands.openTerminal",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
@@ -1089,6 +1091,13 @@ const WsBackgroundCommandStopRpc = Rpc.make(WS_METHODS.backgroundCommandStop, {
   error: Schema.Union([BackgroundCommandError, EnvironmentAuthorizationError]),
 });
 
+/** Holds back or resumes a command's status updates and matching-line messages. */
+const WsBackgroundCommandSetMutedRpc = Rpc.make(WS_METHODS.backgroundCommandSetMuted, {
+  payload: SetBackgroundCommandMutedInput,
+  success: Schema.Struct({ updated: Schema.Boolean }),
+  error: Schema.Union([BackgroundCommandError, EnvironmentAuthorizationError]),
+});
+
 /** Opens (or reuses) a thread terminal attached to the command's tmux session. */
 const WsBackgroundCommandOpenTerminalRpc = Rpc.make(WS_METHODS.backgroundCommandOpenTerminal, {
   payload: BackgroundCommandInput,
@@ -1542,6 +1551,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCheckInCancelRpc,
   WsSubscribeThreadBackgroundCommandsRpc,
   WsBackgroundCommandStopRpc,
+  WsBackgroundCommandSetMutedRpc,
   WsBackgroundCommandOpenTerminalRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,

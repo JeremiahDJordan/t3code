@@ -181,7 +181,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   threadCheckIns: Schema.optionalKey(Schema.Boolean),
   /** Server runs agents' background commands and streams each thread's
       (`subscribeThreadBackgroundCommands`, `backgroundCommands.stop`,
-      `backgroundCommands.openTerminal`). Absent on servers without them. */
+      `backgroundCommands.openTerminal`, and `backgroundCommands.setMuted` where commands
+      carry `muted`). Absent on servers without them. */
   threadBackgroundCommands: Schema.optionalKey(Schema.Boolean),
   /** Server detects `platform.machine` and persists the `environmentIcon`
       setting. Older servers drop the key on write, so clients show the
