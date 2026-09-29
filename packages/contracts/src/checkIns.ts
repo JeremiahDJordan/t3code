@@ -77,12 +77,16 @@ export function isCheckInMessage(
 
 /**
  * The label a message T3 sent carries, such as "Check-in" or "Background command", or null for
- * a message the user sent.
+ * a message the user sent. A message with several parts carries each distinct label in order,
+ * such as "Background command · Check-in".
  */
 export function checkInMessageLabel(
   records: ReadonlyArray<{ readonly kind: string; readonly label?: string }> | undefined,
 ): string | null {
-  const record = records?.find((candidate) => candidate.kind === CHECK_IN_CONTEXT_KIND);
-  if (record === undefined) return null;
-  return record.label?.trim() || "Check-in";
+  const labels = new Set(
+    (records ?? [])
+      .filter((record) => record.kind === CHECK_IN_CONTEXT_KIND)
+      .map((record) => record.label?.trim() || "Check-in"),
+  );
+  return labels.size === 0 ? null : [...labels].join(" · ");
 }
