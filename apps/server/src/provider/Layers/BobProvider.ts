@@ -29,6 +29,7 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import type { AcpSessionMode } from "../acp/AcpRuntimeModel.ts";
+import { BOB_TMUX_MISSING_MESSAGE } from "../acp/BobRelay.ts";
 import {
   BOB_API_KEY_ALIAS_ENV,
   BOB_API_KEY_ENV,
@@ -249,6 +250,20 @@ export const checkBobProviderStatus = Effect.fn("checkBobProviderStatus")(functi
         : {}),
   });
 });
+
+/**
+ * An instance set to run Bob in tmux cannot start a session without tmux, so a status that
+ * would otherwise be usable says so. An earlier problem, such as Bob missing, stays first.
+ */
+export function withBobSessionHostStatus<A extends ServerProviderDraft>(
+  snapshot: A,
+  tmuxAvailable: boolean,
+): A {
+  if (tmuxAvailable || (snapshot.status !== "ready" && snapshot.status !== "warning")) {
+    return snapshot;
+  }
+  return { ...snapshot, status: "error", message: BOB_TMUX_MISSING_MESSAGE };
+}
 
 /** The workspaces whose commands Bob's snapshot keeps, the registry's limit too. */
 const MAX_BOB_WORKSPACES = 16;

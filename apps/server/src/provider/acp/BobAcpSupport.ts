@@ -218,16 +218,15 @@ function exportedTaskInFolder(task: Record<string, unknown>, cwd: string): Recor
 }
 
 /**
- * Moves a Bob task into `cwd` and returns the id Bob gave it there, or undefined when the task
+ * Copies a Bob task into `cwd` and returns the id Bob gave the copy, or undefined when the task
  * cannot move (gone, or a Bob before 2.0.5). Bob resumes a task only in the folder it started
  * in, so a thread that moved to another folder, such as a worktree, would otherwise lose its
- * conversation. Bob copies the task with `_bob/task/export` and `_bob/task/import`; the original
- * is then deleted, so Bob's history and Bobcoin totals count the conversation once.
+ * conversation. Bob copies the task with `_bob/task/export` and `_bob/task/import`. The caller
+ * deletes the original once the copy opens, so Bob's history and Bobcoin totals count the
+ * conversation once, and deletes the copy instead when it does not open.
  *
- * Best effort, with two accepted gaps. The original is deleted before T3 stores the new id, so
- * a crash in between leaves the thread pointing at a deleted task, and its next turn starts a
- * new conversation with a warning. The timeout covers all three requests, so one that fires
- * after the import leaves two copies of the task in Bob's history.
+ * Best effort, with an accepted gap: the timeout covers both requests, so one that fires after
+ * the import, like T3 stopping before the copy opens, leaves both in Bob's history.
  */
 export const moveBobTask = (
   runtime: Pick<AcpSessionRuntime.AcpSessionRuntime["Service"], "request">,
@@ -247,9 +246,7 @@ export const moveBobTask = (
     const imported = decodeBobTaskImport(
       yield* runtime.request("_bob/task/import", { cwd, snapshot }),
     );
-    if (imported._tag === "None") return undefined;
-    yield* deleteBobSession(runtime, sessionId);
-    return imported.value.sessionIds[0];
+    return imported._tag === "Some" ? imported.value.sessionIds[0] : undefined;
   }).pipe(
     Effect.timeoutOption(BOB_TASK_MOVE_TIMEOUT),
     Effect.map((moved) => (moved._tag === "Some" ? moved.value : undefined)),

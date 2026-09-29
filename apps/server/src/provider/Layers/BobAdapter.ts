@@ -10,6 +10,7 @@
 import {
   ApprovalRequestId,
   BOB_DEFAULT_MODEL,
+  EnvironmentId,
   type BobSettings,
   EventId,
   type ProviderApprovalDecision,
@@ -49,8 +50,10 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { ServerActivation } from "../../serverActivation.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -76,6 +79,15 @@ import {
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import {
+  BOB_TMUX_MISSING_MESSAGE,
+  type BobRelayHost,
+  type BobRelayLink,
+  type BobRelayMeta,
+  type BobRelayTool,
+  readBobRelayMeta,
+  toBobRelayTool,
+} from "../acp/BobRelay.ts";
 import {
   type BobRewindCut,
   closeBobSession,
@@ -143,6 +155,11 @@ export interface BobAdapterLiveOptions {
    * spent Bobcoins (`spent`). Runs in the background, so a turn never waits for the gateway.
    */
   readonly refreshUsageLimits?: (cwd: string, spent: boolean) => Effect.Effect<void>;
+  /**
+   * Runs each Bob under a relay in T3's tmux server, so Bob outlives T3 and a turn running when
+   * T3 stops finishes after it starts again. Without it Bob is T3's child process.
+   */
+  readonly relay?: BobRelayHost;
 }
 
 interface PendingApproval {
@@ -205,6 +222,12 @@ interface BobSessionContext {
    * `cancelled` once the prompt was cancelled for it. Cleared when that prompt returns.
    */
   steer: "waiting" | "cancelled" | undefined;
+  /**
+   * Follow-ups waiting for the running prompt, counted for a session in tmux. They live only in
+   * this T3, so the relay keeps the count, and a T3 that takes the turn over after a restart says
+   * they were lost.
+   */
+  waitingPrompts: number;
   /** Counts Stop requests. A prompt waiting to be sent when Stop is pressed is dropped. */
   interrupts: number;
   /**
@@ -218,6 +241,13 @@ interface BobSessionContext {
   /** Whether this Bob closes sessions with `session/close` (Bob 2.0.5). */
   readonly canCloseSessions: boolean;
   stopped: boolean;
+  /** The relay Bob runs under, for an instance that runs Bob in tmux. */
+  readonly relay: BobRelayLink | undefined;
+  /**
+   * A session taken over after a restart whose MCP credential this T3 could not take back ends
+   * once its turn does, so the next turn starts a fresh Bob on the same task with T3's tools.
+   */
+  recycleWhenIdle: boolean;
 }
 
 function settlePendingApprovalsAsCancelled(
@@ -355,8 +385,13 @@ export function decodeBobTitle(title: string): string {
  * output, and a command arrives as the title with no `rawInput`. Carrying both forward keeps
  * every update showing the command instead of a generic tool.
  */
-function makeBobToolCallNormalizer() {
-  const tools = new Map<string, { title?: string; kind?: EffectAcpSchema.ToolKind }>();
+function makeBobToolCallNormalizer(open: ReadonlyArray<BobRelayTool> = []) {
+  const tools = new Map<string, { title?: string; kind?: EffectAcpSchema.ToolKind }>(
+    open.map((tool) => [
+      tool.toolCallId,
+      { ...(tool.title ? { title: tool.title } : {}), ...(tool.kind ? { kind: tool.kind } : {}) },
+    ]),
+  );
   return (
     notification: EffectAcpSchema.SessionNotification,
   ): EffectAcpSchema.SessionNotification => {
@@ -516,6 +551,21 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         : Effect.void;
 
     const sessions = new Map<ThreadId, BobSessionContext>();
+    const relayHost = options?.relay;
+    /**
+     * Threads whose Bob a relay kept running across a restart, until T3 has attached to it.
+     * They count as live sessions, so startup does not mark their turns as lost, and calls for
+     * them wait for the attach.
+     */
+    const attaching = new Map<
+      ThreadId,
+      { readonly session: ProviderSession; readonly attached: Deferred.Deferred<void> }
+    >();
+    const awaitAttach = (threadId: ThreadId) =>
+      Effect.suspend(() => {
+        const pending = attaching.get(threadId);
+        return pending ? Deferred.await(pending.attached) : Effect.void;
+      });
     const threadLocksRef = yield* SynchronizedRef.make(new Map<string, Semaphore.Semaphore>());
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
 
@@ -531,7 +581,13 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         : mapAcpToAdapterError(PROVIDER, threadId, method, cause);
     };
 
-    const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+    // Strictly increasing, so events that arrive together, such as what Bob said while T3 was
+    // restarting, keep their order in the thread: the timeline orders by time.
+    let lastStampMs = 0;
+    const nowIso = Effect.map(DateTime.now, (now) => {
+      lastStampMs = Math.max(DateTime.toEpochMillis(now), lastStampMs + 1);
+      return DateTime.formatIso(DateTime.makeUnsafe(lastStampMs));
+    });
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) =>
@@ -593,15 +649,20 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
 
     const requireSession = (
       threadId: ThreadId,
-    ): Effect.Effect<BobSessionContext, ProviderAdapterSessionNotFoundError> => {
-      const ctx = sessions.get(threadId);
-      if (!ctx || ctx.stopped) {
-        return Effect.fail(
-          new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }),
-        );
-      }
-      return Effect.succeed(ctx);
-    };
+    ): Effect.Effect<BobSessionContext, ProviderAdapterSessionNotFoundError> =>
+      awaitAttach(threadId).pipe(
+        Effect.andThen(
+          Effect.suspend(() => {
+            const ctx = sessions.get(threadId);
+            if (!ctx || ctx.stopped) {
+              return Effect.fail(
+                new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId }),
+              );
+            }
+            return Effect.succeed(ctx);
+          }),
+        ),
+      );
 
     /** Reports a run of one of Bob's subagents as a T3 task, linked to the tool call running it. */
     const offerSubagentEvent = (
@@ -723,6 +784,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
       Effect.gen(function* () {
         const turn = ctx.openTurn;
         if (!turn) return;
+        // T3 let go of this Bob to stop; the next T3 finishes the turn.
+        if (ctx.relay && (yield* ctx.relay.detached)) return;
         ctx.openTurn = undefined;
         for (const [toolCallId, subagent] of turn.subagents) {
           if (subagent.started) {
@@ -755,7 +818,23 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           payload,
         });
         yield* Deferred.succeed(turn.settled, undefined);
+        if (ctx.relay) yield* ctx.relay.turnSettled;
+        if (ctx.recycleWhenIdle && !ctx.stopped) yield* recycleWhenIdle(ctx);
       });
+
+    /**
+     * Ends a session taken over after a restart once nothing is running, without telling the
+     * thread: the thread stays ready and its next turn starts Bob again on the same task.
+     */
+    const recycleWhenIdle = (ctx: BobSessionContext): Effect.Effect<void> =>
+      withThreadLock(
+        ctx.threadId,
+        Effect.suspend(() =>
+          ctx.stopped || ctx.promptsInFlight > 0
+            ? Effect.void
+            : stopSessionInternal(ctx, undefined, { emitExitEvent: false }),
+        ),
+      ).pipe(Effect.forkIn(adapterScope), Effect.asVoid);
 
     /**
      * Stop for the running turn: Bob is asked to cancel, open approvals are answered as
@@ -827,6 +906,12 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         if (ctx.stopped) return;
         ctx.stopped = true;
         if (sessions.get(ctx.threadId) === ctx) sessions.delete(ctx.threadId);
+        // T3 is stopping and left this Bob running its turn: nothing is cancelled, closed or
+        // reported, so the next T3 finds the turn where it was.
+        if (ctx.relay && (yield* ctx.relay.detached)) {
+          yield* Scope.close(ctx.scope, Exit.void).pipe(Effect.forkIn(adapterScope), Effect.asVoid);
+          return;
+        }
         yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
         if (exitError) {
           const reason = `Bob stopped: ${(exitError._tag === "AcpTransportError" && exitError.detail) || exitError.message}`;
@@ -861,8 +946,63 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         }
       }).pipe(Effect.uninterruptible);
 
-    /** Opens Bob for a thread, resuming its stored task when there is one. */
-    const startSession: BobAdapterShape["startSession"] = (input) =>
+    // Every Bob process for a thread, including a short-lived one for its tasks, starts with the
+    // same environment. The device environment adds only a PATH shim, so Bob's home, which T3
+    // reads usage, settings and limits from, is the instance's either way.
+    const bobEnvironmentFor = (threadId: ThreadId) => {
+      const mcpSession = McpProviderSession.readMcpProviderSession(threadId);
+      return options?.environment || mcpSession?.agentDeviceEnvironment
+        ? {
+            environment: McpProviderSession.withAgentDeviceEnvironment(
+              options?.environment ?? process.env,
+              mcpSession,
+            ),
+          }
+        : {};
+    };
+
+    /**
+     * Runs `use` against a short-lived Bob in `cwd`, for requests on a thread's tasks that no
+     * session holds, such as moving one here or deleting a copy that did not open.
+     */
+    const withShortLivedBob = <A, E>(
+      threadId: ThreadId,
+      cwd: string,
+      use: (bob: AcpSessionRuntime.AcpSessionRuntime["Service"]) => Effect.Effect<A, E>,
+    ) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const bob = yield* makeBobAcpRuntime({
+            bobSettings,
+            ...bobEnvironmentFor(threadId),
+            childProcessSpawner,
+            cwd,
+            clientInfo: { name: "t3-code", version: "0.0.0" },
+            ...makeAcpNativeLoggers({ nativeEventLogger, provider: PROVIDER, threadId }),
+          });
+          yield* bob.initialize();
+          return yield* use(bob);
+        }),
+      ).pipe(Effect.provideService(Crypto.Crypto, crypto));
+
+    /** Deletes Bob task `sessionId` with a short-lived Bob in `cwd`. Best effort. */
+    const deleteTaskBestEffort = (threadId: ThreadId, cwd: string, sessionId: string) =>
+      withShortLivedBob(threadId, cwd, (bob) => deleteBobSession(bob, sessionId)).pipe(
+        Effect.ignore,
+      );
+
+    /**
+     * Opens Bob for a thread, resuming its stored task when there is one. With `attach`, takes
+     * over the Bob a relay kept running across a restart, and the turn it was running.
+     */
+    const startSessionInternal = (
+      input: Parameters<BobAdapterShape["startSession"]>[0],
+      attach?: {
+        readonly link: BobRelayLink;
+        readonly meta: BobRelayMeta & { readonly sessionId: string };
+        readonly turn: NonNullable<BobRelayMeta["turn"]>;
+      },
+    ) =>
       withThreadLock(
         input.threadId,
         Effect.gen(function* () {
@@ -882,6 +1022,14 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           }
 
           const cwd = path.resolve(input.cwd.trim());
+          // Said plainly here: a relay that cannot start reports only a failed spawn.
+          if (relayHost && !attach && !(yield* relayHost.available)) {
+            return yield* new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail: BOB_TMUX_MISSING_MESSAGE,
+            });
+          }
           const existing = sessions.get(input.threadId);
           if (existing && !existing.stopped) {
             yield* stopSessionInternal(existing);
@@ -976,35 +1124,33 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               ),
             );
 
-          // Every Bob process for this thread, including one that moves its task, starts with the
-          // same environment. The device environment adds only a PATH shim, so Bob's home, which
-          // T3 reads usage, settings and limits from, is the instance's either way.
-          const bobEnvironment =
-            options?.environment || mcpSession?.agentDeviceEnvironment
-              ? {
-                  environment: McpProviderSession.withAgentDeviceEnvironment(
-                    options?.environment ?? process.env,
-                    mcpSession,
-                  ),
-                }
-              : {};
+          const bobEnvironment = bobEnvironmentFor(input.threadId);
           // Each attempt owns its Bob process, which stops unless the session takes it.
           let transferredScope: Scope.Closeable | undefined;
-          const openBob = (resumeSessionId: string | undefined) =>
+          const openBob = (resumeSessionId: string | undefined, link?: BobRelayLink) =>
             Effect.gen(function* () {
               const scope = yield* Scope.make("sequential");
               yield* Effect.addFinalizer(() =>
                 scope === transferredScope ? Effect.void : Scope.close(scope, Exit.void),
               );
+              const relay =
+                link ??
+                relayHost?.link({
+                  threadId: input.threadId,
+                  instanceId: boundInstanceId,
+                  cwd,
+                  runtimeMode: input.runtimeMode,
+                });
               const acp = yield* makeBobAcpRuntime({
                 bobSettings,
                 ...bobEnvironment,
-                childProcessSpawner,
+                childProcessSpawner: relay?.spawner ?? childProcessSpawner,
                 cwd,
                 runtimeMode: input.runtimeMode,
                 ...(resumeSessionId ? { resumeSessionId } : {}),
                 clientInfo: { name: "t3-code", version: "0.0.0" },
-                transformSessionUpdate: makeBobToolCallNormalizer(),
+                // A Bob taken over after a restart may finish a call the last T3 saw start.
+                transformSessionUpdate: makeBobToolCallNormalizer(attach?.meta.tools),
                 ...(mcpSession
                   ? {
                       mcpServers: [
@@ -1042,35 +1188,17 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               const started = yield* acp
                 .start()
                 .pipe(Effect.tapError(() => Scope.close(scope, Exit.void)));
-              return { scope, acp, started };
+              return { scope, acp, started, relay };
             });
 
           /**
-           * Moves the thread's Bob task into this folder with a short-lived Bob here, and returns
-           * its new id there, or undefined when it cannot move.
+           * Copies the thread's Bob task into this folder with a short-lived Bob here, and returns
+           * the copy's id, or undefined when it cannot move.
            */
           const moveTaskHere = (sessionId: string) =>
-            Effect.scoped(
-              Effect.gen(function* () {
-                const mover = yield* makeBobAcpRuntime({
-                  bobSettings,
-                  ...bobEnvironment,
-                  childProcessSpawner,
-                  cwd,
-                  clientInfo: { name: "t3-code", version: "0.0.0" },
-                  ...makeAcpNativeLoggers({
-                    nativeEventLogger,
-                    provider: PROVIDER,
-                    threadId: input.threadId,
-                  }),
-                });
-                yield* mover.initialize();
-                return yield* moveBobTask(mover, sessionId, cwd);
-              }),
-            ).pipe(
-              Effect.provideService(Crypto.Crypto, crypto),
-              Effect.orElseSucceed(() => undefined),
-            );
+            withShortLivedBob(input.threadId, cwd, (mover) =>
+              moveBobTask(mover, sessionId, cwd),
+            ).pipe(Effect.orElseSucceed(() => undefined));
           const isResumeUnavailable = (error: unknown): error is EffectAcpErrors.AcpError =>
             isAcpError(error) && isBobResumeUnavailable(error);
           const openNewConversation = (error: EffectAcpErrors.AcpError) =>
@@ -1083,22 +1211,32 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           // that moved to another folder, such as a worktree, takes its task along; otherwise it
           // continues in a new Bob conversation rather than failing. Sign-in, license and trust
           // errors still fail, since a new conversation would hit them too, and so does a resume
-          // that times out, since its task may still be there.
+          // that times out, since its task may still be there. Bob checks the folder before the
+          // sign-in, so a moved task's copy can still fail to open: the copy is then deleted and
+          // the thread keeps its original, which the next start moves again. The original is
+          // deleted once the copy is open, so Bob's history and Bobcoin totals count it once.
           const resumed = parseBobResume(input.resumeCursor);
           const resumeSessionId = resumed?.sessionId;
           let lostResume: EffectAcpErrors.AcpError | undefined;
-          const { scope, acp, started } = yield* openBob(resumeSessionId).pipe(
+          const { scope, acp, started, relay } = yield* (
+            attach
+              ? // The relay answers the handshake itself; Bob is already in the task.
+                openBob(attach.meta.sessionId, attach.link)
+              : openBob(resumeSessionId)
+          ).pipe(
             Effect.catchIf(
               (error): error is EffectAcpErrors.AcpError =>
-                resumeSessionId !== undefined && isResumeUnavailable(error),
+                attach === undefined && resumeSessionId !== undefined && isResumeUnavailable(error),
               (error) =>
                 Effect.gen(function* () {
-                  const movedSessionId = resumeSessionId
-                    ? yield* moveTaskHere(resumeSessionId)
-                    : undefined;
+                  if (resumeSessionId === undefined) return yield* openNewConversation(error);
+                  const movedSessionId = yield* moveTaskHere(resumeSessionId);
                   if (movedSessionId === undefined) return yield* openNewConversation(error);
                   return yield* openBob(movedSessionId).pipe(
-                    Effect.catchIf(isResumeUnavailable, openNewConversation),
+                    Effect.tap(({ acp }) => deleteBobSession(acp, resumeSessionId)),
+                    Effect.tapError(() =>
+                      deleteTaskBestEffort(input.threadId, cwd, movedSessionId),
+                    ),
                   );
                 }),
             ),
@@ -1111,9 +1249,20 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           const taskCosts = yield* readBobTaskCosts(taskDatabasePath, started.sessionId);
           // A moved task keeps its messages' timestamps, so the turn start times still apply; a
           // new conversation holds none of the earlier turns.
-          const turnStartedAt = lostResume
-            ? (resumed?.turnStartedAt ?? []).map(() => null)
-            : [...(resumed?.turnStartedAt ?? [])];
+          const turnStartedAt = attach
+            ? [...(attach.meta.turnStartedAt ?? [])]
+            : lostResume
+              ? (resumed?.turnStartedAt ?? []).map(() => null)
+              : [...(resumed?.turnStartedAt ?? [])];
+          if (relay && !attach) {
+            yield* relay.setMeta({
+              sessionId: started.sessionId,
+              turnStartedAt,
+              ...(mcpSession
+                ? { mcp: { ...mcpSession, capabilities: [...mcpSession.capabilities] } }
+                : {}),
+            });
+          }
           const now = yield* nowIso;
           const session: ProviderSession = {
             provider: PROVIDER,
@@ -1136,7 +1285,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             scope,
             acp,
             sessionId: started.sessionId,
-            currentModeId: (yield* acp.getModeState)?.currentModeId,
+            currentModeId: attach?.meta.modeId ?? (yield* acp.getModeState)?.currentModeId,
             notificationFiber: undefined,
             pendingApprovals,
             turns: [],
@@ -1145,6 +1294,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             openTurn: undefined,
             promptsInFlight: 0,
             promptLock: yield* Semaphore.make(1),
+            waitingPrompts: 0,
             interrupts: 0,
             promptEpoch: undefined,
             steer: undefined,
@@ -1153,6 +1303,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
             canCloseSessions:
               started.initializeResult.agentCapabilities?.sessionCapabilities?.close != null,
             stopped: false,
+            relay,
+            recycleWhenIdle: false,
           };
 
           const nf = yield* Stream.runDrain(
@@ -1206,6 +1358,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* trackSubagent(ctx, event.toolCall, event.rawPayload);
                     const openTools = ctx.openTurn?.openTools;
+                    const wasOpen = openTools?.has(event.toolCall.toolCallId) ?? false;
                     if (
                       event.toolCall.status === "completed" ||
                       event.toolCall.status === "failed"
@@ -1213,6 +1366,16 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                       openTools?.delete(event.toolCall.toolCallId);
                     } else {
                       openTools?.set(event.toolCall.toolCallId, event.toolCall);
+                    }
+                    // The relay keeps the open calls for a T3 that takes over after a restart.
+                    if (
+                      ctx.relay &&
+                      openTools &&
+                      wasOpen !== openTools.has(event.toolCall.toolCallId)
+                    ) {
+                      yield* ctx.relay.setMeta({
+                        tools: [...openTools.values()].map(toBobRelayTool),
+                      });
                     }
                     yield* offerRuntimeEvent(
                       makeAcpToolCallEvent({
@@ -1282,6 +1445,23 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           }
           yield* refreshUsageLimitsInBackground(cwd, false);
 
+          if (attach) {
+            // Bob still holds the MCP credential the last T3 gave it. Taken back, its T3 tools keep
+            // working and it can stay; otherwise it ends once its turn does.
+            const kept = attach.meta.mcp
+              ? yield* restoreMcpSession(attach.meta.mcp, input.threadId)
+              : false;
+            yield* adoptTurn(
+              ctx,
+              attach.link,
+              attach.turn,
+              attach.meta.tools ?? [],
+              !kept,
+              attach.meta.waitingPrompts ?? 0,
+            );
+            return ctx.session;
+          }
+
           yield* offerRuntimeEvent({
             type: "session.started",
             ...(yield* makeEventStamp()),
@@ -1321,6 +1501,240 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         }).pipe(Effect.scoped),
       );
 
+    const startSession: BobAdapterShape["startSession"] = (input) =>
+      awaitAttach(input.threadId).pipe(Effect.andThen(startSessionInternal(input)));
+
+    /**
+     * After a prompt of the turn ends, answered or failed: lets what Bob said for it through, so
+     * it lands in this turn and not the next, and reports the task's usage. Returns the task's
+     * running totals.
+     */
+    const settlePromptEffects = (ctx: BobSessionContext, turnId: TurnId) =>
+      Effect.gen(function* () {
+        yield* ctx.acp.drainEvents;
+        // Bob records spend before it answers the prompt, so the row is current here.
+        const previousTaskCosts = ctx.taskCosts;
+        const taskCosts = yield* readBobTaskCosts(taskDatabasePath, ctx.sessionId);
+        if (!taskCosts) return undefined;
+        ctx.taskCosts = taskCosts;
+        if (!sameBobTaskCosts(previousTaskCosts, taskCosts)) {
+          yield* offerRuntimeEvent({
+            type: "thread.token-usage.updated",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId,
+            payload: {
+              usage: bobThreadTokenUsage(
+                taskCosts,
+                previousTaskCosts,
+                // Bob reads its model setting on every turn, so the window follows it.
+                bobContextWindow(
+                  yield* readBobConfiguredModel(options?.environment ?? process.env).pipe(
+                    Effect.provideService(FileSystem.FileSystem, fileSystem),
+                    Effect.provideService(Path.Path, path),
+                  ),
+                ),
+              ),
+            },
+          });
+          yield* refreshUsageLimitsInBackground(ctx.cwd, true);
+        }
+        return taskCosts;
+      });
+
+    /**
+     * After Bob answers a turn's prompt: records it, reports the task's usage and, when no
+     * other prompt of the turn waits behind it, settles the turn.
+     */
+    const finishPrompt = (
+      ctx: BobSessionContext,
+      input: {
+        readonly turnId: TurnId;
+        readonly result: EffectAcpSchema.PromptResponse;
+        /** What went to Bob, or none for a prompt that never reached it. */
+        readonly prompt?: ReadonlyArray<EffectAcpSchema.ContentBlock>;
+        readonly uncount: Effect.Effect<void>;
+      },
+    ) =>
+      Effect.gen(function* () {
+        const { turnId, result } = input;
+        const taskCosts = yield* settlePromptEffects(ctx, turnId);
+
+        if (input.prompt) {
+          const item = { prompt: input.prompt, result };
+          const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
+          if (turnRecord) {
+            turnRecord.items.push(item);
+          } else {
+            ctx.turns.push({ id: turnId, items: [item] });
+          }
+        }
+
+        // Only the last remaining prompt settles the turn; a steer waiting behind this
+        // one continues it.
+        yield* input.uncount;
+        if (ctx.promptsInFlight === 0) {
+          yield* proposePlan(ctx, result.stopReason);
+          yield* settleTurn(ctx, {
+            state: result.stopReason === "cancelled" ? "cancelled" : "completed",
+            stopReason: result.stopReason ?? null,
+            ...(taskCosts
+              ? {
+                  tokenUsage: bobTurnTokenUsage(
+                    taskCosts,
+                    ctx.turnStartTaskCosts,
+                    result.stopReason !== "cancelled",
+                  ),
+                }
+              : {}),
+          });
+        }
+
+        return {
+          threadId: ctx.threadId,
+          turnId,
+          resumeCursor: ctx.session.resumeCursor,
+        };
+      });
+
+    /**
+     * Takes back the MCP credential a Bob kept running across a restart still holds, when this
+     * server can honour it (same environment, same endpoint), and records it as the thread's MCP
+     * session for any Bob this adapter starts for the thread later. Whether it was taken back.
+     */
+    const restoreMcpSession = (mcp: NonNullable<BobRelayMeta["mcp"]>, threadId: ThreadId) =>
+      Effect.gen(function* () {
+        if (mcp.threadId !== threadId || mcp.providerInstanceId !== boundInstanceId) return false;
+        const config: McpProviderSession.McpProviderSessionConfig = {
+          ...mcp,
+          environmentId: EnvironmentId.make(mcp.environmentId),
+          threadId,
+          providerInstanceId: boundInstanceId,
+          capabilities: new Set(mcp.capabilities),
+        };
+        const restored = yield* McpSessionRegistry.restoreActiveMcpCredential(config);
+        if (restored) McpProviderSession.setMcpProviderSession(config);
+        return restored;
+      });
+
+    /**
+     * Finishes, on a Bob its relay kept running across a restart, the turn it was running when
+     * the last T3 let go. What Bob said meanwhile arrives as it would have live, and the answer
+     * to the prompt that was running ends the turn here.
+     */
+    const adoptTurn = (
+      ctx: BobSessionContext,
+      link: BobRelayLink,
+      turn: NonNullable<BobRelayMeta["turn"]>,
+      tools: ReadonlyArray<BobRelayTool>,
+      recycle: boolean,
+      /** Messages the last T3 held for Bob during the turn, which went with it. */
+      lostPrompts: number,
+    ) =>
+      Effect.gen(function* () {
+        const turnId = TurnId.make(turn.id);
+        ctx.recycleWhenIdle = recycle;
+        ctx.activeTurnId = turnId;
+        ctx.openTurn = {
+          id: turnId,
+          interrupted: false,
+          plan: turn.plan,
+          // The calls still running, so a steer waits for them instead of cancelling them.
+          openTools: new Map(
+            tools.map((tool): [string, AcpToolCallState] => [
+              tool.toolCallId,
+              { ...tool, status: "inProgress", data: {} },
+            ]),
+          ),
+          subagents: new Map(),
+          settled: yield* Deferred.make<void>(),
+        };
+        // From the turn's start, so what Bob spent while no T3 ran is reported. None means the
+        // task had no row yet, which is no spend.
+        ctx.turnStartTaskCosts = turn.costsAtStart;
+        ctx.taskCosts = turn.costsAtStart;
+        ctx.session = {
+          ...ctx.session,
+          status: "running",
+          activeTurnId: turnId,
+          updatedAt: yield* nowIso,
+        };
+        // Running, not ready: a ready session would end the thread's turn.
+        yield* offerRuntimeEvent({
+          type: "session.state.changed",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          payload: { state: "running", reason: "Bob kept working while T3 Code restarted" },
+        });
+        yield* offerRuntimeEvent({
+          type: "turn.started",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          payload: { model: BOB_DEFAULT_MODEL },
+        });
+        if (lostPrompts > 0) {
+          const one = lostPrompts === 1;
+          yield* offerRuntimeEvent({
+            type: "runtime.warning",
+            ...(yield* makeEventStamp()),
+            provider: PROVIDER,
+            threadId: ctx.threadId,
+            turnId,
+            payload: {
+              message: `${lostPrompts} ${one ? "message" : "messages"} sent while Bob was working did not reach Bob before T3 Code restarted. Send ${one ? "it" : "them"} again.`,
+            },
+          });
+          yield* link.setMeta({ waitingPrompts: 0 });
+        }
+        ctx.promptsInFlight += 1;
+        let counted = true;
+        const uncount = Effect.sync(() => {
+          if (!counted) return;
+          counted = false;
+          ctx.promptsInFlight -= 1;
+        });
+        // Taken before the session is visible, so a message sent meanwhile waits behind it.
+        yield* ctx.promptLock.take(1);
+        yield* Effect.gen(function* () {
+          yield* link.replay;
+          // This prompt reaches no Bob: it takes the answer to the one that was running.
+          yield* link.adoptNextPrompt;
+          ctx.promptEpoch = ctx.interrupts;
+          const result = yield* ctx.acp
+            .prompt({ prompt: [{ type: "text", text: "Continue." }] })
+            .pipe(
+              Effect.mapError((error) => mapBobAcpError(ctx.threadId, "session/prompt", error)),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  ctx.promptEpoch = undefined;
+                  ctx.steer = undefined;
+                }),
+              ),
+            );
+          yield* finishPrompt(ctx, { turnId, result, uncount });
+        }).pipe(
+          Effect.tapError((error) =>
+            Effect.gen(function* () {
+              yield* settlePromptEffects(ctx, turnId);
+              yield* uncount;
+              if (ctx.promptsInFlight === 0) {
+                yield* settleTurn(ctx, failedTurnPayload(ctx, error.message));
+              }
+            }),
+          ),
+          Effect.ensuring(uncount),
+          Effect.ensuring(ctx.promptLock.release(1)),
+          Effect.catch((cause) =>
+            Effect.logWarning("Bob could not finish the turn it ran across a restart.", { cause }),
+          ),
+          Effect.forkIn(adapterScope),
+        );
+      });
+
     /** Sends a prompt to Bob as a new turn, or as a steer of the turn that is running. */
     const sendTurn: BobAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
@@ -1350,6 +1764,19 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           if (!counted) return;
           counted = false;
           ctx.promptsInFlight -= 1;
+        });
+        // A follow-up waits until its prompt goes to Bob, or it is given up.
+        let waiting = steeringTurnId !== undefined && ctx.relay !== undefined;
+        const countWaiting = (change: 1 | -1) =>
+          Effect.suspend(() => {
+            ctx.waitingPrompts += change;
+            return ctx.relay?.setMeta({ waitingPrompts: ctx.waitingPrompts }) ?? Effect.void;
+          });
+        if (waiting) yield* countWaiting(1);
+        const stopWaiting = Effect.suspend(() => {
+          if (!waiting) return Effect.void;
+          waiting = false;
+          return countWaiting(-1);
         });
 
         const run = Effect.gen(function* () {
@@ -1401,6 +1828,18 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               resumeCursor: bobResumeCursor(ctx.sessionId, ctx.turnStartedAt),
             };
             ctx.turnStartTaskCosts = ctx.taskCosts;
+            if (ctx.relay) {
+              // What a T3 started after this one needs to finish the turn.
+              yield* ctx.relay.setMeta({
+                turnStartedAt: ctx.turnStartedAt,
+                ...(ctx.currentModeId ? { modeId: ctx.currentModeId } : {}),
+              });
+              yield* ctx.relay.turnStarted({
+                id: turnId,
+                plan: ctx.openTurn.plan,
+                ...(ctx.turnStartTaskCosts ? { costsAtStart: ctx.turnStartTaskCosts } : {}),
+              });
+            }
             yield* offerRuntimeEvent({
               type: "turn.started",
               ...(yield* makeEventStamp()),
@@ -1487,6 +1926,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 ),
                 // Only once the prompt is sent, so a steer's cancel stops it rather than going first.
                 Deferred.await(dispatched).pipe(
+                  Effect.andThen(stopWaiting),
                   Effect.andThen(steerWaitingFollowUp(ctx)),
                   Effect.andThen(Effect.never),
                 ),
@@ -1501,77 +1941,16 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 ),
               );
 
-          yield* ctx.acp.drainEvents;
-
-          if (!dropped) {
-            const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
-            if (turnRecord) {
-              turnRecord.items.push({ prompt: promptParts, result });
-            } else {
-              ctx.turns.push({ id: turnId, items: [{ prompt: promptParts, result }] });
-            }
-          }
-
-          // Bob records spend before it answers the prompt, so the row is current here.
-          const previousTaskCosts = ctx.taskCosts;
-          const taskCosts = yield* readBobTaskCosts(taskDatabasePath, ctx.sessionId);
-          if (taskCosts) {
-            ctx.taskCosts = taskCosts;
-            if (!sameBobTaskCosts(previousTaskCosts, taskCosts)) {
-              yield* offerRuntimeEvent({
-                type: "thread.token-usage.updated",
-                ...(yield* makeEventStamp()),
-                provider: PROVIDER,
-                threadId: input.threadId,
-                turnId,
-                payload: {
-                  usage: bobThreadTokenUsage(
-                    taskCosts,
-                    previousTaskCosts,
-                    // Bob reads its model setting on every turn, so the window follows it.
-                    bobContextWindow(
-                      yield* readBobConfiguredModel(options?.environment ?? process.env).pipe(
-                        Effect.provideService(FileSystem.FileSystem, fileSystem),
-                        Effect.provideService(Path.Path, path),
-                      ),
-                    ),
-                  ),
-                },
-              });
-              yield* refreshUsageLimitsInBackground(ctx.cwd, true);
-            }
-          }
-
-          // Only the last remaining prompt settles the turn; a steer waiting behind this
-          // one continues it.
-          yield* uncount;
-          if (ctx.promptsInFlight === 0) {
-            yield* proposePlan(ctx, result.stopReason);
-            yield* settleTurn(ctx, {
-              state: result.stopReason === "cancelled" ? "cancelled" : "completed",
-              stopReason: result.stopReason ?? null,
-              ...(taskCosts
-                ? {
-                    tokenUsage: bobTurnTokenUsage(
-                      taskCosts,
-                      ctx.turnStartTaskCosts,
-                      result.stopReason !== "cancelled",
-                    ),
-                  }
-                : {}),
-            });
-          }
-
-          return {
-            threadId: input.threadId,
+          return yield* finishPrompt(ctx, {
             turnId,
-            resumeCursor: ctx.session.resumeCursor,
-          };
+            result,
+            ...(dropped ? {} : { prompt: promptParts }),
+            uncount,
+          });
         }).pipe(
           Effect.tapError((error) =>
             Effect.gen(function* () {
-              // What Bob said before the error belongs to this turn, not the next.
-              yield* ctx.acp.drainEvents;
+              yield* settlePromptEffects(ctx, turnId);
               yield* uncount;
               if (ctx.promptsInFlight === 0) {
                 yield* settleTurn(ctx, failedTurnPayload(ctx, error.message));
@@ -1581,7 +1960,9 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           Effect.ensuring(uncount),
         );
 
-        return yield* ctx.promptLock.withPermit(run).pipe(Effect.ensuring(uncount));
+        return yield* ctx.promptLock
+          .withPermit(run)
+          .pipe(Effect.ensuring(uncount), Effect.ensuring(stopWaiting));
       });
 
     /**
@@ -1630,8 +2011,9 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
      * Drops the thread's last `numTurns` turns from Bob's conversation, as Bob's IDE rolls a task
      * back to before a message. T3 has already restored the files. Bob keeps the conversation
      * before the first dropped turn as a new task, which the session reopens; the original is then
-     * deleted, so Bob's history and Bobcoin totals count the kept part once. Rolling back every
-     * turn starts a new conversation.
+     * deleted, so Bob's history and Bobcoin totals count the kept part once. A new task that does
+     * not open is deleted instead, and the original stays. Rolling back every turn starts a new
+     * conversation.
      */
     const rollbackThread: BobAdapterShape["rollbackThread"] = (threadId, numTurns) =>
       Effect.gen(function* () {
@@ -1685,32 +2067,157 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           runtimeMode: ctx.session.runtimeMode,
           resumeCursor:
             rewound._tag === "Rewound" ? bobResumeCursor(rewound.sessionId, keptStarts) : undefined,
-        });
+        }).pipe(
+          Effect.tapError(() =>
+            rewound._tag === "Rewound"
+              ? deleteTaskBestEffort(threadId, ctx.cwd, rewound.sessionId)
+              : Effect.void,
+          ),
+        );
         const next = yield* requireSession(threadId);
         yield* deleteBobSession(next.acp, previousSessionId);
         return { threadId, turns: keptTurns };
       });
 
+    /**
+     * At startup: the relays this instance left running. One that was running a turn becomes a
+     * live session at once, so startup does not mark the turn lost, and T3 attaches to it once
+     * the server is up, when the thread's events have somewhere to go. The rest stop.
+     */
+    const takeOverRelays = (host: BobRelayHost) =>
+      Effect.gen(function* () {
+        const activation = yield* ServerActivation;
+        const now = yield* nowIso;
+        const toAttach: Array<{
+          readonly relayId: string;
+          readonly meta: BobRelayMeta & { readonly sessionId: string };
+          readonly turn: NonNullable<BobRelayMeta["turn"]>;
+          readonly attached: Deferred.Deferred<void>;
+        }> = [];
+        for (const { relayId, state } of yield* host.scan) {
+          const meta = readBobRelayMeta(state);
+          // Another instance's relay is that instance's to take.
+          if (meta && meta.instanceId !== boundInstanceId) continue;
+          // A disabled instance runs no Bob, so its relays stop.
+          if (!bobSettings.enabled) {
+            yield* host.kill(relayId);
+            continue;
+          }
+          const threadId = meta ? (meta.threadId as ThreadId) : undefined;
+          const sessionId = meta?.sessionId;
+          const turn = meta?.turn;
+          if (
+            !meta ||
+            !threadId ||
+            !sessionId ||
+            !turn ||
+            (!state.promptInFlight && !state.promptEnded) ||
+            attaching.has(threadId)
+          ) {
+            yield* host.kill(relayId);
+            continue;
+          }
+          const attached = yield* Deferred.make<void>();
+          attaching.set(threadId, {
+            attached,
+            session: {
+              provider: PROVIDER,
+              providerInstanceId: boundInstanceId,
+              status: "running",
+              runtimeMode: meta.runtimeMode,
+              cwd: meta.cwd,
+              model: BOB_DEFAULT_MODEL,
+              threadId,
+              activeTurnId: TurnId.make(turn.id),
+              resumeCursor: bobResumeCursor(sessionId, meta.turnStartedAt ?? []),
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          toAttach.push({ relayId, meta: { ...meta, sessionId }, turn, attached });
+        }
+        if (toAttach.length === 0) return;
+        yield* Effect.forEach(
+          toAttach,
+          ({ relayId, meta, turn, attached }) => {
+            const threadId = meta.threadId as ThreadId;
+            return startSessionInternal(
+              {
+                threadId,
+                provider: PROVIDER,
+                providerInstanceId: boundInstanceId,
+                cwd: meta.cwd,
+                runtimeMode: meta.runtimeMode,
+                resumeCursor: bobResumeCursor(meta.sessionId, meta.turnStartedAt ?? []),
+              },
+              { link: host.attach(relayId), meta, turn },
+            ).pipe(
+              Effect.catch((cause) =>
+                Effect.gen(function* () {
+                  yield* Effect.logWarning("Could not take over Bob after a restart.", { cause });
+                  yield* host.kill(relayId);
+                  // Nothing will finish the turn, so it ends here.
+                  yield* offerRuntimeEvent({
+                    type: "turn.completed",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId,
+                    turnId: TurnId.make(turn.id),
+                    payload: {
+                      state: "failed",
+                      errorMessage: "Bob stopped while T3 Code was restarting.",
+                    },
+                  });
+                }),
+              ),
+              Effect.ensuring(
+                Effect.sync(() => attaching.delete(threadId)).pipe(
+                  Effect.andThen(Deferred.succeed(attached, undefined)),
+                ),
+              ),
+            );
+          },
+          { discard: true },
+        ).pipe(
+          // Once the server is up, so the events of the turn reach the thread.
+          (attachAll) => (activation ? Effect.andThen(activation, attachAll) : attachAll),
+          Effect.forkIn(adapterScope),
+        );
+      });
+
+    // Waits for an attach outside the lock, since the attach takes the lock to finish.
     const stopSession: BobAdapterShape["stopSession"] = (threadId) =>
-      withThreadLock(
-        threadId,
-        Effect.gen(function* () {
-          const ctx = yield* requireSession(threadId);
-          yield* stopSessionInternal(ctx);
-        }),
+      awaitAttach(threadId).pipe(
+        Effect.andThen(
+          withThreadLock(
+            threadId,
+            Effect.gen(function* () {
+              const ctx = yield* requireSession(threadId);
+              yield* stopSessionInternal(ctx);
+            }),
+          ),
+        ),
       );
 
     const listSessions: BobAdapterShape["listSessions"] = () =>
-      Effect.sync(() => Array.from(sessions.values(), (c) => ({ ...c.session })));
+      Effect.sync(() => [
+        ...Array.from(sessions.values(), (c) => ({ ...c.session })),
+        ...Array.from(attaching, ([threadId, pending]) =>
+          sessions.has(threadId) ? undefined : { ...pending.session },
+        ).filter((session) => session !== undefined),
+      ]);
 
     const hasSession: BobAdapterShape["hasSession"] = (threadId) =>
       Effect.sync(() => {
+        if (attaching.has(threadId)) return true;
         const c = sessions.get(threadId);
         return c !== undefined && !c.stopped;
       });
 
     const stopAll: BobAdapterShape["stopAll"] = () =>
       Effect.forEach([...sessions.values()], (ctx) => stopSessionInternal(ctx), { discard: true });
+
+    if (relayHost) yield* takeOverRelays(relayHost);
 
     yield* Effect.addFinalizer(() =>
       Effect.forEach([...sessions.values()], (ctx) => stopSessionInternal(ctx), {
