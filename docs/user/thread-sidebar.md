@@ -169,8 +169,9 @@ scheduling new ones; cancel any already scheduled from the thread.
 An agent can also run a long command in the background, such as a build or a long test suite.
 It runs on T3 Code's own tmux server, so it keeps going after the agent's turn and even if T3
 Code restarts, and its output goes to files in the folder's `.t3/jobs` (git ignores them). T3
-Code tells the agent the moment the command ends, and on a schedule while it runs if the agent
-asks. The agent can also ask to hear about certain lines as they appear, such as failing tests,
+Code tells the agent the moment the command ends and, if the agent asks, sends it status updates
+on a schedule while it runs; those stop at the same limit as repeating check-ins. The agent can
+also ask to hear about certain lines as they appear, such as failing tests,
 so it can look into them before a long run finishes; those messages come at most every five
 minutes. Running commands show above the composer with **Terminal**, which opens a terminal on the
 command (scroll with the mouse wheel; hold Shift to select text); **Mute**, which stops the

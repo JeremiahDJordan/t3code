@@ -1,5 +1,7 @@
 import {
+  BackgroundCommandId,
   CHECK_IN_CONTEXT_KIND,
+  type CheckInId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -19,8 +21,13 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
+import {
+  OrchestrationCommandInvariantError,
+  OrchestrationCommandPreviouslyRejectedError,
+} from "../orchestration/Errors.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as ThreadBackgroundCommands from "../persistence/ThreadBackgroundCommands.ts";
 import * as ThreadCheckIns from "../persistence/ThreadCheckIns.ts";
@@ -90,24 +97,65 @@ const makeHarness = Effect.fn("makeCheckInHarness")(function* (
   // Runs during each dispatch, as a user's action landing while a delivery is in flight would.
   const duringDispatch = yield* Ref.make<Effect.Effect<void>>(Effect.void);
   const shells = yield* Ref.make(new Map([[THREAD_ID, thread()]]));
+  // A check-in whose removal fails, as a database error or a crash mid-record would.
+  const failRemoval = yield* Ref.make<CheckInId | null>(null);
+  // A thread that refuses every turn; the engine remembers each refused command id.
+  const refuseThread = yield* Ref.make<ThreadId | null>(null);
+  const refused = yield* Ref.make<ReadonlySet<string>>(new Set());
+  const checkIns = Layer.effect(
+    ThreadCheckIns.ThreadCheckInRepository,
+    Effect.gen(function* () {
+      const repository = yield* ThreadCheckIns.ThreadCheckInRepository;
+      return ThreadCheckIns.ThreadCheckInRepository.of({
+        ...repository,
+        remove: (checkInId) =>
+          Effect.gen(function* () {
+            if ((yield* Ref.get(failRemoval)) === checkInId) {
+              return yield* new PersistenceSqlError({ operation: "removeCheckIn" });
+            }
+            return yield* repository.remove(checkInId);
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(ThreadCheckIns.layer));
   let uuids = 0;
   const layer = CheckInScheduler.layer.pipe(
-    Layer.provide(
+    Layer.provideMerge(
       Layer.mergeAll(
-        ThreadCheckIns.layer,
+        checkIns,
         ThreadBackgroundCommands.layer,
         ThreadBackgroundCommands.changesLayer,
-      ).pipe(Layer.provide(SqlitePersistenceMemory)),
+      ).pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ),
     Layer.provide(NodeServices.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(OrchestrationEngineService)({
+          // A command id already accepted is not run again, and one refused is refused again, as
+          // the engine's receipts ensure.
           dispatch: (command) =>
-            Ref.update(dispatched, (all) => [...all, command]).pipe(
-              Effect.andThen(Effect.flatten(Ref.get(duringDispatch))),
-              Effect.as({ sequence: 1 }),
-            ),
+            Effect.gen(function* () {
+              if ((yield* Ref.get(refused)).has(command.commandId)) {
+                return yield* new OrchestrationCommandPreviouslyRejectedError({
+                  commandId: command.commandId,
+                  detail: "Previously rejected.",
+                });
+              }
+              if ("threadId" in command && command.threadId === (yield* Ref.get(refuseThread))) {
+                yield* Ref.update(refused, (all) => new Set([...all, command.commandId]));
+                return yield* new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail: "The thread refused the turn.",
+                });
+              }
+              const accepted = yield* Ref.modify(dispatched, (all) =>
+                all.some((earlier) => earlier.commandId === command.commandId)
+                  ? [false, all]
+                  : [true, [...all, command]],
+              );
+              if (accepted) yield* Effect.flatten(Ref.get(duringDispatch));
+              return { sequence: 1 };
+            }),
           subscribeDomainEvents: Effect.succeed(Stream.empty),
         }),
         Layer.mock(ProjectionSnapshotQuery)({
@@ -128,6 +176,7 @@ const makeHarness = Effect.fn("makeCheckInHarness")(function* (
   // Built in the test's scope, so the in-memory database outlives each call.
   const context = yield* Layer.build(layer);
   const scheduler = Context.get(context, CheckInScheduler.CheckInScheduler);
+  const commands = Context.get(context, ThreadBackgroundCommands.ThreadBackgroundCommandRepository);
   const at = (ms: number) => TestClock.setTime(ms).pipe(Effect.andThen(scheduler.runDueNow));
   const setThread = (shell: OrchestrationThreadShell | undefined) =>
     Ref.update(shells, (all) => {
@@ -136,8 +185,55 @@ const makeHarness = Effect.fn("makeCheckInHarness")(function* (
       else next.delete(THREAD_ID);
       return next;
     });
-  return { scheduler, dispatched, at, setThread, duringDispatch };
+  return {
+    scheduler,
+    commands,
+    dispatched,
+    at,
+    setThread,
+    duringDispatch,
+    failRemoval,
+    refuseThread,
+  };
 });
+
+/** A running background command with status updates, whose job folder has nothing in it. */
+function runningCommand(options: {
+  readonly startedAt: number;
+  readonly nextStatusAt: number;
+}): ThreadBackgroundCommands.BackgroundCommandRow {
+  const jobDir = "/nonexistent/.t3/jobs/bg-1";
+  return {
+    id: BackgroundCommandId.make("bg-1"),
+    threadId: THREAD_ID,
+    command: "vp run dev",
+    cwd: "/nonexistent",
+    stdoutPath: `${jobDir}/stdout.log`,
+    stderrPath: `${jobDir}/stderr.log`,
+    status: "running",
+    exitStatus: null,
+    startedAt: iso(options.startedAt),
+    endedAt: null,
+    statusEveryMinutes: 30,
+    nextStatusAt: iso(options.nextStatusAt),
+    note: "",
+    tailLines: 0,
+    notifyOn: null,
+    stopRequestedBy: null,
+    muted: false,
+    jobDir,
+    tmuxSession: "t3-bg-1",
+    stopRequestedAt: null,
+    endNoticeSent: false,
+    statusNoticesSent: 0,
+    stdoutBytesNoticed: 0,
+    stderrBytesNoticed: 0,
+    missingObservations: 0,
+    matchNoticesSent: 0,
+    matchBytesNoticed: 0,
+    lastMatchNoticeAt: null,
+  };
+}
 
 const texts = (commands: ReadonlyArray<OrchestrationCommand>) =>
   commands.flatMap((command) =>
@@ -171,6 +267,119 @@ describe("CheckInScheduler", () => {
         ]);
         expect(String(command.commandId)).toBe(`server:check-in:${checkIn.id}:1`);
         expect(yield* scheduler.list(THREAD_ID)).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("sends check-ins that fall due together in one message", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(START);
+        const { scheduler, dispatched, at } = yield* makeHarness();
+        const first = yield* scheduler.schedule({
+          threadId: THREAD_ID,
+          note: "Check the build.",
+          inMinutes: 10,
+          repeatEveryMinutes: null,
+        });
+        const second = yield* scheduler.schedule({
+          threadId: THREAD_ID,
+          note: "Check the deploy.",
+          inMinutes: 11,
+          repeatEveryMinutes: null,
+        });
+
+        // Both are due by the time the thread can take them: one turn, both notes, in order.
+        yield* at(START + 12 * MINUTE);
+        const all = yield* Ref.get(dispatched);
+        expect(texts(all)).toEqual([
+          "[T3 Code check-in] Check the build.\n\n[T3 Code check-in] Check the deploy.",
+        ]);
+        const [command] = all;
+        if (command?.type !== "thread.turn.start") return;
+        expect(command.message.context?.records).toHaveLength(2);
+        // Named by its parts, sorted, so a retry after a crash is the same message.
+        expect(String(command.commandId)).toBe(
+          `server:notices:${[`check-in:${first.id}:1`, `check-in:${second.id}:1`].toSorted().join("+")}`,
+        );
+        expect(yield* scheduler.list(THREAD_ID)).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("sends a combined message once when recording one of its parts fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(START);
+        const { scheduler, dispatched, at, setThread, failRemoval } = yield* makeHarness();
+        yield* scheduler.schedule({
+          threadId: THREAD_ID,
+          note: "Check the build.",
+          inMinutes: 10,
+          repeatEveryMinutes: null,
+        });
+        const second = yield* scheduler.schedule({
+          threadId: THREAD_ID,
+          note: "Check the deploy.",
+          inMinutes: 11,
+          repeatEveryMinutes: null,
+        });
+
+        // The message goes in, then recording the second part fails after the first is recorded.
+        yield* Ref.set(failRemoval, second.id);
+        yield* at(START + 12 * MINUTE);
+        expect(texts(yield* Ref.get(dispatched))).toHaveLength(1);
+        expect(yield* scheduler.list(THREAD_ID)).toHaveLength(2);
+
+        // Once the turn it started ends, the retry is the same message, so it is not sent again.
+        yield* Ref.set(failRemoval, null);
+        yield* setThread(thread({ completedAt: START + 13 * MINUTE }));
+        yield* at(START + 14 * MINUTE);
+        expect(texts(yield* Ref.get(dispatched))).toEqual([
+          "[T3 Code check-in] Check the build.\n\n[T3 Code check-in] Check the deploy.",
+        ]);
+        expect(yield* scheduler.list(THREAD_ID)).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("keeps delivering to other threads when one thread's refused message is retried", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(START);
+        const { scheduler, dispatched, at, setThread, failRemoval, refuseThread } =
+          yield* makeHarness();
+        yield* setThread({ ...thread(), id: OTHER_THREAD_ID });
+        const refusedCheckIn = yield* scheduler.schedule({
+          threadId: THREAD_ID,
+          note: "Check the build.",
+          inMinutes: 10,
+          repeatEveryMinutes: null,
+        });
+
+        // The thread refuses the turn, and recording that fails, so the check-in stays due.
+        yield* Ref.set(refuseThread, THREAD_ID);
+        yield* Ref.set(failRemoval, refusedCheckIn.id);
+        yield* at(START + 10 * MINUTE);
+        expect(yield* scheduler.list(THREAD_ID)).toHaveLength(1);
+
+        // The retry is refused as before and its record fails again; the other thread's check-in,
+        // due later in the same sweep, still goes.
+        yield* scheduler.schedule({
+          threadId: OTHER_THREAD_ID,
+          note: "Check the deploy.",
+          inMinutes: 1,
+          repeatEveryMinutes: null,
+        });
+        yield* at(START + 11 * MINUTE);
+        expect(texts(yield* Ref.get(dispatched))).toEqual(["[T3 Code check-in] Check the deploy."]);
+        expect(yield* scheduler.list(OTHER_THREAD_ID)).toEqual([]);
+
+        // Once recording works, the refused check-in is recorded and not tried again.
+        yield* Ref.set(failRemoval, null);
+        yield* at(START + 12 * MINUTE);
+        expect(yield* scheduler.list(THREAD_ID)).toEqual([]);
+        expect(texts(yield* Ref.get(dispatched))).toHaveLength(1);
       }),
     ),
   );
@@ -252,6 +461,39 @@ describe("CheckInScheduler", () => {
         expect(first).toContain("The next one is in 30 minutes.");
         expect(last).toContain("This is the last one");
         expect(yield* scheduler.list(THREAD_ID)).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("ends a command's status updates at the repeat limit, and says so", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(START);
+        const { commands, dispatched, at } = yield* makeHarness({ checkInRepeatLimitHours: 1 });
+        const id = BackgroundCommandId.make("bg-1");
+        yield* commands.insertIfUnder(
+          runningCommand({ startedAt: START, nextStatusAt: START + 30 * MINUTE }),
+          5,
+        );
+
+        // Inside the limit: the next one is scheduled.
+        yield* at(START + 30 * MINUTE);
+        expect((yield* commands.get(id))?.nextStatusAt).toBe(iso(START + 60 * MINUTE));
+
+        // The one after would fall past the hour: this is the last, and nothing more is due.
+        yield* at(START + 60 * MINUTE);
+        yield* at(START + 120 * MINUTE);
+        const [first, last, ...more] = texts(yield* Ref.get(dispatched));
+        expect(first).toContain("The next status update is in 30 minutes");
+        expect(last).toContain(
+          "This is the last status update: they end 1 hour after the command starts. You will still be told the moment it ends.",
+        );
+        expect(more).toEqual([]);
+        expect(yield* commands.get(id)).toMatchObject({
+          status: "running",
+          nextStatusAt: null,
+          statusNoticesSent: 2,
+        });
       }),
     ),
   );

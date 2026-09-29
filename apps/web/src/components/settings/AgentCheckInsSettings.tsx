@@ -129,7 +129,7 @@ export function AgentCheckInsSettings() {
           mixed={mixedLimit}
           id={searchableSetting("check-in-repeat-limit").id}
           title="Repeating check-ins end after"
-          description="Hours a repeating check-in keeps going before it stops on its own. The agent can schedule another."
+          description="Hours a repeating check-in, or a background command's status updates, keep going before they stop on their own. The agent can schedule another check-in."
           resetAction={
             supported &&
             settings.checkInRepeatLimitHours !== DEFAULT_SERVER_SETTINGS.checkInRepeatLimitHours ? (
