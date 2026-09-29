@@ -594,7 +594,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Agent check-ins",
     to: "/settings/integrations",
     scope: "project-defaults",
-    searchTerms: ["schedule reminder later wake background build ci poll project override"],
+    searchTerms: [
+      "schedule reminder later wake background command build ci poll tmux project override",
+    ],
   },
   {
     id: "check-in-repeat-limit",

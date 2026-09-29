@@ -187,7 +187,17 @@ working is skipped. Each check-in is a turn, so it uses your provider's quota.
 
 Scheduled check-ins show above the composer, each with **Cancel**, and the messages they send are
 labeled **Check-in**. A thread holds at most five, and archiving it cancels them. Repeating
-check-ins stop after 24 hours unless you change that in **Settings → Integrations → Check-ins**,
-where you can also turn check-ins off for all projects or one. On mobile, open **Settings →
-Server settings → Agent behavior**. Turning check-ins off stops agents scheduling new ones;
-cancel any already scheduled from the thread.
+check-ins stop after 24 hours unless you change that in **Settings → Integrations → Check-ins
+and background commands**, where you can also turn check-ins off for all projects or one. On
+mobile, open **Settings → Server settings → Agent behavior**. Turning check-ins off stops agents
+scheduling new ones; cancel any already scheduled from the thread.
+
+An agent can also run a long command in the background, such as a build or a long test suite.
+It runs on T3 Code's own tmux server, so it keeps going after the agent's turn and even if T3
+Code restarts, and its output goes to files in the folder's `.t3/jobs` (git ignores them). T3
+Code tells the agent the moment the command ends, and on a schedule while it runs if the agent
+asks. Running commands show above the composer with **Terminal**, which opens a terminal on the
+command (scroll with the mouse wheel; hold Shift to select text), and **Stop**. Background
+commands need tmux 3.2 or later on the machine running T3 Code, and the thread in Full access,
+since they run outside the agent's sandbox. Archiving a thread stops its commands; deleting it
+also removes their output. The same switch in Settings turns them off.

@@ -74,3 +74,15 @@ export function isCheckInMessage(
 ): boolean {
   return records?.some((record) => record.kind === CHECK_IN_CONTEXT_KIND) ?? false;
 }
+
+/**
+ * The label a message T3 sent carries, such as "Check-in" or "Background command", or null for
+ * a message the user sent.
+ */
+export function checkInMessageLabel(
+  records: ReadonlyArray<{ readonly kind: string; readonly label?: string }> | undefined,
+): string | null {
+  const record = records?.find((candidate) => candidate.kind === CHECK_IN_CONTEXT_KIND);
+  if (record === undefined) return null;
+  return record.label?.trim() || "Check-in";
+}

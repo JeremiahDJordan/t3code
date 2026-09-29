@@ -7,6 +7,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationThreadShell,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -21,6 +22,7 @@ import { TestClock } from "effect/testing";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as ThreadBackgroundCommands from "../persistence/ThreadBackgroundCommands.ts";
 import * as ThreadCheckIns from "../persistence/ThreadCheckIns.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CheckInScheduler from "./CheckInScheduler.ts";
@@ -90,7 +92,14 @@ const makeHarness = Effect.fn("makeCheckInHarness")(function* (
   const shells = yield* Ref.make(new Map([[THREAD_ID, thread()]]));
   let uuids = 0;
   const layer = CheckInScheduler.layer.pipe(
-    Layer.provide(ThreadCheckIns.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+    Layer.provide(
+      Layer.mergeAll(
+        ThreadCheckIns.layer,
+        ThreadBackgroundCommands.layer,
+        ThreadBackgroundCommands.changesLayer,
+      ).pipe(Layer.provide(SqlitePersistenceMemory)),
+    ),
+    Layer.provide(NodeServices.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(OrchestrationEngineService)({

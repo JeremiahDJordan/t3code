@@ -147,6 +147,7 @@ import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as NewProject from "./project/NewProject.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
 import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import {
@@ -637,6 +638,7 @@ const makeWsRpcLayer = (
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const checkInScheduler = yield* CheckInScheduler.CheckInScheduler;
+      const backgroundCommands = yield* BackgroundCommands.BackgroundCommands;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -3629,6 +3631,26 @@ const makeWsRpcLayer = (
             checkInScheduler
               .cancel(input.checkInId)
               .pipe(Effect.map((cancelled) => ({ cancelled }))),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.subscribeThreadBackgroundCommands]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeThreadBackgroundCommands,
+            backgroundCommands.stream(input.threadId),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.backgroundCommandStop]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.backgroundCommandStop,
+            backgroundCommands
+              .stop(input.backgroundCommandId, "user")
+              .pipe(Effect.map((stopping) => ({ stopping }))),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.backgroundCommandOpenTerminal]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.backgroundCommandOpenTerminal,
+            backgroundCommands.openTerminal(input.backgroundCommandId),
             { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.vcsRefreshStatus]: (input) =>
