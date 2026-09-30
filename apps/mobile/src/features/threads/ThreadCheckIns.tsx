@@ -9,13 +9,15 @@ import type { ReactNode } from "react";
 import {
   backgroundCommandStatusLabel,
   canMuteBackgroundCommand,
+  checkInScheduleLabel,
+  checkInTitle,
 } from "@t3tools/client-runtime/state/checkIns";
 import {
   type AtomCommandResult,
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { Alert, Pressable, View } from "react-native";
+import { Alert, Pressable, ScrollView, useWindowDimensions, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
@@ -23,22 +25,15 @@ import { checkInEnvironment } from "../../state/checkIns";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
 
-function everyLabel(minutes: number): string {
-  if (minutes % 60 === 0) return `${minutes / 60}h`;
-  return minutes > 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
-}
-
-/** `Every 20m · next 2:40 PM`, `At 2:40 PM`, or that it waits for the turn to end. */
+/** `Every 20m · next Tue 2:40 PM`, `At Tue 2:40 PM`, `Stops waiting Tue 4:00 PM`, or due. */
 function scheduleLabel(checkIn: ThreadCheckIn): string {
-  if (checkIn.dueSince !== null) return "Due; waits for the agent to finish";
   const at = new Date(checkIn.nextAt).toLocaleString(undefined, {
     weekday: "short",
     hour: "numeric",
     minute: "2-digit",
   });
-  return checkIn.repeatEveryMinutes === null
-    ? `At ${at}`
-    : `Every ${everyLabel(checkIn.repeatEveryMinutes)} · next ${at}`;
+  const label = checkInScheduleLabel(checkIn, at);
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
 }
 
 function commandStatusLabel(command: ThreadBackgroundCommand): string {
@@ -141,94 +136,107 @@ export function ThreadCheckIns(props: {
   const stop = useAtomCommand(checkInEnvironment.stopBackgroundCommand);
   const setMuted = useAtomCommand(checkInEnvironment.setBackgroundCommandMuted);
   const openTerminal = useAtomCommand(checkInEnvironment.openBackgroundCommandTerminal);
+  const { height } = useWindowDimensions();
   const checkIns = checkInsQuery.data ?? [];
   const commands = commandsQuery.data ?? [];
   if (checkIns.length === 0 && commands.length === 0) return null;
   return (
     <View className="shrink-0 px-4 pb-3">
-      <View className="gap-2 rounded-2xl border border-border bg-card px-3.5 py-3">
-        {commands.map((command) => (
-          <Row
-            key={command.id}
-            symbol="terminal"
-            title={command.command}
-            detail={commandStatusLabel(command)}
-            monospace
-          >
-            {command.status === "running" ? (
-              <>
-                <RowAction
-                  label="Terminal"
-                  accessibilityLabel={`Open a terminal on ${command.command}`}
-                  onPress={() =>
-                    void openTerminal({
-                      environmentId: props.environmentId,
-                      input: { backgroundCommandId: command.id },
-                    }).then((result) => {
-                      if (result._tag !== "Success") {
-                        alertFailure(result, "Could not open a terminal on the command");
-                        return;
-                      }
-                      void navigation.navigate("ThreadTerminal", {
-                        environmentId: String(props.environmentId),
-                        threadId: String(props.threadId),
-                        terminalId: result.value.terminalId,
-                      });
-                    })
-                  }
-                />
-                {canMuteBackgroundCommand(command) ? (
+      {/* Capped, so a fan-out's many waits leave the conversation in view. */}
+      <View className="overflow-hidden rounded-2xl border border-border bg-card">
+        <ScrollView
+          bounces={false}
+          style={{ maxHeight: Math.round(height * 0.4) }}
+          contentContainerClassName="gap-2 px-3.5 py-3"
+        >
+          {commands.map((command) => (
+            <Row
+              key={command.id}
+              symbol="terminal"
+              title={command.command}
+              detail={commandStatusLabel(command)}
+              monospace
+            >
+              {command.status === "running" ? (
+                <>
                   <RowAction
-                    label={command.muted ? "Unmute" : "Mute"}
-                    accessibilityLabel={
-                      command.muted
-                        ? `Send the agent updates about ${command.command} again`
-                        : `Stop sending the agent updates about ${command.command} until it ends`
-                    }
+                    label="Terminal"
+                    accessibilityLabel={`Open a terminal on ${command.command}`}
                     onPress={() =>
-                      void setMuted({
+                      void openTerminal({
                         environmentId: props.environmentId,
-                        input: { backgroundCommandId: command.id, muted: !command.muted },
-                      }).then((result) =>
-                        alertFailure(
-                          result,
-                          command.muted
-                            ? "Could not unmute the command"
-                            : "Could not mute the command",
-                        ),
-                      )
+                        input: { backgroundCommandId: command.id },
+                      }).then((result) => {
+                        if (result._tag !== "Success") {
+                          alertFailure(result, "Could not open a terminal on the command");
+                          return;
+                        }
+                        void navigation.navigate("ThreadTerminal", {
+                          environmentId: String(props.environmentId),
+                          threadId: String(props.threadId),
+                          terminalId: result.value.terminalId,
+                        });
+                      })
                     }
                   />
-                ) : null}
-                <RowAction
-                  label="Stop"
-                  accessibilityLabel={`Stop ${command.command}`}
-                  disabled={command.stopRequestedBy !== null}
-                  onPress={() =>
-                    void stop({
-                      environmentId: props.environmentId,
-                      input: { backgroundCommandId: command.id },
-                    }).then((result) => alertFailure(result, "Could not stop the command"))
-                  }
-                />
-              </>
-            ) : null}
-          </Row>
-        ))}
-        {checkIns.map((checkIn) => (
-          <Row key={checkIn.id} symbol="clock" title={checkIn.note} detail={scheduleLabel(checkIn)}>
-            <RowAction
-              label="Cancel"
-              accessibilityLabel={`Cancel check-in: ${checkIn.note}`}
-              onPress={() =>
-                void cancel({
-                  environmentId: props.environmentId,
-                  input: { checkInId: checkIn.id },
-                }).then((result) => alertFailure(result, "Could not cancel the check-in"))
-              }
-            />
-          </Row>
-        ))}
+                  {canMuteBackgroundCommand(command) ? (
+                    <RowAction
+                      label={command.muted ? "Unmute" : "Mute"}
+                      accessibilityLabel={
+                        command.muted
+                          ? `Send the agent updates about ${command.command} again`
+                          : `Stop sending the agent updates about ${command.command} until it ends`
+                      }
+                      onPress={() =>
+                        void setMuted({
+                          environmentId: props.environmentId,
+                          input: { backgroundCommandId: command.id, muted: !command.muted },
+                        }).then((result) =>
+                          alertFailure(
+                            result,
+                            command.muted
+                              ? "Could not unmute the command"
+                              : "Could not mute the command",
+                          ),
+                        )
+                      }
+                    />
+                  ) : null}
+                  <RowAction
+                    label="Stop"
+                    accessibilityLabel={`Stop ${command.command}`}
+                    disabled={command.stopRequestedBy !== null}
+                    onPress={() =>
+                      void stop({
+                        environmentId: props.environmentId,
+                        input: { backgroundCommandId: command.id },
+                      }).then((result) => alertFailure(result, "Could not stop the command"))
+                    }
+                  />
+                </>
+              ) : null}
+            </Row>
+          ))}
+          {checkIns.map((checkIn) => (
+            <Row
+              key={checkIn.id}
+              symbol="clock"
+              title={checkInTitle(checkIn)}
+              detail={scheduleLabel(checkIn)}
+            >
+              <RowAction
+                label="Cancel"
+                accessibilityLabel={`Cancel check-in: ${checkInTitle(checkIn)}`}
+                onPress={() =>
+                  void cancel({
+                    environmentId: props.environmentId,
+                    input: { checkInId: checkIn.id },
+                  }).then((result) => alertFailure(result, "Could not cancel the check-in"))
+                }
+              />
+            </Row>
+          ))}
+        </ScrollView>
       </View>
     </View>
   );

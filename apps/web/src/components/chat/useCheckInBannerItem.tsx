@@ -8,6 +8,9 @@ import type {
 import {
   backgroundCommandStatusLabel,
   canMuteBackgroundCommand,
+  checkInScheduleLabel,
+  checkInTitle,
+  waitedThreadName,
 } from "@t3tools/client-runtime/state/checkIns";
 import { AlarmClockIcon, SquareTerminalIcon } from "lucide-react";
 import { useMemo } from "react";
@@ -28,22 +31,37 @@ import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import { ThreadLink } from "./ThreadLink";
 
-function everyLabel(minutes: number): string {
-  if (minutes % 60 === 0) return `${minutes / 60}h`;
-  return minutes > 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
-}
-
-/** `every 20m · next 2:40 PM`, `at 2:40 PM`, or that it waits for the turn to end. */
+/** `every 20m · next 2:40 PM`, `at 2:40 PM`, `stops waiting 4:00 PM`, or that it is due. */
 function scheduleLabel(
   checkIn: ThreadCheckIn,
   timestampFormat: Parameters<typeof formatUpcomingTimestamp>[1],
 ) {
-  if (checkIn.dueSince !== null) return "due; waits for the agent to finish";
-  const at = formatUpcomingTimestamp(checkIn.nextAt, timestampFormat);
-  return checkIn.repeatEveryMinutes === null
-    ? `at ${at}`
-    : `every ${everyLabel(checkIn.repeatEveryMinutes)} · next ${at}`;
+  return checkInScheduleLabel(checkIn, formatUpcomingTimestamp(checkIn.nextAt, timestampFormat));
+}
+
+/**
+ * A check-in's truncating title with its full text in a tooltip: the agent's note, or for a wait,
+ * the thread it waits on as a link.
+ */
+function CheckInSubject({ checkIn, className }: { checkIn: ThreadCheckIn; className: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className={className} />}>
+        {checkIn.waitsFor ? (
+          <>
+            When{" "}
+            <ThreadLink thread={checkIn.waitsFor}>{waitedThreadName(checkIn.waitsFor)}</ThreadLink>{" "}
+            finishes
+          </>
+        ) : (
+          checkIn.note
+        )}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{checkInTitle(checkIn)}</TooltipPopup>
+    </Tooltip>
+  );
 }
 
 /** Tells the user why a check-in or command action failed; an interrupted one stays quiet. */
@@ -83,7 +101,7 @@ export function useCheckInBannerItem(
       <Button
         size="xs"
         variant="ghost"
-        aria-label={`Cancel check-in: ${checkIn.note}`}
+        aria-label={`Cancel check-in: ${checkInTitle(checkIn)}`}
         onClick={() =>
           void cancel({
             environmentId: thread.environmentId,
@@ -96,15 +114,20 @@ export function useCheckInBannerItem(
     );
     const [only] = checkIns;
     if (checkIns.length === 1 && only) {
+      const schedule = scheduleLabel(only, timestampFormat);
       return {
         id: `check-ins:${thread.threadId}`,
         variant: "info",
         compact: true,
         priority: "notice",
         icon: <AlarmClockIcon />,
-        // The schedule leads: agents write long notes, and the description is what truncates.
-        title: `Check-in ${scheduleLabel(only, timestampFormat)}`,
-        description: only.note,
+        ...(only.waitsFor
+          ? {
+              title: <CheckInSubject checkIn={only} className="block truncate" />,
+              description: `${schedule.charAt(0).toUpperCase()}${schedule.slice(1)}`,
+            }
+          : // The schedule leads: agents write long notes, and the description is what truncates.
+            { title: `Check-in ${schedule}`, description: only.note }),
         actions: cancelButton(only),
       };
     }
@@ -114,25 +137,24 @@ export function useCheckInBannerItem(
       priority: "notice",
       icon: <AlarmClockIcon />,
       title: `${checkIns.length} check-ins`,
+      // Scrolls, so a fan-out's many waits leave the heading and the conversation in view.
       children: (
-        <ComposerBanner.Body className="flex flex-col gap-1 pb-1.5">
-          {checkIns.map((checkIn) => (
-            <div key={checkIn.id} className="flex min-w-0 items-center gap-2 text-xs">
-              <Tooltip>
-                <TooltipTrigger
-                  render={<span className="min-w-0 flex-1 truncate text-foreground" />}
-                >
-                  {checkIn.note}
-                </TooltipTrigger>
-                <TooltipPopup side="top">{checkIn.note}</TooltipPopup>
-              </Tooltip>
-              <span className="shrink-0 text-muted-foreground tabular-nums">
-                {scheduleLabel(checkIn, timestampFormat)}
-              </span>
-              {cancelButton(checkIn)}
-            </div>
-          ))}
-        </ComposerBanner.Body>
+        <ComposerBanner.Scroll>
+          <ComposerBanner.Body className="flex flex-col gap-1 pb-1.5">
+            {checkIns.map((checkIn) => (
+              <div key={checkIn.id} className="flex min-w-0 items-center gap-2 text-xs">
+                <CheckInSubject
+                  checkIn={checkIn}
+                  className="min-w-0 flex-1 truncate text-foreground"
+                />
+                <span className="shrink-0 text-muted-foreground tabular-nums">
+                  {scheduleLabel(checkIn, timestampFormat)}
+                </span>
+                {cancelButton(checkIn)}
+              </div>
+            ))}
+          </ComposerBanner.Body>
+        </ComposerBanner.Scroll>
       ),
     };
   }, [cancel, checkIns, thread, timestampFormat]);

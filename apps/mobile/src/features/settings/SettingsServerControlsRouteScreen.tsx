@@ -54,6 +54,7 @@ const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettin
     "enableAgentBrowserAccess",
     "enableAgentCheckIns",
     "checkInRepeatLimitHours",
+    "enableAgentThreads",
   ],
   maintenance: ["continueThreadsAfterServerUpdate"],
 };
@@ -217,6 +218,9 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   // A server without check-ins drops their keys, so an edit there would snap back.
   const supportsCheckIns = targets.every(
     (target) => target.environment.serverConfig.environment.capabilities.threadCheckIns === true,
+  );
+  const supportsAgentThreads = targets.every(
+    (target) => target.environment.serverConfig.environment.capabilities.agentThreads === true,
   );
   const disabledFor = (key: string) =>
     disabled ||
@@ -406,27 +410,41 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       onValueChange={(value) => write({ enableAgentBrowserAccess: value })}
                     />
                   </SettingsSection>
-                  {supportsCheckIns ? (
-                    <SettingsSection title="Check-ins and background commands">
-                      <FanoutSwitchRow
-                        icon="clock"
-                        label="Agent check-ins"
-                        subtitle="Let agents schedule a message back into their thread later, and run long commands that tell them when they end. Each message is a turn."
-                        value={uniform("enableAgentCheckIns")}
-                        disabled={disabledFor("enableAgentCheckIns")}
-                        onValueChange={(value) => write({ enableAgentCheckIns: value })}
-                      />
-                      <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
-                        <View className="w-[22px] android:w-6" />
-                        <Text className="flex-1 text-foreground text-lg android:text-base">
-                          Repeats end after (hours)
-                        </Text>
-                        <CheckInHoursField
-                          value={uniform("checkInRepeatLimitHours")}
-                          disabled={disabledFor("checkInRepeatLimitHours")}
-                          onValueChange={(hours) => write({ checkInRepeatLimitHours: hours })}
+                  {supportsCheckIns || supportsAgentThreads ? (
+                    <SettingsSection title="Check-ins, background commands and agent threads">
+                      {supportsCheckIns ? (
+                        <>
+                          <FanoutSwitchRow
+                            icon="clock"
+                            label="Agent check-ins"
+                            subtitle="Let agents schedule a message back into their thread later, and run long commands that tell them when they end. Each message is a turn."
+                            value={uniform("enableAgentCheckIns")}
+                            disabled={disabledFor("enableAgentCheckIns")}
+                            onValueChange={(value) => write({ enableAgentCheckIns: value })}
+                          />
+                          <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
+                            <View className="w-[22px] android:w-6" />
+                            <Text className="flex-1 text-foreground text-lg android:text-base">
+                              Repeats end after (hours)
+                            </Text>
+                            <CheckInHoursField
+                              value={uniform("checkInRepeatLimitHours")}
+                              disabled={disabledFor("checkInRepeatLimitHours")}
+                              onValueChange={(hours) => write({ checkInRepeatLimitHours: hours })}
+                            />
+                          </View>
+                        </>
+                      ) : null}
+                      {supportsAgentThreads ? (
+                        <FanoutSwitchRow
+                          icon="text.bubble"
+                          label="Agent threads"
+                          subtitle="Let agents list and read your threads, start new threads on any enabled provider, message other threads, and wait for one to finish. Each started thread and message is a turn."
+                          value={uniform("enableAgentThreads")}
+                          disabled={disabledFor("enableAgentThreads")}
+                          onValueChange={(value) => write({ enableAgentThreads: value })}
                         />
-                      </View>
+                      ) : null}
                     </SettingsSection>
                   ) : null}
                 </>

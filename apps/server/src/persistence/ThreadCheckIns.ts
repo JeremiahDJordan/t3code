@@ -5,7 +5,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 
-import { CheckInId, ThreadCheckIn, ThreadId } from "@t3tools/contracts";
+import { CheckInId, EnvironmentId, ThreadCheckIn, ThreadId } from "@t3tools/contracts";
 
 import {
   PersistenceDecodeError,
@@ -16,7 +16,8 @@ import {
 /**
  * The check-ins agents have scheduled and T3 has not finished delivering. A delivered one-time
  * check-in, an ended repeating one and a cancelled one are deleted: the thread's messages already
- * record every delivery.
+ * record every delivery. A check-in that waits for another thread (`waitsFor`) keeps that thread
+ * in three columns of its own.
  */
 export class ThreadCheckInRepository extends Context.Service<
   ThreadCheckInRepository,
@@ -41,6 +42,28 @@ export class ThreadCheckInRepository extends Context.Service<
     ) => Effect.Effect<void, ThreadCheckInRepositoryError>;
   }
 >()("t3/persistence/ThreadCheckIns/ThreadCheckInRepository") {}
+
+const { waitsFor: _waitsFor, ...checkInFields } = ThreadCheckIn.fields;
+const CheckInRow = Schema.Struct({
+  ...checkInFields,
+  waitsForEnvironmentId: Schema.NullOr(EnvironmentId),
+  waitsForThreadId: Schema.NullOr(ThreadId),
+  waitsForTitle: Schema.NullOr(Schema.String),
+});
+
+function fromRow(row: typeof CheckInRow.Type): ThreadCheckIn {
+  const { waitsForEnvironmentId, waitsForThreadId, waitsForTitle, ...checkIn } = row;
+  return waitsForEnvironmentId !== null && waitsForThreadId !== null
+    ? {
+        ...checkIn,
+        waitsFor: {
+          environmentId: waitsForEnvironmentId,
+          threadId: waitsForThreadId,
+          title: waitsForTitle ?? "",
+        },
+      }
+    : checkIn;
+}
 
 function toSqlOrDecodeError(sqlOperation: string) {
   return (cause: unknown): ThreadCheckInRepositoryError =>
@@ -72,6 +95,22 @@ const make = Effect.gen(function* () {
     CREATE INDEX IF NOT EXISTS idx_thread_check_ins_thread_id ON thread_check_ins (thread_id)
   `.pipe(Effect.orDie);
 
+  // Columns added after the table first shipped.
+  const existing = new Set(
+    (yield* sql<{ readonly name: string }>`PRAGMA table_info(thread_check_ins)`.pipe(
+      Effect.orDie,
+    )).map((column) => column.name),
+  );
+  for (const name of [
+    "waits_for_environment_id",
+    "waits_for_thread_id",
+    "waits_for_title",
+  ] as const) {
+    if (!existing.has(name)) {
+      yield* sql.unsafe(`ALTER TABLE thread_check_ins ADD COLUMN ${name} TEXT`).pipe(Effect.orDie);
+    }
+  }
+
   const columns = sql`
     check_in_id AS "id",
     thread_id AS "threadId",
@@ -81,18 +120,21 @@ const make = Effect.gen(function* () {
     ends_at AS "endsAt",
     due_since AS "dueSince",
     delivered_count AS "deliveredCount",
-    created_at AS "createdAt"
+    created_at AS "createdAt",
+    waits_for_environment_id AS "waitsForEnvironmentId",
+    waits_for_thread_id AS "waitsForThreadId",
+    waits_for_title AS "waitsForTitle"
   `;
 
   const listAllRows = SqlSchema.findAll({
     Request: Schema.Void,
-    Result: ThreadCheckIn,
+    Result: CheckInRow,
     execute: () => sql`SELECT ${columns} FROM thread_check_ins ORDER BY next_at, check_in_id`,
   });
 
   const listThreadRows = SqlSchema.findAll({
     Request: ThreadId,
-    Result: ThreadCheckIn,
+    Result: CheckInRow,
     execute: (threadId) => sql`
       SELECT ${columns} FROM thread_check_ins
       WHERE thread_id = ${threadId}
@@ -108,9 +150,15 @@ const make = Effect.gen(function* () {
   });
 
   return ThreadCheckInRepository.of({
-    listAll: listAllRows(undefined).pipe(Effect.mapError(toSqlOrDecodeError("listCheckIns"))),
+    listAll: listAllRows(undefined).pipe(
+      Effect.map((rows) => rows.map(fromRow)),
+      Effect.mapError(toSqlOrDecodeError("listCheckIns")),
+    ),
     listByThread: (threadId) =>
-      listThreadRows(threadId).pipe(Effect.mapError(toSqlOrDecodeError("listThreadCheckIns"))),
+      listThreadRows(threadId).pipe(
+        Effect.map((rows) => rows.map(fromRow)),
+        Effect.mapError(toSqlOrDecodeError("listThreadCheckIns")),
+      ),
     insert: (checkIn) =>
       sql<{ readonly id: string }>`
         INSERT INTO thread_check_ins (
@@ -122,7 +170,10 @@ const make = Effect.gen(function* () {
           ends_at,
           due_since,
           delivered_count,
-          created_at
+          created_at,
+          waits_for_environment_id,
+          waits_for_thread_id,
+          waits_for_title
         )
         VALUES (
           ${checkIn.id},
@@ -133,7 +184,10 @@ const make = Effect.gen(function* () {
           ${checkIn.endsAt},
           ${checkIn.dueSince},
           ${checkIn.deliveredCount},
-          ${checkIn.createdAt}
+          ${checkIn.createdAt},
+          ${checkIn.waitsFor?.environmentId ?? null},
+          ${checkIn.waitsFor?.threadId ?? null},
+          ${checkIn.waitsFor?.title ?? null}
         )
         ON CONFLICT (check_in_id) DO NOTHING
         RETURNING check_in_id AS "id"

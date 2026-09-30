@@ -158,6 +158,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as AgentThreads from "./agentThreads/AgentThreads.ts";
 import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
 import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -967,6 +968,7 @@ const buildAppUnderTest = (options?: {
           WorktreeSetupTracker.layer,
           Layer.mock(CheckInScheduler.CheckInScheduler)({}),
           Layer.mock(BackgroundCommands.BackgroundCommands)({}),
+          Layer.mock(AgentThreads.AgentThreads)({}),
           ProjectCloneTracker.layer.pipe(
             Layer.provide(
               Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({

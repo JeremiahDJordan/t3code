@@ -5,6 +5,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import {
+  EnvironmentId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -33,6 +34,8 @@ import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSna
 import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as ThreadBackgroundCommands from "../persistence/ThreadBackgroundCommands.ts";
+import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
+import * as AgentThreads from "../persistence/AgentThreads.ts";
 import * as ThreadCheckIns from "../persistence/ThreadCheckIns.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -81,6 +84,7 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
   readonly persistence: Context.Context<
     | ThreadCheckIns.ThreadCheckInRepository
     | ThreadBackgroundCommands.ThreadBackgroundCommandRepository
+    | AgentThreads.AgentThreadRepository
     | SqlClient.SqlClient
   >;
   readonly runtimeMode?: RuntimeMode;
@@ -114,6 +118,9 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
           getProjectShellById: () => Effect.succeed(Option.none()),
         }),
         Layer.mock(TerminalManager)({}),
+        Layer.mock(ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-local")),
+        }),
       ),
     ),
     Layer.provide(NodeServices.layer),
@@ -128,7 +135,7 @@ const makeHarness = Effect.fn("makeBackgroundCommandHarness")(function* (options
 });
 
 const buildPersistence = Layer.build(
-  Layer.mergeAll(ThreadCheckIns.layer, ThreadBackgroundCommands.layer).pipe(
+  Layer.mergeAll(ThreadCheckIns.layer, ThreadBackgroundCommands.layer, AgentThreads.layer).pipe(
     Layer.provideMerge(SqlitePersistenceMemory),
   ),
 );

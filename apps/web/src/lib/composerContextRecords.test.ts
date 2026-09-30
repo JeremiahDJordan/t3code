@@ -16,6 +16,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  agentMessageSender,
   asKnownContextRecord,
   attachmentContextRecord,
   buildMessageContext,
@@ -754,5 +755,51 @@ describe("selectedMessageContextFragment", () => {
         markdown: `[b.ts L4](t3-context://v1/review-comment/${review.contextId})`,
       }),
     ).toBeNull();
+  });
+});
+
+describe("agentMessageSender", () => {
+  const envelope = (threadId: string) => ({
+    version: 1,
+    messageId: `message-${threadId}`,
+    kind: "message",
+    from: { environmentId: "env", threadId, threadTitle: "Fix the build" },
+    to: { environmentId: "env", threadId: "receiver" },
+    sentAt: "2026-09-30T12:00:00.000Z",
+    conversationId: "conversation-1",
+    depth: 0,
+    body: "Done",
+  });
+  const records = (...entries: ReadonlyArray<readonly [kind: string, payload: unknown]>) =>
+    decodeMessageContext({
+      version: 1,
+      records: entries.map(([kind, payload], index) => ({
+        version: 1,
+        contextId: `notice-${index}`,
+        kind,
+        label: "From Fix the build",
+        payload,
+      })),
+    }).records;
+
+  it("finds the one thread that sent a message", () => {
+    expect(
+      agentMessageSender(
+        records(["agent-message", envelope("sender")], ["agent-message", envelope("sender")]),
+      ),
+    ).toEqual({ environmentId: "env", threadId: "sender" });
+  });
+
+  it("gives up on a check-in, a second sender, or an envelope it cannot read", () => {
+    expect(
+      agentMessageSender(records(["agent-message", envelope("sender")], ["check-in", {}])),
+    ).toBeNull();
+    expect(
+      agentMessageSender(
+        records(["agent-message", envelope("sender")], ["agent-message", envelope("other")]),
+      ),
+    ).toBeNull();
+    expect(agentMessageSender(records(["agent-message", { version: 2 }]))).toBeNull();
+    expect(agentMessageSender([])).toBeNull();
   });
 });

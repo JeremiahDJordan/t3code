@@ -68,8 +68,9 @@ function RepeatLimitInput({
 }
 
 /**
- * Whether agents may schedule check-ins, and how long a repeating one runs. Both follow the
- * settings scope, so a project can differ from its environment.
+ * Whether agents may schedule check-ins, how long a repeating one runs, and whether agents get
+ * the agent-threads tools. All follow the settings scope, so a project can differ from its
+ * environment.
  */
 export function AgentCheckInsSettings() {
   const { scope, connectedEnvironments } = useSettingsScope();
@@ -77,13 +78,17 @@ export function AgentCheckInsSettings() {
   const updateSettings = useUpdateScopedSettings();
   const mixedEnabled = useScopedSettingsMixed(["enableAgentCheckIns"]);
   const mixedLimit = useScopedSettingsMixed(["checkInRepeatLimitHours"]);
+  const mixedThreads = useScopedSettingsMixed(["enableAgentThreads"]);
   const isProjectScope = scope.kind === "project" || scope.kind === "checkout";
   // A server without check-ins drops these keys, so an edit there would snap back.
   const supported = connectedEnvironments.every(
     (environment) => environment.serverConfig?.environment.capabilities.threadCheckIns === true,
   );
+  const threadsSupported = connectedEnvironments.every(
+    (environment) => environment.serverConfig?.environment.capabilities.agentThreads === true,
+  );
   return (
-    <SettingsSection id="check-ins" title="Check-ins and background commands">
+    <SettingsSection id="check-ins" title="Check-ins, background commands and agent threads">
       <SettingsUnavailableGroup
         message={
           supported ? undefined : "A selected environment's server does not support check-ins."
@@ -149,6 +154,48 @@ export function AgentCheckInsSettings() {
               mixed={mixedLimit}
               disabled={!supported}
               onCommit={(hours) => updateSettings({ checkInRepeatLimitHours: hours })}
+            />
+          }
+        />
+      </SettingsUnavailableGroup>
+      <SettingsUnavailableGroup
+        message={
+          threadsSupported
+            ? undefined
+            : "A selected environment's server does not support agent threads."
+        }
+      >
+        <SettingsRow
+          serverScoped
+          settingKeys={["enableAgentThreads"]}
+          mixed={mixedThreads}
+          id={searchableSetting("agent-threads").id}
+          title="Agent threads"
+          description={
+            isProjectScope
+              ? "Let agents in this project list and read your threads, start new threads on any enabled provider, message other threads, and wait for one to finish. Each started thread and message is a turn. Applies when the agent session next starts."
+              : "Let agents list and read your threads, start new threads on any enabled provider, message other threads, and wait for one to finish. Each started thread and message is a turn. Projects can override it."
+          }
+          resetAction={
+            threadsSupported &&
+            settings.enableAgentThreads !== DEFAULT_SERVER_SETTINGS.enableAgentThreads ? (
+              <SettingResetButton
+                label="agent threads"
+                onClick={() =>
+                  updateSettings({
+                    enableAgentThreads: DEFAULT_SERVER_SETTINGS.enableAgentThreads,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              aria-label="Agent threads"
+              mixed={mixedThreads}
+              disabled={!threadsSupported}
+              checked={mixedThreads ? false : settings.enableAgentThreads}
+              onCheckedChange={(enabled) => updateSettings({ enableAgentThreads: enabled })}
             />
           }
         />

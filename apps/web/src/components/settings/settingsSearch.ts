@@ -606,6 +606,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["hours expire stop repeat interval check-in limit"],
   },
   {
+    id: "agent-threads",
+    title: "Agent threads",
+    to: "/settings/integrations",
+    scope: "project-defaults",
+    searchTerms: [
+      "start new threads message other threads wait watch finish report back delegate subagent project override",
+    ],
+  },
+  {
     id: "device-hosts",
     title: "Device hosts",
     to: "/settings/integrations",

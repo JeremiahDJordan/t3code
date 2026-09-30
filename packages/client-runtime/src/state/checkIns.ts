@@ -1,4 +1,4 @@
-import { type ThreadBackgroundCommand, WS_METHODS } from "@t3tools/contracts";
+import { type ThreadBackgroundCommand, type ThreadCheckIn, WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -44,6 +44,31 @@ export function createCheckInEnvironmentAtoms<R, E>(
 function everyLabel(minutes: number): string {
   if (minutes % 60 === 0) return `${minutes / 60}h`;
   return minutes > 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+/** How a wait names the thread it waits on: its quoted title, or a stand-in while it has none. */
+export function waitedThreadName(waitsFor: NonNullable<ThreadCheckIn["waitsFor"]>): string {
+  const title = waitsFor.title.trim();
+  return title === "" ? "another thread" : `"${title}"`;
+}
+
+/** A check-in's row title: the agent's note, or for a wait, `When "Fix the build" finishes`. */
+export function checkInTitle(checkIn: ThreadCheckIn): string {
+  return checkIn.waitsFor ? `When ${waitedThreadName(checkIn.waitsFor)} finishes` : checkIn.note;
+}
+
+/**
+ * When a check-in reaches the agent, in lower case to follow a title: `every 20m · next 2:40 PM`,
+ * `at 2:40 PM`, `stops waiting tomorrow at 9:00 AM` for a wait, or that it is due and waits for
+ * the turn to end. `at` is the client's formatted `nextAt`, which should name the day once it is
+ * not today.
+ */
+export function checkInScheduleLabel(checkIn: ThreadCheckIn, at: string): string {
+  if (checkIn.dueSince !== null) return "due; waits for the agent to finish";
+  if (checkIn.waitsFor) return `stops waiting ${at}`;
+  return checkIn.repeatEveryMinutes === null
+    ? `at ${at}`
+    : `every ${everyLabel(checkIn.repeatEveryMinutes)} · next ${at}`;
 }
 
 const PATTERN_SHOWN_CHARS = 24;

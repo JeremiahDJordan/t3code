@@ -1,6 +1,11 @@
 import {
   type AgentSessionScanResult,
+  DEFAULT_SERVER_SETTINGS,
   type EnvironmentId,
+  ProjectId,
+  ProjectSettingsOverrides,
+  type ServerSettings,
+  type ServerSettingsPatch,
   UPSTREAM_USAGE_PROVIDERS,
   USAGE_CONTRACT_VERSION,
   UsageBucket,
@@ -10,13 +15,18 @@ import {
   UsageSourceFingerprint,
   UsageSummary,
 } from "@t3tools/contracts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { mergeUsage } from "@t3tools/shared/usageMerge";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   agentSessionScanForUpstreamClient,
+  FORK_PROJECT_SETTING_KEYS,
+  settingsPatchFromUpstreamClient,
   usageSummaryForUpstreamClient,
 } from "./upstreamClientCompatibility.ts";
 
@@ -157,5 +167,64 @@ describe("agentSessionScanForUpstreamClient", () => {
       ["/work/app", ["codex"]],
       ["/work/bob-only", []],
     ]);
+  });
+});
+
+describe("settingsPatchFromUpstreamClient", () => {
+  const APP = ProjectId.make("project-app");
+  const OTHER = ProjectId.make("project-other");
+  const forkSettings = {
+    enableAgentCheckIns: false,
+    enableAgentThreads: false,
+    checkInRepeatLimitHours: 4,
+  } as const;
+  const current: ServerSettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    projectSettingsOverrides: {
+      [APP]: { defaultAutoPull: true, ...forkSettings },
+      [OTHER]: { defaultAutoPull: true },
+    },
+  };
+  /** A project's row as upstream clients decode it: their struct has no fork keys. */
+  const decodeRowInUpstreamClient = Schema.decodeUnknownSync(
+    Schema.Struct(Struct.omit(ProjectSettingsOverrides.fields, FORK_PROJECT_SETTING_KEYS)),
+  );
+  const savedByUpstreamClient = (patch: ServerSettingsPatch) =>
+    applyServerSettingsPatch(current, settingsPatchFromUpstreamClient(patch, current));
+
+  it("keeps the fork settings when an upstream client edits another setting in the row", () => {
+    const patch: ServerSettingsPatch = {
+      projectSettingsOverrides: {
+        [APP]: {
+          ...decodeRowInUpstreamClient(current.projectSettingsOverrides[APP]),
+          defaultAutoPull: false,
+        },
+      },
+    };
+
+    // Replacing the row as sent turns the project's agent threads back on.
+    expect(
+      resolveProjectSettings(applyServerSettingsPatch(current, patch), APP).settings
+        .enableAgentThreads,
+    ).toBe(true);
+    const saved = savedByUpstreamClient(patch);
+    expect(saved.projectSettingsOverrides[APP]).toEqual({
+      defaultAutoPull: false,
+      ...forkSettings,
+    });
+    expect(resolveProjectSettings(saved, APP).settings.enableAgentThreads).toBe(false);
+  });
+
+  it("leaves only the fork settings when an upstream client resets the row", () => {
+    const saved = savedByUpstreamClient({ projectSettingsOverrides: { [APP]: null } });
+
+    expect(saved.projectSettingsOverrides[APP]).toEqual(forkSettings);
+  });
+
+  it("still removes a reset row that has no fork settings", () => {
+    const saved = savedByUpstreamClient({ projectSettingsOverrides: { [OTHER]: null } });
+
+    expect(saved.projectSettingsOverrides).not.toHaveProperty(OTHER);
+    expect(saved.projectSettingsOverrides[APP]).toEqual({ defaultAutoPull: true, ...forkSettings });
   });
 });

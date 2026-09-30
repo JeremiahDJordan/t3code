@@ -31,6 +31,8 @@ import {
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
 import { PullRequestsToolkitHandlersLive } from "./toolkits/pullRequests/handlers.ts";
+import { AgentThreadsToolkitHandlersLive } from "./toolkits/agentThreads/handlers.ts";
+import { AgentThreadsToolkit } from "./toolkits/agentThreads/tools.ts";
 import { CheckInsToolkitHandlersLive } from "./toolkits/checkIns/handlers.ts";
 import { CheckInsToolkit } from "./toolkits/checkIns/tools.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
@@ -649,6 +651,10 @@ export const PullRequestsToolkitRegistrationLive = McpServer.toolkit(PullRequest
   Layer.provide(PullRequestsToolkitHandlersLive),
 );
 
+export const AgentThreadsToolkitRegistrationLive = McpServer.toolkit(AgentThreadsToolkit).pipe(
+  Layer.provide(AgentThreadsToolkitHandlersLive),
+);
+
 export const CheckInsToolkitRegistrationLive = McpServer.toolkit(CheckInsToolkit).pipe(
   Layer.provide(CheckInsToolkitHandlersLive),
 );
@@ -677,5 +683,6 @@ export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   PullRequestsToolkitRegistrationLive,
   CheckInsToolkitRegistrationLive,
+  AgentThreadsToolkitRegistrationLive,
   DeviceToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));

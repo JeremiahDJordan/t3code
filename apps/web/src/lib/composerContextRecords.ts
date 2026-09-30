@@ -1,4 +1,7 @@
 import {
+  AGENT_MESSAGE_CONTEXT_KIND,
+  AgentMessageEnvelope,
+  CHECK_IN_CONTEXT_KIND,
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
 } from "@t3tools/contracts";
@@ -14,9 +17,12 @@ import type {
   PreviewAnnotationContextRecord,
   PreviewAnnotationPayload,
   ReviewCommentContextRecord,
+  ScopedThreadRef,
   TerminalContextRecord,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import {
@@ -388,6 +394,32 @@ export function resolveUserMessageContext(message: {
     records: resolved.records,
     recordsById: new Map(resolved.records.map((record) => [record.contextId, record])),
   };
+}
+
+const decodeAgentMessageEnvelope = Schema.decodeUnknownOption(AgentMessageEnvelope);
+
+/**
+ * The thread that sent a message, when every T3 notice on it is an agent message from that one
+ * thread. Null when a check-in shares the message, when several threads sent it, or when an
+ * envelope does not decode; those keep their plain label.
+ */
+export function agentMessageSender(
+  records: ReadonlyArray<ComposerContextRecord>,
+): ScopedThreadRef | null {
+  let sender: ScopedThreadRef | null = null;
+  for (const record of records) {
+    if (record.kind === CHECK_IN_CONTEXT_KIND) return null;
+    if (record.kind !== AGENT_MESSAGE_CONTEXT_KIND) continue;
+    const envelope =
+      "payload" in record ? Option.getOrNull(decodeAgentMessageEnvelope(record.payload)) : null;
+    if (envelope === null) return null;
+    const { environmentId, threadId } = envelope.from;
+    if (sender && (sender.environmentId !== environmentId || sender.threadId !== threadId)) {
+      return null;
+    }
+    sender = { environmentId, threadId };
+  }
+  return sender;
 }
 
 // ---------------------------------------------------------------------------

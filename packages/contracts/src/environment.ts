@@ -184,6 +184,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       `backgroundCommands.openTerminal`, and `backgroundCommands.setMuted` where commands
       carry `muted`). Absent on servers without them. */
   threadBackgroundCommands: Schema.optionalKey(Schema.Boolean),
+  /** Server gives agents the agent-threads MCP tools (start, read, message and wait on threads)
+      and keeps the `enableAgentThreads` setting. Absent on servers without them. */
+  agentThreads: Schema.optionalKey(Schema.Boolean),
   /** Server detects `platform.machine` and persists the `environmentIcon`
       setting. Older servers drop the key on write, so clients show the
       picker inert rather than offering a choice that would never stick. */

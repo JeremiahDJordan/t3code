@@ -1,6 +1,8 @@
 import * as Schema from "effect/Schema";
 
+import { AGENT_MESSAGE_CONTEXT_KIND } from "./agentThreads.ts";
 import {
+  EnvironmentId,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -44,6 +46,13 @@ export const ThreadCheckIn = Schema.Struct({
   dueSince: Schema.NullOr(IsoDateTime),
   deliveredCount: NonNegativeInt,
   createdAt: IsoDateTime,
+  /**
+   * Set when the check-in waits for another thread to finish its turn instead of for a time;
+   * `nextAt` is then when it stops waiting. Absent on older servers and time check-ins.
+   */
+  waitsFor: Schema.optionalKey(
+    Schema.Struct({ environmentId: EnvironmentId, threadId: ThreadId, title: Schema.String }),
+  ),
 });
 export type ThreadCheckIn = typeof ThreadCheckIn.Type;
 
@@ -68,11 +77,17 @@ export class CheckInError extends Schema.TaggedError<CheckInError>()("CheckInErr
  */
 export const CHECK_IN_CONTEXT_KIND = "check-in";
 
-/** Whether a message's context records mark it as a check-in T3 delivered. */
+const isNoticeRecord = (record: { readonly kind: string }) =>
+  record.kind === CHECK_IN_CONTEXT_KIND || record.kind === AGENT_MESSAGE_CONTEXT_KIND;
+
+/**
+ * Whether a message's context records mark it as one T3 delivered: a check-in, a background
+ * command's notice, or a message from another agent's thread.
+ */
 export function isCheckInMessage(
   records: ReadonlyArray<{ readonly kind: string }> | undefined,
 ): boolean {
-  return records?.some((record) => record.kind === CHECK_IN_CONTEXT_KIND) ?? false;
+  return records?.some(isNoticeRecord) ?? false;
 }
 
 /**
@@ -85,8 +100,12 @@ export function checkInMessageLabel(
 ): string | null {
   const labels = new Set(
     (records ?? [])
-      .filter((record) => record.kind === CHECK_IN_CONTEXT_KIND)
-      .map((record) => record.label?.trim() || "Check-in"),
+      .filter(isNoticeRecord)
+      .map(
+        (record) =>
+          record.label?.trim() ||
+          (record.kind === AGENT_MESSAGE_CONTEXT_KIND ? "Agent message" : "Check-in"),
+      ),
   );
   return labels.size === 0 ? null : [...labels].join(" · ");
 }
