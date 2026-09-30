@@ -136,5 +136,6 @@ export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecode
 export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ThreadCheckInRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ThreadBackgroundCommandRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type AgentThreadRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;

@@ -187,10 +187,10 @@ working is skipped. Each check-in is a turn, so it uses your provider's quota.
 
 Scheduled check-ins show above the composer, each with **Cancel**, and the messages they send are
 labeled **Check-in**. A thread holds at most five, and archiving it cancels them. Repeating
-check-ins stop after 24 hours unless you change that in **Settings → Integrations → Check-ins
-and background commands**, where you can also turn check-ins off for all projects or one. On
-mobile, open **Settings → Server settings → Agent behavior**. Turning check-ins off stops agents
-scheduling new ones; cancel any already scheduled from the thread.
+check-ins stop after 24 hours unless you change that in **Settings → Integrations → Check-ins,
+background commands and agent threads**, where you can also turn check-ins off for all projects
+or one. On mobile, open **Settings → Server settings → Agent behavior**. Turning check-ins off
+stops agents scheduling new ones; cancel any already scheduled from the thread.
 
 An agent can also run a long command in the background, such as a build or a long test suite.
 It runs on T3 Code's own tmux server, so it keeps going after the agent's turn and even if T3
@@ -215,3 +215,24 @@ messages T3 Code sends for check-ins and commands, but not the scheduled check-i
 commands, or their buttons. From those apps, ask the agent to cancel a check-in or stop a
 command, or archive the thread. On app.t3.codes, **Stop** on the thread's **Monitoring** banner
 also stops its commands.
+
+## Let agents work with other threads
+
+Agents can work across threads. Ask in your own words, such as "start a Codex thread to write
+the migration and tell me when it's done" or "ask the thread fixing the build what it changed".
+An agent can list and read threads in any project, start a new thread on any enabled provider
+(in the project's checkout or a new worktree, whose agent first runs the project's setup
+script), send a message to another thread, and wait for a thread to finish its turn. A started thread is an
+ordinary thread in your sidebar, and its first message shows which thread started it; a message
+from another agent arrives as a new turn once that agent is idle, labeled with the thread it came
+from, and is a request from that agent, not from you. Every started thread and every message is
+a turn, so it uses your provider's quota.
+
+A thread that waits on another shows it above the composer, with **Cancel**, until that thread
+next finishes a turn and goes idle, or the wait reaches the check-in repeat limit. Starting a thread also waits on it
+unless the agent asks not to. To keep a runaway agent in check, a thread can start 10 threads and
+send 30 messages an hour and receive 30, and threads started by agents can themselves start
+threads only three levels deep. Turn this off for all projects or one under **Settings →
+Integrations → Check-ins, background commands and agent threads**; it applies when the agent's
+session next starts. Apps without this support still show the started threads and the messages,
+but not the waits.

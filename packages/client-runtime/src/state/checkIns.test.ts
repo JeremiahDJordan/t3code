@@ -1,7 +1,14 @@
-import { BackgroundCommandId, type ThreadBackgroundCommand, ThreadId } from "@t3tools/contracts";
+import {
+  BackgroundCommandId,
+  CheckInId,
+  EnvironmentId,
+  type ThreadBackgroundCommand,
+  type ThreadCheckIn,
+  ThreadId,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { backgroundCommandStatusLabel } from "./checkIns.ts";
+import { backgroundCommandStatusLabel, checkInScheduleLabel, checkInTitle } from "./checkIns.ts";
 
 const command: ThreadBackgroundCommand = {
   id: BackgroundCommandId.make("bg-1"),
@@ -60,5 +67,62 @@ describe("backgroundCommandStatusLabel", () => {
         "2:15 PM",
       ),
     ).toBe("Finished (exit 1) · telling the agent");
+  });
+});
+
+const checkIn: ThreadCheckIn = {
+  id: CheckInId.make("check-in-1"),
+  threadId: ThreadId.make("thread-1"),
+  note: "Look at the build again",
+  repeatEveryMinutes: null,
+  nextAt: "2026-09-28T14:40:00.000Z",
+  endsAt: null,
+  dueSince: null,
+  deliveredCount: 0,
+  createdAt: "2026-09-28T14:20:00.000Z",
+};
+
+const waitsFor = {
+  environmentId: EnvironmentId.make("environment-1"),
+  threadId: ThreadId.make("thread-2"),
+  title: "  Fix the build ",
+};
+const wait: ThreadCheckIn = { ...checkIn, nextAt: "2026-09-29T09:00:00.000Z", waitsFor };
+
+describe("checkInTitle", () => {
+  it("shows a time check-in's note", () => {
+    expect(checkInTitle(checkIn)).toBe("Look at the build again");
+  });
+
+  it("names the thread a wait waits on, or stands in for a blank title", () => {
+    expect(checkInTitle(wait)).toBe('When "Fix the build" finishes');
+    expect(checkInTitle({ ...wait, waitsFor: { ...waitsFor, title: " " } })).toBe(
+      "When another thread finishes",
+    );
+  });
+});
+
+describe("checkInScheduleLabel", () => {
+  it("says when a one-time or repeating check-in comes", () => {
+    expect(checkInScheduleLabel(checkIn, "2:40 PM")).toBe("at 2:40 PM");
+    expect(checkInScheduleLabel({ ...checkIn, repeatEveryMinutes: 90 }, "2:40 PM")).toBe(
+      "every 1h 30m · next 2:40 PM",
+    );
+  });
+
+  it("says when a wait gives up rather than when it comes", () => {
+    expect(checkInScheduleLabel(wait, "tomorrow at 9:00 AM")).toBe(
+      "stops waiting tomorrow at 9:00 AM",
+    );
+  });
+
+  it("says a due check-in or wait waits for the agent's turn to end", () => {
+    const dueSince = "2026-09-28T14:40:00.000Z";
+    expect(checkInScheduleLabel({ ...checkIn, dueSince }, "2:40 PM")).toBe(
+      "due; waits for the agent to finish",
+    );
+    expect(checkInScheduleLabel({ ...wait, dueSince }, "9:00 AM")).toBe(
+      "due; waits for the agent to finish",
+    );
   });
 });

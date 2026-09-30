@@ -1,17 +1,24 @@
 import {
+  AGENT_MESSAGE_CONTEXT_KIND,
+  AGENT_THREAD_WAITS_PER_THREAD_MAX,
   BACKGROUND_COMMAND_MATCH_NOTICE_MINUTES,
   CHECK_IN_CONTEXT_KIND,
   CHECK_INS_PER_THREAD_MAX,
+  COMPOSER_CONTEXT_MAX_RECORDS,
   CheckInError,
   CheckInId,
   CommandId,
+  type EnvironmentId,
   MessageId,
   OrchestrationMessageContext,
   type OrchestrationEvent,
+  type OrchestrationThreadDetailWindow,
   type OrchestrationThreadShell,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ThreadCheckIn,
   type ThreadId,
 } from "@t3tools/contracts";
+import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
@@ -31,10 +38,21 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import {
+  agentMessageLabel,
+  agentMessageText,
+  defaultWaitNote,
+  type WaitOutcome,
+  waitNoticeLabel,
+  waitNoticeText,
+} from "../agentThreads/agentThreadMessage.ts";
+import { ServerEnvironment } from "../environment/ServerEnvironment.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { threadHasQueuedTurnStart } from "../orchestration/ThreadSettlementPolicy.ts";
+import * as AgentThreads from "../persistence/AgentThreads.ts";
 import type {
+  AgentThreadRepositoryError,
   ThreadBackgroundCommandRepositoryError,
   ThreadCheckInRepositoryError,
 } from "../persistence/Errors.ts";
@@ -63,6 +81,15 @@ export interface ScheduleCheckInInput {
   readonly repeatEveryMinutes: number | null;
 }
 
+export interface ScheduleWaitInput {
+  /** The thread that waits, and hears when the other one finishes. */
+  readonly threadId: ThreadId;
+  readonly target: { readonly environmentId: EnvironmentId; readonly threadId: ThreadId };
+  /** The waited-on thread's title, as the waiting thread's rows and notice show it. */
+  readonly title: string;
+  readonly note: string;
+}
+
 /**
  * Keeps the check-ins agents schedule and sends each into its thread as a new turn once it is
  * due and the thread is idle. It never interrupts a turn, and a repeat that falls due while an
@@ -72,6 +99,11 @@ export class CheckInScheduler extends Context.Service<
   CheckInScheduler,
   {
     readonly schedule: (input: ScheduleCheckInInput) => Effect.Effect<ThreadCheckIn, CheckInError>;
+    /**
+     * A check-in that goes in when another thread next finishes a turn, is archived or deleted,
+     * or has not finished within the repeat limit. Agent threads' `watch_thread` makes these.
+     */
+    readonly scheduleWait: (input: ScheduleWaitInput) => Effect.Effect<ThreadCheckIn, CheckInError>;
     /**
      * Whether a check-in with that id was scheduled. With `threadId`, only that thread's check-ins
      * can be cancelled, which is what an agent may do; the user may cancel any.
@@ -105,6 +137,9 @@ const SWEEP_INTERVAL = "15 seconds";
 const BACKGROUND_COMMAND_TAIL_MAX_BYTES = 4_096;
 
 /** How much of the matches file one message reads, and how many matches it quotes. */
+/** Older turns read per page, and pages at most, when looking back for a wait's reply. */
+const WAIT_REPLY_PAGE_TURNS = 8;
+const WAIT_REPLY_MAX_PAGES = 8;
 const MATCHES_READ_BYTES = 64 * 1024;
 const MATCHES_SHOWN = 20;
 
@@ -114,9 +149,13 @@ interface PreparedNotice {
   readonly text: string;
   readonly label: string;
   readonly payload: Record<string, unknown>;
+  /** The context record's kind and id; a check-in record keyed by `key` when absent. */
+  readonly record?: { readonly kind: string; readonly contextId: string };
   readonly told: Effect.Effect<
     void,
-    ThreadCheckInRepositoryError | ThreadBackgroundCommandRepositoryError
+    | ThreadCheckInRepositoryError
+    | ThreadBackgroundCommandRepositoryError
+    | AgentThreadRepositoryError
   >;
 }
 
@@ -200,6 +239,45 @@ export function isLastDelivery(checkIn: ThreadCheckIn): boolean {
 
 const decodeMessageContext = Schema.decodeUnknownSync(OrchestrationMessageContext);
 
+/** The message one turn carries for `notices`: their texts, and a context record for each. */
+function noticesMessage(notices: ReadonlyArray<PreparedNotice>) {
+  return {
+    text: notices.map((notice) => notice.text).join("\n\n"),
+    context: decodeMessageContext({
+      version: 1,
+      records: notices.map((notice) => ({
+        version: 1,
+        contextId: notice.record?.contextId ?? notice.key.replace(/[^a-z0-9_-]/gi, "-"),
+        label: notice.label,
+        kind: notice.record?.kind ?? CHECK_IN_CONTEXT_KIND,
+        payload: notice.payload,
+      })),
+    }),
+  };
+}
+
+/**
+ * The leading notices one turn can carry: a message's records at most, within the provider's
+ * input as the provider reactor sends it, with the context links in the text expanded. The rest
+ * stay due. The first always goes, so the queue keeps moving.
+ */
+function noticesForOneTurn(notices: ReadonlyArray<PreparedNotice>): ReadonlyArray<PreparedNotice> {
+  const candidates = notices.slice(0, COMPOSER_CONTEXT_MAX_RECORDS);
+  const { records } = noticesMessage(candidates).context;
+  let text = "";
+  for (const [index, notice] of candidates.entries()) {
+    text = index === 0 ? notice.text : `${text}\n\n${notice.text}`;
+    const providerInput = projectComposerContextForProvider({
+      text,
+      records: records.slice(0, index + 1),
+    });
+    if (index > 0 && providerInput.length > PROVIDER_SEND_TURN_MAX_INPUT_CHARS) {
+      return candidates.slice(0, index);
+    }
+  }
+  return candidates;
+}
+
 const make = Effect.gen(function* () {
   const repository = yield* ThreadCheckIns.ThreadCheckInRepository;
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
@@ -210,6 +288,8 @@ const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const sql = yield* SqlClient.SqlClient;
+  const agentThreads = yield* AgentThreads.AgentThreadRepository;
+  const environmentId = yield* (yield* ServerEnvironment).getEnvironmentId;
   const changes = yield* PubSub.unbounded<ThreadId>();
 
   const failure = (detail: string) => (cause: unknown) =>
@@ -240,7 +320,9 @@ const make = Effect.gen(function* () {
           detail: "Check-ins are turned off for this project in T3 Code's settings.",
         });
       }
-      const existing = yield* list(input.threadId);
+      const existing = (yield* list(input.threadId)).filter(
+        (checkIn) => checkIn.waitsFor === undefined,
+      );
       if (existing.length >= CHECK_INS_PER_THREAD_MAX) {
         return yield* new CheckInError({
           detail: `This thread already has ${CHECK_INS_PER_THREAD_MAX} check-ins. Cancel one first; list_scheduled shows them.`,
@@ -267,6 +349,45 @@ const make = Effect.gen(function* () {
       return checkIn;
     },
   );
+
+  const scheduleWait: CheckInScheduler["Service"]["scheduleWait"] = Effect.fn(
+    "CheckInScheduler.scheduleWait",
+  )(function* (input) {
+    const shell = yield* snapshots
+      .getThreadShellById(input.threadId)
+      .pipe(Effect.catch(failure("Could not read this thread.")));
+    if (Option.isNone(shell)) {
+      return yield* new CheckInError({ detail: "This thread is archived or no longer exists." });
+    }
+    const settings = yield* settingsService.getSettings.pipe(
+      Effect.catch(failure("Could not read T3 Code's settings.")),
+    );
+    const resolved = resolveProjectSettings(settings, shell.value.projectId).settings;
+    const waits = (yield* list(input.threadId)).filter((checkIn) => checkIn.waitsFor !== undefined);
+    if (waits.length >= AGENT_THREAD_WAITS_PER_THREAD_MAX) {
+      return yield* new CheckInError({
+        detail: `This thread already waits on ${AGENT_THREAD_WAITS_PER_THREAD_MAX} threads. Cancel a wait first; list_scheduled shows them.`,
+      });
+    }
+    const nowMs = yield* Clock.currentTimeMillis;
+    const uuid = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+    const checkIn: ThreadCheckIn = {
+      id: CheckInId.make(`ci-${uuid}`),
+      threadId: input.threadId,
+      note: input.note.trim() || defaultWaitNote(input.title),
+      repeatEveryMinutes: null,
+      // When it stops waiting; it goes in sooner once the other thread finishes a turn.
+      nextAt: isoAt(nowMs + resolved.checkInRepeatLimitHours * 3_600_000),
+      endsAt: null,
+      dueSince: null,
+      deliveredCount: 0,
+      createdAt: isoAt(nowMs),
+      waitsFor: { ...input.target, title: input.title },
+    };
+    yield* repository.insert(checkIn).pipe(Effect.catch(failure("Could not save the wait.")));
+    yield* publish([input.threadId]);
+    return checkIn;
+  });
 
   const cancel: CheckInScheduler["Service"]["cancel"] = Effect.fn("CheckInScheduler.cancel")(
     function* (checkInId, threadId) {
@@ -333,18 +454,8 @@ const make = Effect.gen(function* () {
           message: {
             messageId: MessageId.make(key),
             role: "user",
-            text: notices.map((notice) => notice.text).join("\n\n"),
+            ...noticesMessage(notices),
             attachments: [],
-            context: decodeMessageContext({
-              version: 1,
-              records: notices.map((notice) => ({
-                version: 1,
-                contextId: notice.key.replace(/[^a-z0-9_-]/gi, "-"),
-                label: notice.label,
-                kind: CHECK_IN_CONTEXT_KIND,
-                payload: notice.payload,
-              })),
-            }),
           },
           runtimeMode: shell.runtimeMode,
           interactionMode: shell.interactionMode,
@@ -379,6 +490,113 @@ const make = Effect.gen(function* () {
         : repository.update({ ...checkIn, dueSince: null, deliveredCount: delivery }),
     };
   };
+
+  /**
+   * When a wait fell due: when its thread finished a turn since the wait began and went idle,
+   * now if the thread is gone, or null while it has not. The finish time, not when a sweep saw
+   * it, so a turn that ended before the wait's end time is never reported as a timeout. One in
+   * another environment is never seen here; it goes in when the wait ends.
+   */
+  const waitDueAt = (checkIn: ThreadCheckIn, nowMs: number) =>
+    Effect.gen(function* () {
+      const target = checkIn.waitsFor;
+      if (target === undefined || target.environmentId !== environmentId) return null;
+      const shell = yield* snapshots.getThreadShellById(target.threadId);
+      if (Option.isNone(shell)) return nowMs;
+      const completedAt = timestampMs(shell.value.latestTurn?.completedAt);
+      return threadReadyForCheckIn(shell.value, nowMs) &&
+        completedAt > timestampMs(checkIn.createdAt)
+        ? completedAt
+        : null;
+    });
+
+  /**
+   * The reply that ended a waited-on turn: the newest finished assistant message from when the
+   * wait began to when the thread finished, not one written by a turn that has started since.
+   * The waiting thread can be busy long enough for its target to run more turns, so this pages
+   * back past them, up to `WAIT_REPLY_MAX_PAGES`.
+   */
+  const waitReply = Effect.fn("CheckInScheduler.waitReply")(function* (
+    threadId: ThreadId,
+    sinceMs: number,
+    dueAtMs: number,
+  ) {
+    let window: OrchestrationThreadDetailWindow = { turnLimit: 2 };
+    for (let page = 0; page < WAIT_REPLY_MAX_PAGES; page++) {
+      const detail = yield* snapshots.getThreadDetailSnapshot(threadId, window);
+      if (Option.isNone(detail)) return undefined;
+      const { messages } = detail.value.thread;
+      const reply = messages.findLast(
+        (message) =>
+          message.role === "assistant" &&
+          !message.streaming &&
+          timestampMs(message.createdAt) >= sinceMs &&
+          timestampMs(message.createdAt) <= dueAtMs,
+      );
+      if (reply !== undefined) return reply.text;
+      // Older pages are older still once an assistant message predates the wait. Only those
+      // carry the server's clock, as the wait does; a user message carries its client's.
+      const beforeCursor = detail.value.page?.beforeCursor;
+      const reachedWaitStart = messages.some(
+        (message) => message.role === "assistant" && timestampMs(message.createdAt) < sinceMs,
+      );
+      if (!beforeCursor || reachedWaitStart) return undefined;
+      window = { turnLimit: WAIT_REPLY_PAGE_TURNS, beforeCursor };
+    }
+    return undefined;
+  });
+
+  /**
+   * A due wait's part of a message: why it ended, and for a thread that finished a turn, the
+   * reply that ended it. A wait that fell due before its end time did so because its thread
+   * finished a turn or went away; one due at its end time stopped waiting.
+   */
+  const prepareWait = Effect.fn("CheckInScheduler.prepareWait")(function* (
+    checkIn: ThreadCheckIn,
+    target: NonNullable<ThreadCheckIn["waitsFor"]>,
+  ) {
+    const local = target.environmentId === environmentId;
+    const shell = local
+      ? yield* snapshots.getThreadShellById(target.threadId)
+      : Option.none<OrchestrationThreadShell>();
+    const since = timestampMs(checkIn.createdAt);
+    const dueAt = timestampMs(checkIn.dueSince);
+    const finished = dueAt < timestampMs(checkIn.nextAt);
+    const reply =
+      local && Option.isSome(shell) && finished
+        ? yield* waitReply(target.threadId, since, dueAt)
+        : undefined;
+    const outcome: WaitOutcome =
+      local && Option.isNone(shell)
+        ? { kind: "gone" }
+        : finished
+          ? { kind: "finished", reply }
+          : {
+              kind: "stopped-waiting",
+              hours: Math.round((timestampMs(checkIn.nextAt) - since) / 3_600_000),
+            };
+    return {
+      key: `check-in:${checkIn.id}:1`,
+      text: waitNoticeText({ title: target.title, target, note: checkIn.note, outcome }),
+      label: waitNoticeLabel(outcome),
+      payload: { checkInId: checkIn.id, waitsFor: target },
+      told: repository.remove(checkIn.id).pipe(Effect.asVoid),
+    } satisfies PreparedNotice;
+  });
+
+  /** A message from another thread's agent, and the record that it was delivered. */
+  const prepareAgentMessage = (row: AgentThreads.AgentMessageRow, nowMs: number) =>
+    ({
+      key: `agent-message:${row.messageId}`,
+      text: agentMessageText(row.envelope),
+      label: agentMessageLabel(row.envelope),
+      payload: row.envelope,
+      record: {
+        kind: AGENT_MESSAGE_CONTEXT_KIND,
+        contextId: `agent-message-${row.messageId}`.replace(/[^a-z0-9_-]/gi, "-").slice(0, 128),
+      },
+      told: agentThreads.markDelivered(row.messageId, isoAt(nowMs)),
+    }) satisfies PreparedNotice;
 
   /** A background command's output file as a message reports it. */
   const noticedOutput = (filePath: string, bytesBefore: number, tailLines: number) =>
@@ -551,7 +769,11 @@ const make = Effect.gen(function* () {
     const changed = new Set<ThreadId>();
     const waiting = new Map<ThreadId, Array<ThreadCheckIn>>();
     for (const row of rows) {
-      const advanced = advanceDueCheckIn(row, nowMs);
+      // A wait goes in once its thread has finished a turn, or when it stops waiting.
+      const waitDue =
+        row.waitsFor !== undefined && row.dueSince === null ? yield* waitDueAt(row, nowMs) : null;
+      const advanced =
+        waitDue !== null ? { ...row, dueSince: isoAt(waitDue) } : advanceDueCheckIn(row, nowMs);
       if (advanced !== row) {
         yield* repository.update(advanced);
         changed.add(row.threadId);
@@ -581,7 +803,18 @@ const make = Effect.gen(function* () {
       due.push(notice);
       commandNotices.set(row.threadId, due);
     }
-    for (const threadId of new Set([...waiting.keys(), ...commandNotices.keys()])) {
+    // Messages from other threads' agents, waiting for their thread to be idle.
+    const messages = new Map<ThreadId, Array<AgentThreads.AgentMessageRow>>();
+    for (const row of yield* agentThreads.listQueued(environmentId)) {
+      const due = messages.get(row.targetThreadId) ?? [];
+      due.push(row);
+      messages.set(row.targetThreadId, due);
+    }
+    for (const threadId of new Set([
+      ...waiting.keys(),
+      ...commandNotices.keys(),
+      ...messages.keys(),
+    ])) {
       const shell = yield* snapshots.getThreadShellById(threadId);
       if (Option.isNone(shell)) {
         // Archived or deleted while the check-in waited; the domain event normally got here first.
@@ -589,12 +822,14 @@ const make = Effect.gen(function* () {
           yield* repository.removeByThread(threadId);
           changed.add(threadId);
         }
+        if (messages.has(threadId)) yield* agentThreads.failQueuedTo({ environmentId, threadId });
         continue;
       }
       if (!threadReadyForCheckIn(shell.value, nowMs)) continue;
-      // Everything due goes in one message, so the agent takes it in one turn: commands' ends
-      // first, then check-ins in the order they fell due, then running commands' status and
-      // matching lines.
+      // As much as is due and fits goes in one message, so the agent takes it in one turn; the
+      // rest goes the next time the thread is idle. Commands' ends first, then check-ins and
+      // waits in the order they fell due, then other threads' messages, then running commands'
+      // status and matching lines.
       const due = commandNotices.get(threadId) ?? [];
       const notices: Array<PreparedNotice> = [];
       for (const notice of due) {
@@ -603,15 +838,24 @@ const make = Effect.gen(function* () {
       const checkIns = (waiting.get(threadId) ?? []).toSorted(
         (a, b) => timestampMs(a.dueSince) - timestampMs(b.dueSince),
       );
-      for (const checkIn of checkIns) notices.push(prepareCheckIn(checkIn, nowMs));
+      for (const checkIn of checkIns) {
+        notices.push(
+          checkIn.waitsFor === undefined
+            ? prepareCheckIn(checkIn, nowMs)
+            : yield* prepareWait(checkIn, checkIn.waitsFor),
+        );
+      }
       if (checkIns.length > 0) changed.add(threadId);
+      for (const row of messages.get(threadId) ?? []) {
+        notices.push(prepareAgentMessage(row, nowMs));
+      }
       for (const notice of due) {
         if (notice.kind === "end") continue;
         const prepared = yield* prepareCommandUpdate(notice.row, shell.value, nowMs, notice.kind);
         if (prepared) notices.push(prepared);
       }
       // One thread's failed delivery leaves its notices due and must not hold up the others.
-      yield* deliverNotices(shell.value, notices, nowMs).pipe(
+      yield* deliverNotices(shell.value, noticesForOneTurn(notices), nowMs).pipe(
         Effect.catchCauseIf(
           (cause) => !Cause.hasInterruptsOnly(cause),
           (cause) =>
@@ -631,6 +875,7 @@ const make = Effect.gen(function* () {
 
   const removeThread = (threadId: ThreadId) =>
     repository.removeByThread(threadId).pipe(
+      Effect.andThen(agentThreads.failQueuedTo({ environmentId, threadId })),
       Effect.andThen(publish([threadId])),
       Effect.catchCause((cause) =>
         Effect.logWarning("could not remove a thread's check-ins", {
@@ -662,6 +907,10 @@ const make = Effect.gen(function* () {
         }
         return Effect.void;
       };
+      // Delivered and failed messages only matter to the hourly limits and to a late duplicate.
+      yield* agentThreads
+        .pruneMessages(isoAt((yield* Clock.currentTimeMillis) - 7 * 24 * 3_600_000))
+        .pipe(Effect.ignore);
       yield* forkParked(
         worker
           .enqueue(undefined)
@@ -673,6 +922,7 @@ const make = Effect.gen(function* () {
 
   return CheckInScheduler.of({
     schedule,
+    scheduleWait,
     cancel,
     list,
     stream,

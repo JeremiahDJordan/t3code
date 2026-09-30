@@ -85,6 +85,7 @@ const MCP_CAPABILITIES: ReadonlySet<string> = new Set<McpInvocationContext.McpCa
   "device",
   "pull-requests",
   "check-ins",
+  "agent-threads",
 ]);
 const isMcpCapability = (value: string): value is McpInvocationContext.McpCapability =>
   MCP_CAPABILITIES.has(value);

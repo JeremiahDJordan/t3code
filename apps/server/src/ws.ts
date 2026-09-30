@@ -152,6 +152,7 @@ import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import {
   agentSessionScanForUpstreamClient,
+  settingsPatchFromUpstreamClient,
   usageSummaryForUpstreamClient,
 } from "./upstreamClientCompatibility.ts";
 import { importRecentAgentThreads } from "./project/AgentSessionImporter.ts";
@@ -461,7 +462,8 @@ function readClientConnectionOrigin(
 
 /**
  * Whether the client knows Bob, which only this fork's clients announce. Other clients get
- * Bob's entries adapted by `upstreamClientCompatibility`.
+ * Bob's entries adapted by `upstreamClientCompatibility`, and keep the fork's project
+ * settings when they write a project's row.
  */
 function readClientSupportsBob(request: HttpServerRequest.HttpServerRequest): boolean {
   const url = HttpServerRequest.toURL(request);
@@ -2912,7 +2914,9 @@ const makeWsRpcLayer = (
                   )
                 : undefined;
               const settings = yield* serverSettings.updateSettings({
-                ...patch,
+                ...(clientSupportsBob
+                  ? patch
+                  : settingsPatchFromUpstreamClient(patch, yield* serverSettings.getSettings)),
                 ...(deviceHosts ? { deviceHosts } : {}),
               });
               return ServerSettings.redactServerSettingsForClient(settings);

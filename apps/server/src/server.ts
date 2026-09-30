@@ -94,6 +94,8 @@ import * as ThreadSettlementReactor from "./orchestration/ThreadSettlementReacto
 import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
 import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as ThreadBackgroundCommands from "./persistence/ThreadBackgroundCommands.ts";
+import * as AgentThreads from "./agentThreads/AgentThreads.ts";
+import * as AgentThreadsPersistence from "./persistence/AgentThreads.ts";
 import * as ThreadCheckIns from "./persistence/ThreadCheckIns.ts";
 import * as TmuxServer from "./tmux/TmuxServer.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
@@ -276,6 +278,7 @@ const CheckInsLayerLive = BackgroundCommands.layer.pipe(
       ThreadCheckIns.layer,
       ThreadBackgroundCommands.layer,
       ThreadBackgroundCommands.changesLayer,
+      AgentThreadsPersistence.layer,
     ),
   ),
   Layer.provide(TmuxServer.layer.pipe(Layer.provide(ProcessRunner.layer))),
@@ -289,6 +292,8 @@ const ReactorLayerLive = Layer.empty.pipe(
   Layer.provideMerge(StorageCleanup.layer),
   Layer.provideMerge(ThreadDeletionReactorLive),
   Layer.provideMerge(ThreadSettlementReactor.layer),
+  // Agent threads deliver their messages and waits through the check-in scheduler.
+  Layer.provideMerge(AgentThreads.layer),
   Layer.provideMerge(CheckInsLayerLive),
   Layer.provideMerge(PullRequestSyncReactor.layer),
   Layer.provideMerge(ThreadPullRequestReactor.layer),

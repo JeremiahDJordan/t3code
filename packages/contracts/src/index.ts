@@ -18,6 +18,7 @@ export * from "./providerSetup.ts";
 export * from "./providerRuntime.ts";
 export * from "./providerUsageLimits.ts";
 export * from "./checkIns.ts";
+export * from "./agentThreads.ts";
 export * from "./backgroundCommands.ts";
 export * from "./usageLimitSourceId.ts";
 export * from "./model.ts";

@@ -21,17 +21,21 @@ don't reopen them without new information. Add to it when a decision changes.
   count when the limit is unknown), Bob branches in onboarding import and the
   usage scan, and a way back into onboarding import after setup (`/welcome?step=import`,
   from the command palette and Settings → General), since Bob is usually enabled later.
-- **Check-ins and background commands** are the fork's features beyond Bob, for every
-  provider. Their own files: `apps/server/src/checkIns/`, `apps/server/src/tmux/`,
-  `persistence/ThreadCheckIns.ts` and `ThreadBackgroundCommands.ts`,
-  `mcp/toolkits/checkIns/`, contracts `checkIns.ts` and `backgroundCommands.ts`,
+- **Check-ins, background commands and agent threads** are the fork's features beyond Bob,
+  for every provider. Their own files: `apps/server/src/checkIns/`, `apps/server/src/tmux/`,
+  `apps/server/src/agentThreads/`, `persistence/ThreadCheckIns.ts`,
+  `ThreadBackgroundCommands.ts` and `AgentThreads.ts`, `mcp/toolkits/checkIns/` and
+  `mcp/toolkits/agentThreads/`, contracts `checkIns.ts`, `backgroundCommands.ts` and
+  `agentThreads.ts`, web `ThreadLink.tsx`,
   client-runtime `state/checkIns.ts`, web `useCheckInBannerItem.tsx` and
   `AgentCheckInsSettings.tsx`, mobile `ThreadCheckIns.tsx` and `CheckInHoursField.tsx`.
   Upstream files mostly carry registration lines, plus `export` on the terminal manager's
   `createTerminalSpawnEnv`. A few carry behavior: `ThreadBackgroundLiveness.ts` counts a
   running command as its thread's work, web `ChatView.tsx` hides the Monitoring banner
-  while a command's row shows, and web `MessagesTimeline.tsx` and mobile `ThreadFeed.tsx`
-  label the messages T3 sends. The [rebase checklist](#rebase-checklist) lists every such site.
+  while a command's row shows, web `MessagesTimeline.tsx` and mobile `ThreadFeed.tsx`
+  label the messages T3 sends (web links an agent message to its sender), and
+  `ProviderService.ts` grants the `agent-threads` MCP capability. The
+  [rebase checklist](#rebase-checklist) lists every such site.
 - **Upstream clients** (the App Store app, app.t3.codes) cannot decode `bob` in the
   usage and onboarding-scan responses. This fork's clients add `clientBobSupport=1`
   to their connection; for any other client the server leaves `bob` out of the scan
@@ -185,9 +189,11 @@ fallback icon. The relabel modes count each Bobcoin as $1 in the chosen provider
 dollar totals. Both are opt-in or cosmetic; the setting defaults to hidden and
 says so.
 
-Also accepted: upstream apps replace a project's whole settings override when they
-edit it, from a copy without `enableAgentCheckIns` and `checkInRepeatLimitHours`, so
-that project's check-in overrides fall back to the environment's (on, 24 hours).
+Upstream apps replace a project's whole settings override when they edit it, from a copy
+without the fork's project keys. So when a client without `clientBobSupport` writes or
+resets a project's row, the server keeps that row's `enableAgentCheckIns`,
+`enableAgentThreads` and `checkInRepeatLimitHours` (`upstreamClientCompatibility.ts`;
+review 9). A new fork-only project setting goes in its `FORK_PROJECT_SETTING_KEYS`.
 
 ### Create the fork's tables in their repositories, not as numbered migrations
 
@@ -288,6 +294,30 @@ batch together across retries needs a pending-batch record on both notice tables
 recording before sending would lose notices instead, which is worse than an agent reading
 one twice.
 
+### Let agents start, read, message and wait on threads (owner, 2026-09-30)
+
+The agent-threads MCP tools (`list_threads`, `read_thread`, `start_thread`, `send_to_thread`,
+`watch_thread`, `cancel_wait`) are on by default, may start threads on any enabled provider,
+and read threads in every project. Messages and waits go through the check-in scheduler, so
+they never interrupt a turn and share its at-least-once delivery; a wait is a check-in with
+`waitsFor`, which gives it the check-in rows, Cancel and archive cleanup. `start_thread`
+creates a worktree with `gitWorkflow.createWorktree` and puts the project's setup command in
+the new thread's first message, rather than running it on the host as `ws.ts`'s bootstrap
+does for a user (review 9): setup then runs under that agent's permission mode, and the
+server never holds a first turn back. Limits are constants: threads started by agents nest 3 deep, and a thread may start 10
+threads and send 30 messages an hour and receive 30. There is no separate loop limit: two
+agents answering each other are bounded by those rates.
+
+Only this environment's threads are reachable (phase 1), but every shape is ready for others
+(phase 2, not built): threads are addressed by `{environmentId, threadId}`; every message is
+an `AgentMessageEnvelope` (v1, with a sender-made `messageId`, `conversationId` and `depth`)
+stored before it is sent in `agent_thread_messages`, whose rows name both environments; and
+other environments get the `environment-unknown` error code. The design spike for phase 2
+favored peer links: two environments pair with a new narrow auth scope, the sender keeps an
+outbox and delivers envelopes to the other server's HTTP endpoint, deduplicated by
+`messageId`, with replies and watch notices flowing back over the reverse pairing. Adding a
+scope needs care: `AuthEnvironmentScope` is a closed list upstream clients decode.
+
 ### Show the Bob usage setting row everywhere
 
 The row also shows when this fork's client views an upstream server. Upstream
@@ -341,8 +371,10 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   Losing it makes every fork client look upstream, and Bob's usage and onboarding
   import vanish without an error. The expected URLs in `remote.test.ts` and
   `resolver.test.ts` include it.
-- `apps/server/src/ws.ts`: `readClientSupportsBob` and the two adapted handlers
-  (`serverGetUsageSummary`, `agentSessionsScan`).
+- `apps/server/src/ws.ts`: `readClientSupportsBob` and the three adapted handlers
+  (`serverGetUsageSummary`, `agentSessionsScan`, and `serverUpdateSettings`, which keeps
+  the fork's project keys when an upstream client writes a project's row; losing it lets
+  an upstream app quietly turn a project's agent threads back on).
 - `apps/server/src/usage/UsageService.ts`: the Bob database block in `collectDirs`.
 - `apps/server/src/usage/usageAggregation.ts`: records carrying `credits` skip
   public pricing. Losing it prices Bobcoins at public rates.
@@ -362,6 +394,15 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   subscribing), `BackgroundCommands.watch` in `OrchestrationReactor.ts`, web `ChatView.tsx`,
   `MessagesTimeline.tsx` and `IntegrationsSettings.tsx`, mobile
   `ThreadDetailScreen.tsx`, `ThreadFeed.tsx` and `SettingsServerControlsRouteScreen.tsx`.
+- Agent threads: `ProviderService.ts` (`enableAgentThreads` in `agentAccessSettings` and the
+  `agent-threads` capability; without it agents never get the tools), `McpSessionRegistry.ts`
+  (`MCP_CAPABILITIES`), `McpHttpServer.ts` (`AgentThreadsToolkitRegistrationLive`),
+  `server.ts` (`AgentThreads.layer` ahead of `CheckInsLayerLive`, and the repository in it),
+  `upstreamClientCompatibility.ts` (`FORK_PROJECT_SETTING_KEYS`, which keeps a project's
+  opt-out when an upstream app saves that project's settings),
+  `ServerEnvironment.ts` (`agentThreads` capability), contracts `settings.ts`
+  (`enableAgentThreads` in the three places `enableAgentCheckIns` is), web
+  `composerContextRecords.ts` (`agentMessageSender`).
 - Background commands: `ThreadBackgroundLiveness.ts` (`setServerWork`, and its part in
   `getThreadBackgroundLiveness`); without it a thread with a running command looks idle
   and can settle.
@@ -386,7 +427,8 @@ flagged Bob's icon after a rebase), then the fork's server tests:
 cd apps/server && vp test run src/provider/Layers/Bob src/provider/Layers/bob \
   src/provider/Drivers/Bob src/provider/acp/Bob src/textGeneration/BobTextGeneration \
   src/usage src/upstreamClientCompatibility src/project src/checkIns src/tmux \
-  src/mcp/toolkits/checkIns src/mcp/McpSessionRegistry \
+  src/mcp/toolkits/checkIns src/mcp/toolkits/agentThreads src/agentThreads \
+  src/mcp/McpSessionRegistry \
   src/persistence/ThreadBackgroundCommands src/orchestration/ThreadBackgroundLiveness \
   src/orchestration/Layers/OrchestrationReactor src/provider/Layers/ProviderService
 ```

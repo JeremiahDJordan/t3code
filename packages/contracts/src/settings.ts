@@ -1135,6 +1135,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "enableAgentBrowserAccess",
   "enableAgentDeviceAccess",
   "enableAgentCheckIns",
+  "enableAgentThreads",
   "checkInRepeatLimitHours",
   "textGenerationModelSelection",
   "sourceControlWriterModelSelection",
@@ -1164,6 +1165,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentCheckIns: Schema.optionalKey(Schema.Boolean),
+  enableAgentThreads: Schema.optionalKey(Schema.Boolean),
   checkInRepeatLimitHours: Schema.optionalKey(CheckInRepeatLimitHours),
   textGenerationModelSelection: Schema.optionalKey(ModelSelection),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
@@ -1297,6 +1299,12 @@ export const ServerSettings = Schema.Struct({
    * thread later. Each delivery is a turn, so it spends the provider's quota.
    */
   enableAgentCheckIns: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /**
+   * Whether agents get T3's agent-threads tools, which list and read threads, start new ones,
+   * message them and wait for them to finish. Every started thread and delivered message is a
+   * turn, so it spends the provider's quota.
+   */
+  enableAgentThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   /** How many hours a repeating check-in, or a background command's status updates, keep going. */
   checkInRepeatLimitHours: CheckInRepeatLimitHours.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECK_IN_REPEAT_LIMIT_HOURS)),
@@ -1662,6 +1670,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentCheckIns: Schema.optionalKey(Schema.Boolean),
+  enableAgentThreads: Schema.optionalKey(Schema.Boolean),
   checkInRepeatLimitHours: Schema.optionalKey(CheckInRepeatLimitHours),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),

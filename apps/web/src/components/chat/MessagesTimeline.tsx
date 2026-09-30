@@ -221,6 +221,7 @@ import {
   UnresolvedChip,
 } from "../contextChipParts";
 import {
+  agentMessageSender,
   asKnownContextRecord,
   isPullRequestSummaryContext,
   pullRequestContextDisplayState,
@@ -251,6 +252,7 @@ import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 
 import { SkillChipIcon, SkillInlineText } from "./SkillInlineText";
+import { ThreadLink } from "./ThreadLink";
 import { deriveAgentSpawnSummary } from "./agentSpawnSummary";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import {
@@ -1987,8 +1989,12 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
     (attachment) => !isImageAttachment(attachment) && !isFileAttachment(attachment),
   );
   const resolvedContext = useMemo(() => resolveUserMessageContext(row.message), [row.message]);
-  // T3 sent it (a check-in, or news of a background command), not the user.
+  // T3 sent it (a check-in, news of a command, or another agent's message), not the user.
   const checkInLabel = checkInMessageLabel(resolvedContext.records);
+  const sender = useMemo(
+    () => (checkInLabel ? agentMessageSender(resolvedContext.records) : null),
+    [checkInLabel, resolvedContext.records],
+  );
   const previewImages = useMemo(
     () => userImages.filter((image) => image.name.startsWith("preview-annotation-")),
     [userImages],
@@ -2118,12 +2124,13 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           {checkInLabel ? `T3 Code: ${checkInLabel}` : "You"}
         </MessageAuthorHeading>
         {checkInLabel ? (
+          // Screen readers hear the label in the heading; they skip it here unless it links.
           <div
-            aria-hidden
+            aria-hidden={sender ? undefined : true}
             className="mb-1.5 flex items-center gap-1 text-xs text-muted-foreground select-none"
           >
-            <AlarmClockIcon className="size-3.5" />
-            {checkInLabel}
+            <AlarmClockIcon aria-hidden className="size-3.5" />
+            {sender ? <ThreadLink thread={sender}>{checkInLabel}</ThreadLink> : checkInLabel}
           </div>
         ) : null}
         {(regularImages.length > 0 || userVideos.length > 0) && (
