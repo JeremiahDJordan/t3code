@@ -215,6 +215,7 @@ describe("ProviderSessionReaper", () => {
       },
       rollbackConversation: () => unsupported(),
       uploadFeedback: () => unsupported(),
+      readTaskTranscript: () => Effect.succeed({ entries: [] }),
       streamEvents: Stream.empty,
     };
 

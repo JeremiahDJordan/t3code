@@ -16,8 +16,10 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderReadTaskTranscriptResult,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
+  RuntimeTaskId,
   ThreadId,
   ProviderTurnStartResult,
   TurnId,
@@ -145,6 +147,17 @@ export interface ProviderAdapterShape<TError> {
   readonly uploadFeedback?: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, TError>;
+
+  /**
+   * The steps of a finished task the adapter reported with `hasTranscript`, read from the
+   * provider's own records so it needs no live session. `resumeCursor` is the thread's stored
+   * one. Empty when the transcript cannot be read.
+   */
+  readonly readTaskTranscript?: (input: {
+    readonly threadId: ThreadId;
+    readonly taskId: RuntimeTaskId;
+    readonly resumeCursor: unknown;
+  }) => Effect.Effect<ProviderReadTaskTranscriptResult>;
 
   /**
    * Stop all sessions owned by this adapter.

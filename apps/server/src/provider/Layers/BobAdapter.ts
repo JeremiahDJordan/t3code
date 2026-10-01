@@ -108,6 +108,7 @@ import {
   resolveBobTaskDatabasePath,
   sameBobTaskCosts,
 } from "./bobTaskUsage.ts";
+import { readBobSubagentTranscript } from "./bobSubagentTranscript.ts";
 import { readBobConfiguredModel } from "./bobUsageLimits.ts";
 import { BOB_AGENT_MODE_ID, BOB_MODE_OPTION_ID, BOB_PLAN_MODE_ID } from "./BobProvider.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -443,10 +444,10 @@ export function bobSubagentDescription(
   return trimmed && title !== trimmed && title.endsWith(trimmed) ? trimmed : undefined;
 }
 
-/** How much of a subagent's report the task's summary keeps. */
-const BOB_SUBAGENT_SUMMARY_MAX_CHARS = 2_000;
-
-/** A finished subagent's report, without the `<task_result>` tags Bob wraps it in. */
+/**
+ * A finished subagent's report, without the `<task_result>` tags Bob wraps it in. Ingestion
+ * shortens it for clients, and marks it when it does.
+ */
 export function bobSubagentSummary(toolCall: AcpToolCallState): string | undefined {
   const rawOutput = toolCall.data.rawOutput;
   const result =
@@ -458,7 +459,7 @@ export function bobSubagentSummary(toolCall: AcpToolCallState): string | undefin
     .replace(/^\s*<task_result>/, "")
     .replace(/<\/task_result>\s*$/, "")
     .trim();
-  return text ? text.slice(0, BOB_SUBAGENT_SUMMARY_MAX_CHARS) : undefined;
+  return text || undefined;
 }
 
 /**
@@ -687,7 +688,13 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                 type: "task.completed",
                 ...stamp,
                 turnId,
-                payload: { ...task, status, ...(summary ? { summary } : {}) },
+                payload: {
+                  ...task,
+                  status,
+                  ...(summary ? { summary } : {}),
+                  // Bob stores the run on the parent's tool message (see bobSubagentTranscript).
+                  ...(status === "stopped" ? {} : { hasTranscript: true }),
+                },
               },
         );
       });
@@ -695,7 +702,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
     /**
      * Follows Bob's subagent runs as tasks. Bob starts a subagent once its tool call is allowed,
      * so the task starts when the call runs, and ends with the subagent's report when it does.
-     * Bob does not stream the subagent's own tool calls, so the task has no inner activity.
+     * Bob does not stream the subagent's own tool calls, so the task has no inner activity; its
+     * steps are read from Bob's database afterwards (`readTaskTranscript`).
      */
     const trackSubagent = (
       ctx: BobSessionContext,
@@ -2230,6 +2238,14 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
       ),
     );
 
+    const readTaskTranscript: NonNullable<BobAdapterShape["readTaskTranscript"]> = (input) => {
+      const parentTaskId =
+        parseBobResume(input.resumeCursor)?.sessionId ?? sessions.get(input.threadId)?.sessionId;
+      return parentTaskId === undefined
+        ? Effect.succeed({ entries: [] })
+        : readBobSubagentTranscript(taskDatabasePath, parentTaskId, input.taskId);
+    };
+
     return {
       provider: PROVIDER,
       // No `compaction`: Bob's ACP server has no `/compact`, it would reach the model as text.
@@ -2245,6 +2261,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
       listSessions,
       hasSession,
       stopAll,
+      readTaskTranscript,
       streamEvents: Stream.fromPubSub(runtimeEventPubSub),
     } satisfies BobAdapterShape;
   });

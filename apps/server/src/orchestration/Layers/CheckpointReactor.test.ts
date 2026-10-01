@@ -140,6 +140,7 @@ function createProviderServiceHarness(
       }),
     rollbackConversation,
     uploadFeedback: () => unsupported(),
+    readTaskTranscript: () => Effect.succeed({ entries: [] }),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

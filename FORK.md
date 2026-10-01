@@ -123,7 +123,7 @@ Changes that remove fork lines without adding structure are always worth making:
 `ChatView.tsx` computes the usage-limits folder in place instead of moving
 upstream's `gitCwd` block; the upstream-client provider list and its settings
 choices derive from `UsageProviderKind`; the settings row is no longer gated; one
-`bobDatabase.ts` helper serves the three SQLite readers.
+`bobDatabase.ts` helper serves every Bob SQLite reader.
 
 ### Keep editing shared docs and the provider lists (reviews 1 and 2)
 
@@ -384,9 +384,13 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   `model-manifest.json`, and in contracts `settings.ts` (`BobSettings`,
   `bobUsageInUpstreamClients`, and `UPSTREAM_USAGE_PROVIDERS`, which the settings
   choices and the compatibility test derive from) and `model.ts`.
-- `apps/server/src/provider/Layers/bobDatabase.ts`: the one read-only helper all three
-  Bob readers share. Dropping its busy timeout degrades usage, import and the Usage
-  page at once.
+- `apps/server/src/provider/Layers/bobDatabase.ts`: the one read-only helper every
+  Bob reader shares. Dropping its busy timeout degrades usage, import, the Usage page
+  and subagent steps at once.
+- Subagent steps: `hasTranscript` on `task.completed` in contracts, its copy in
+  `ProviderRuntimeIngestion.ts` and in `subagentRuntime.ts`, and
+  `ProviderService.readTaskTranscript` with its `ws.ts` handler. Losing the copy in
+  ingestion hides **Show earlier steps** without an error.
 - Check-ins: `server.ts` (`CheckInScheduler.layer`), `OrchestrationReactor.ts`
   (starting it; without that nothing is ever delivered), `McpHttpServer.ts` (the
   toolkit), `ProviderService.ts` (the `check-ins` capability), `ServerEnvironment.ts`

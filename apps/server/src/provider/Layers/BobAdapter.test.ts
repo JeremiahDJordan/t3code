@@ -1091,7 +1091,12 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
             [
               "task.completed",
               turn.turnId,
-              { ...task, status: "completed", summary: "greet.py has 7 lines." },
+              {
+                ...task,
+                status: "completed",
+                summary: "greet.py has 7 lines.",
+                hasTranscript: true,
+              },
             ],
           ],
         );

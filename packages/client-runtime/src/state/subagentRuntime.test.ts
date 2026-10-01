@@ -196,14 +196,24 @@ describe("foldSubagentActivities", () => {
   });
 
   it("reactivation increments the run count and clears result/error", () => {
+    const completed = activity("task.completed", {
+      taskId: "task-4",
+      status: "completed",
+      summary: "run 1 done",
+      hasTranscript: true,
+    });
+    expect(
+      fold([activity("task.started", { taskId: "task-4" }), completed])[0]!.hasTranscript,
+    ).toBe(true);
     const agents = fold([
       activity("task.started", { taskId: "task-4", taskType: "local_agent" }),
-      activity("task.completed", { taskId: "task-4", status: "completed", summary: "run 1 done" }),
+      completed,
       activity("task.updated", { taskId: "task-4", status: "running" }),
     ]);
     const agent = agents[0]!;
     expect(agent.activationCount).toBe(2);
     expect(agent.result).toBeNull();
+    expect(agent.hasTranscript).toBe(false);
     expect(agent.completedAt).toBeNull();
     expect(agent.status).toBe("running");
   });

@@ -681,10 +681,15 @@ const TaskUpdatedPayload = Schema.Struct({
 });
 export type TaskUpdatedPayload = typeof TaskUpdatedPayload.Type;
 
+/** How much of a finished task's result reaches clients. A longer one is shortened, and says so. */
+export const TASK_RESULT_MAX_CHARS = 4_000;
+
 const TaskCompletedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   status: Schema.Literals(["completed", "failed", "stopped"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** The provider can return the task's steps through `provider.readTaskTranscript`. */
+  hasTranscript: Schema.optional(Schema.Boolean),
   usage: Schema.optional(Schema.Unknown),
   typedUsage: Schema.optional(RuntimeTaskUsage),
   ...taskAgentLinkageFields,

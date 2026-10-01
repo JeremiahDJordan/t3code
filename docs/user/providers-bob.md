@@ -42,6 +42,8 @@ conversation as well, as rolling back a task in Bob's IDE does: Bob continues fr
 the conversation before that turn. The reverted turns' Bobcoins leave **Usage →
 Cost** and **Usage → Tokens**, although your monthly allowance still counts them.
 When Bob runs a subagent, the thread shows it as an agent with the subagent's report.
+Bob does not report a subagent's steps while it works. Once it finishes, open it in
+**Agents** and choose **Show earlier steps** to see its prompt, tool calls and notes.
 
 **Settings → Providers → Bob → Follow-up messages** decides what Bob does with a
 message you send while it is working, from any app. **Queue**, the default, holds
