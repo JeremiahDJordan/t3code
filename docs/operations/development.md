@@ -143,6 +143,11 @@ DMGs default to the host architecture. Use `--arch` to choose another target and
 to retain packaging files for inspection. Run `vp run dist:desktop:artifact --help` for other
 options.
 
+On a Mac, `scripts/install-desktop-macos.sh` quits the running app, installs the newest build from
+`release/` into `/Applications`, and opens it again. An agent can run it from inside that app, such
+as Bob in tmux mode asked from a phone; the script hands the install to a background process so
+the agent's turn can end first.
+
 ### Linux AppImage prerequisites
 
 Build on Linux because the browser-secret helper links against the host's libsecret. Install
