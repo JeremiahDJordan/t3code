@@ -359,8 +359,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
 
-      assert.notProperty(preview, "publish");
-      assert.notProperty(previewChannel, "publish");
+      assert.strictEqual(preview.publish, null);
+      assert.strictEqual(previewChannel.publish, null);
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
@@ -374,6 +374,27 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         ConfigProvider.layer(
           ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
         ),
+      ),
+    ),
+  );
+
+  it.effect("names no update feed for a build without a repository, despite a GitHub token", () =>
+    Effect.gen(function* () {
+      const local = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.0.33",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      // Null stops electron-builder from choosing GitHub because GITHUB_TOKEN is set.
+      assert.strictEqual(local.publish, null);
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(ConfigProvider.fromEnv({ env: { GITHUB_TOKEN: "token" } })),
       ),
     ),
   );
