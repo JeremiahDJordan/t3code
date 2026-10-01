@@ -4863,6 +4863,47 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completedPayload?.detail).toBe("Typecheck finished without errors.");
   });
 
+  it("keeps a long task result in detail while the summary stays one line", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const report = `## Findings\n${"The parser drops trailing commas. ".repeat(40)}`;
+    const oversized = "x".repeat(5_000);
+
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-report-task-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-report-task"),
+      payload: { taskId: "report-task-1", status: "completed", summary: report },
+    });
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-oversized-task-completed"),
+      provider: ProviderDriverKind.make("claudeAgent"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-report-task"),
+      payload: { taskId: "oversized-task-1", status: "completed", summary: oversized },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-oversized-task-completed",
+      ),
+    );
+    const payloadOf = (id: string) =>
+      thread.activities.find((activity: ProviderRuntimeTestActivity) => activity.id === id)
+        ?.payload as Record<string, unknown> | undefined;
+
+    const reportPayload = payloadOf("evt-report-task-completed");
+    expect(reportPayload?.detail).toBe(report);
+    expect(reportPayload?.summary).toBe(`${report.slice(0, 177)}...`);
+    const oversizedDetail = payloadOf("evt-oversized-task-completed")?.detail;
+    expect(oversizedDetail).toBe(`${oversized.slice(0, 3_997)}...`);
+  });
+
   it("titles task completion from task.started when no progress event carried the name", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

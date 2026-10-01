@@ -106,6 +106,8 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
 
 const RECENT_ACTIVITY_LIMIT = 6;
 const SUMMARY_CHAR_LIMIT = 180;
+/** Matches the server's task.completed detail cap; results unfold in full. */
+const RESULT_CHAR_LIMIT = 4_000;
 const ROSTER_LIMIT = 100;
 
 /**
@@ -120,8 +122,8 @@ export function isBackgroundTaskActivity(payload: Record<string, unknown>): bool
   return payload.agentKind !== "agent";
 }
 
-function bounded(value: string): string {
-  return value.length <= SUMMARY_CHAR_LIMIT ? value : `${value.slice(0, SUMMARY_CHAR_LIMIT - 1)}…`;
+function bounded(value: string, limit = SUMMARY_CHAR_LIMIT): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
 /** Appends to the ring buffer, deduping consecutive identical summaries. */
@@ -588,13 +590,15 @@ export function foldSubagentActivities(
         // final usage the update lacked (review finding: the early return
         // dropped both). Fill-if-missing keeps duplicate completions from
         // replacing the first result.
-        const summary = asString(payload.summary) ?? asString(payload.detail);
+        // detail carries the full result (summary is the one-line cut).
+        const outcome = asString(payload.detail) ?? asString(payload.summary);
+        const summary = outcome ? bounded(outcome, RESULT_CHAR_LIMIT) : null;
         if (isTerminalSubagentStatus(agent.status)) {
           if (summary) {
             if (agent.status === "failed") {
-              agent.error = agent.error ?? bounded(summary);
+              agent.error = agent.error ?? summary;
             } else {
-              agent.result = agent.result ?? bounded(summary);
+              agent.result = agent.result ?? summary;
             }
           }
           agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));
@@ -604,9 +608,9 @@ export function foldSubagentActivities(
         applyStatus(agent, status, at);
         if (summary) {
           if (status === "failed") {
-            agent.error = agent.error ?? bounded(summary);
+            agent.error = agent.error ?? summary;
           } else {
-            agent.result = bounded(summary);
+            agent.result = summary;
           }
         }
         agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));

@@ -131,6 +131,20 @@ describe("foldSubagentActivities", () => {
     expect(agent.completedAt).not.toBeNull();
   });
 
+  it("takes a completion's result from its full detail, not the one-line summary", () => {
+    const report = `## Findings\n${"The parser drops trailing commas. ".repeat(40).trim()}`;
+    const agents = fold([
+      activity("task.started", { taskId: "task-report", title: "Review parser" }),
+      activity("task.completed", {
+        taskId: "task-report",
+        status: "completed",
+        summary: `${report.slice(0, 177)}...`,
+        detail: report,
+      }),
+    ]);
+    expect(agents[0]!.result).toBe(report);
+  });
+
   it("progress can create an agent when its start row aged out of retention", () => {
     const agents = fold([
       activity("task.progress", {

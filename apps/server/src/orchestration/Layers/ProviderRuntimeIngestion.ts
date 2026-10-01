@@ -184,6 +184,9 @@ function maxCheckpointTurnCount(
   return maxTurnCount;
 }
 
+/** A finished task's result unfolds in the Agents panel; summary stays one line. */
+const TASK_RESULT_DETAIL_MAX_CHARS = 4_000;
+
 function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
@@ -867,7 +870,7 @@ export function runtimeEventToActivities(
             ...(event.payload.summary
               ? {
                   summary: truncateDetail(event.payload.summary),
-                  detail: truncateDetail(event.payload.summary),
+                  detail: truncateDetail(event.payload.summary, TASK_RESULT_DETAIL_MAX_CHARS),
                 }
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
