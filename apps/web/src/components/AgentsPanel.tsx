@@ -8,6 +8,8 @@
  *   changing data must never change their height.
  * - Workflow expansion is presentation state. A live run stays expanded when
  *   it settles; older collapsed runs can still be opened at run granularity.
+ * - A settled agent with a result or error unfolds below its row to show it
+ *   as markdown. Live rows stay flat.
  * - Static status dots, DOM-write elapsed timers, plain token counters.
  */
 import { useAtomValue } from "@effect/atom-react";
@@ -19,15 +21,24 @@ import type {
 import {
   formatSubagentModelLabel,
   formatSubagentTokenCount,
+  isActiveSubagentStatus,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { createContext, use, useEffect, useMemo, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
+import { markdownToPlainText } from "~/markdown-plain-text";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
+import ChatMarkdown from "~/components/ChatMarkdown";
+
+/** Resolves file links in an unfolded result the way the chat does. */
+const AgentMarkdownContext = createContext<{
+  cwd: string | undefined;
+  threadRef: ScopedThreadRef | undefined;
+}>({ cwd: undefined, threadRef: undefined });
 
 /**
  * In-flight states all present as Working (one steady state, per the
@@ -114,13 +125,12 @@ function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
 
 /**
  * Status-dependent activity line. Live rows lead with what is happening now;
- * settled rows lead with the outcome. Errors are the only inline previews on
- * failed rows because they explain a red row at a glance.
+ * settled rows lead with the outcome, flattened from its markdown. Errors are
+ * the only inline previews on failed rows because they explain a red row at a
+ * glance.
  */
 function agentActivityText(agent: RuntimeSubagent): string | null {
-  const live =
-    agent.status === "running" || agent.status === "pending" || agent.status === "waiting";
-  if (live) {
+  if (isActiveSubagentStatus(agent.status)) {
     return (
       agent.progress ??
       (agent.lastToolName ? `▸ ${agent.lastToolName}` : null) ??
@@ -128,16 +138,45 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
       agent.error
     );
   }
+  const outcome = agent.error ?? agent.result;
+  if (outcome !== null) {
+    return markdownToPlainText(outcome);
+  }
+  return agent.progress ?? (agent.lastToolName ? `▸ ${agent.lastToolName}` : null);
+}
+
+/** A settled agent's error and result in full, mounted only while its row is open. */
+function AgentOutcome({ agent }: { agent: RuntimeSubagent }) {
+  const { cwd, threadRef } = use(AgentMarkdownContext);
   return (
-    agent.error ??
-    agent.result ??
-    agent.progress ??
-    (agent.lastToolName ? `▸ ${agent.lastToolName}` : null)
+    <div className="mx-1.5 mb-1 flex flex-col gap-2 rounded-md border border-border/60 bg-background/60 p-2">
+      {agent.error ? (
+        <ChatMarkdown
+          text={agent.error}
+          cwd={cwd}
+          threadRef={threadRef}
+          className="text-xs text-destructive-foreground"
+        />
+      ) : null}
+      {agent.result ? (
+        <ChatMarkdown text={agent.result} cwd={cwd} threadRef={threadRef} className="text-xs" />
+      ) : null}
+    </div>
   );
 }
 
-/** Flat, non-interactive agent status line. No unfold. */
+const AGENT_ROW_GRID_CLASS_NAME =
+  "grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1";
+
+/**
+ * Agent status line with three fixed lines. A settled agent with a result or
+ * error is a disclosure button that unfolds the outcome below; live rows and
+ * rows with nothing to show stay flat.
+ */
 function AgentRow({ agent }: { agent: RuntimeSubagent }) {
+  const [open, setOpen] = useState(false);
+  const canExpand =
+    !isActiveSubagentStatus(agent.status) && (agent.result !== null || agent.error !== null);
   const visuals = STATUS_VISUALS[agent.status];
   const statusLabel =
     agent.kind === "subagent_batch" && agent.status === "idle" ? "Idle" : visuals.label;
@@ -154,8 +193,8 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
     agent.activationCount > 1 ? `run ${agent.activationCount}` : null,
   ].filter((value): value is string => value !== null);
 
-  return (
-    <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
+  const lines = (
+    <>
       <span className="col-start-1 row-start-1 flex items-center">
         <StatusDot status={agent.status} />
       </span>
@@ -173,6 +212,13 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
           {agent.status === "completed" ? (
             <Check aria-hidden className="size-3 text-success" />
           ) : null}
+          {canExpand ? (
+            open ? (
+              <ChevronDown aria-hidden className="size-3" />
+            ) : (
+              <ChevronRight aria-hidden className="size-3" />
+            )
+          ) : null}
         </span>
       </span>
       <span
@@ -181,12 +227,29 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
           agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
         )}
       >
-        {activity ?? statusLabel}
+        {activity || statusLabel}
       </span>
       <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-2xs tabular-nums text-muted-foreground/70">
         {metadata.join(" · ")}
       </span>
       <span className="sr-only">{statusLabel}</span>
+    </>
+  );
+
+  if (!canExpand) {
+    return <div className={AGENT_ROW_GRID_CLASS_NAME}>{lines}</div>;
+  }
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className={cn(AGENT_ROW_GRID_CLASS_NAME, "w-full text-left hover:bg-accent/40")}
+      >
+        {lines}
+      </button>
+      {open ? <AgentOutcome agent={agent} /> : null}
     </div>
   );
 }
@@ -525,11 +588,22 @@ export function AgentsPanel({
   model,
   environmentId = null,
   threadId = null,
+  markdownCwd,
 }: {
   model: AgentPanelModel;
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
+  /** Workspace that relative file links in agent results resolve against. */
+  markdownCwd?: string | undefined;
 }) {
+  const markdownContext = useMemo(
+    () => ({
+      cwd: markdownCwd,
+      threadRef: environmentId && threadId ? { environmentId, threadId } : undefined,
+    }),
+    [environmentId, threadId, markdownCwd],
+  );
+
   if (!model.hasAgents) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
@@ -544,41 +618,43 @@ export function AgentsPanel({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="flex flex-col gap-2 p-2">
-          {model.workflows.map((group) => (
-            <WorkflowSection
-              key={group.workflow.id}
-              group={group}
-              environmentId={environmentId}
-              threadId={threadId}
-            />
-          ))}
-          {model.directAgents.length > 0 ? (
-            <section>
-              <div className="px-1.5 pt-1 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
-                Direct spawns
-              </div>
-              {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} />
-              ))}
-            </section>
-          ) : null}
-        </div>
-      </ScrollArea>
-      <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-2xs text-muted-foreground">
-        <span className="flex items-center gap-2">
-          {model.runningCount + model.waitingCount > 0 ? (
-            <span className="text-info-foreground">
-              ● {model.runningCount + model.waitingCount} working
-            </span>
-          ) : null}
-          {model.idleCount > 0 ? <span>{model.idleCount} idle</span> : null}
-          {model.settledCount > 0 ? <span>{model.settledCount} settled</span> : null}
-        </span>
-        <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} tok</span>
-      </footer>
-    </div>
+    <AgentMarkdownContext value={markdownContext}>
+      <div className="flex h-full min-h-0 flex-col">
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="flex flex-col gap-2 p-2">
+            {model.workflows.map((group) => (
+              <WorkflowSection
+                key={group.workflow.id}
+                group={group}
+                environmentId={environmentId}
+                threadId={threadId}
+              />
+            ))}
+            {model.directAgents.length > 0 ? (
+              <section>
+                <div className="px-1.5 pt-1 text-3xs font-medium uppercase tracking-wider text-muted-foreground">
+                  Direct spawns
+                </div>
+                {model.directAgents.map((agent) => (
+                  <AgentRow key={agent.id} agent={agent} />
+                ))}
+              </section>
+            ) : null}
+          </div>
+        </ScrollArea>
+        <footer className="flex items-center justify-between border-t border-border/60 px-3 py-1.5 font-mono text-2xs text-muted-foreground">
+          <span className="flex items-center gap-2">
+            {model.runningCount + model.waitingCount > 0 ? (
+              <span className="text-info-foreground">
+                ● {model.runningCount + model.waitingCount} working
+              </span>
+            ) : null}
+            {model.idleCount > 0 ? <span>{model.idleCount} idle</span> : null}
+            {model.settledCount > 0 ? <span>{model.settledCount} settled</span> : null}
+          </span>
+          <span className="tabular-nums">Σ {formatSubagentTokenCount(model.totalTokens)} tok</span>
+        </footer>
+      </div>
+    </AgentMarkdownContext>
   );
 }

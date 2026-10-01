@@ -246,6 +246,7 @@ import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { useClientSettings } from "~/hooks/useSettings";
 import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
+import { markdownToPlainText } from "~/markdown-plain-text";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
@@ -4644,7 +4645,9 @@ function AgentSpawnMemberRow({
     agent.role && agent.role.trim().toLowerCase() !== agent.title.trim().toLowerCase()
       ? agent.role
       : null;
-  const firstLine = activity?.split("\n").find((line) => line.trim().length > 0) ?? null;
+  const firstLine = markdownToPlainText(
+    activity?.split("\n").find((line) => line.trim().length > 0) ?? "",
+  );
   const body = [activity?.trim() || null, formatSubagentModelLabel(agent.model, agent.effort)]
     .filter(Boolean)
     .join("\n\n");
