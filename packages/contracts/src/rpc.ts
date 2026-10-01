@@ -124,6 +124,8 @@ import {
   OrchestrationGetWorkflowScriptError,
 } from "./orchestration.ts";
 import {
+  ProviderReadTaskTranscriptInput,
+  ProviderReadTaskTranscriptResult,
   ProviderUploadFeedbackError,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
@@ -325,6 +327,7 @@ export const WS_METHODS = {
 
   // Provider methods
   providerUploadFeedback: "provider.uploadFeedback",
+  providerReadTaskTranscript: "provider.readTaskTranscript",
   providerAuthStart: "provider.auth.start",
   providerConsumeResetCredit: "provider.consumeResetCredit",
   providerAuthComplete: "provider.auth.complete",
@@ -1083,6 +1086,12 @@ const WsProviderUploadFeedbackRpc = Rpc.make(WS_METHODS.providerUploadFeedback, 
   error: Schema.Union([ProviderUploadFeedbackError, EnvironmentAuthorizationError]),
 });
 
+const WsProviderReadTaskTranscriptRpc = Rpc.make(WS_METHODS.providerReadTaskTranscript, {
+  payload: ProviderReadTaskTranscriptInput,
+  success: ProviderReadTaskTranscriptResult,
+  error: EnvironmentAuthorizationError,
+});
+
 const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -1608,6 +1617,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,
   WsProviderUploadFeedbackRpc,
+  WsProviderReadTaskTranscriptRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
   WsWorktreeSetupCancelRpc,

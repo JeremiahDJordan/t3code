@@ -2352,6 +2352,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const readTaskTranscript: ProviderServiceMethod<"readTaskTranscript"> = Effect.fn(
+    "readTaskTranscript",
+  )(
+    function* (input) {
+      const empty = { entries: [] };
+      const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      if (binding?.providerInstanceId === undefined) return empty;
+      const adapter = yield* registry
+        .getByInstance(binding.providerInstanceId)
+        .pipe(Effect.orElseSucceed(() => undefined));
+      if (adapter?.readTaskTranscript === undefined) return empty;
+      return yield* adapter.readTaskTranscript({
+        threadId: input.threadId,
+        taskId: input.taskId,
+        resumeCursor: binding.resumeCursor,
+      });
+    },
+    Effect.orElseSucceed(() => ({ entries: [] })),
+  );
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     // Continuation is project-scopable, so decide it per session's project;
     // without orchestration the environment value is all there is.
@@ -2476,6 +2496,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     assertConversationRollbackSupported,
     rollbackConversation,
     uploadFeedback,
+    readTaskTranscript,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

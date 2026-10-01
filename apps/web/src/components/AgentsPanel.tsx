@@ -9,7 +9,8 @@
  * - Workflow expansion is presentation state. A live run stays expanded when
  *   it settles; older collapsed runs can still be opened at run granularity.
  * - A settled agent with a result or error unfolds below its row to show it
- *   as markdown. Live rows stay flat.
+ *   as markdown. Live rows stay flat. When the provider kept the run's steps,
+ *   a divider above the result unfolds them; they load only then.
  * - Static status dots, DOM-write elapsed timers, plain token counters.
  */
 import { useAtomValue } from "@effect/atom-react";
@@ -23,7 +24,13 @@ import {
   formatSubagentTokenCount,
   isActiveSubagentStatus,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  RuntimeTaskId,
+  type ScopedThreadRef,
+  type TaskTranscriptEntry,
+  type ThreadId,
+} from "@t3tools/contracts";
 import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import { createContext, use, useEffect, useMemo, useRef, useState } from "react";
 
@@ -145,21 +152,169 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
   return agent.progress ?? (agent.lastToolName ? `▸ ${agent.lastToolName}` : null);
 }
 
-/** A settled agent's error and result in full, mounted only while its row is open. */
-function AgentOutcome({ agent }: { agent: RuntimeSubagent }) {
+/**
+ * A settled agent's error and result in full, mounted only while its row is open. `fullTitle` is
+ * the task's title when its row cuts it off.
+ */
+function AgentOutcome({ agent, fullTitle }: { agent: RuntimeSubagent; fullTitle: string | null }) {
   const { cwd, threadRef } = use(AgentMarkdownContext);
+  const [stepsOpen, setStepsOpen] = useState(false);
   return (
     <div className="mx-1.5 mb-1 flex flex-col gap-2 rounded-md border border-border/60 bg-background/60 p-2">
+      {fullTitle ? (
+        <p className="whitespace-pre-wrap break-words text-sm font-medium">{fullTitle}</p>
+      ) : null}
+      {agent.hasTranscript && threadRef ? (
+        <>
+          <button
+            type="button"
+            aria-expanded={stepsOpen}
+            onClick={() => setStepsOpen((value) => !value)}
+            className="flex items-center gap-2 text-2xs text-muted-foreground hover:text-foreground"
+          >
+            <span aria-hidden className="h-px flex-1 bg-muted-foreground/25" />
+            {stepsOpen ? "Hide earlier steps" : "Show earlier steps"}
+            <span aria-hidden className="h-px flex-1 bg-muted-foreground/25" />
+          </button>
+          {stepsOpen ? (
+            <AgentSteps threadRef={threadRef} taskId={agent.id} shownTitle={fullTitle} />
+          ) : null}
+          {stepsOpen ? <AgentDetailLabel>Result</AgentDetailLabel> : null}
+        </>
+      ) : null}
       {agent.error ? (
         <ChatMarkdown
           text={agent.error}
           cwd={cwd}
           threadRef={threadRef}
-          className="text-xs text-destructive-foreground"
+          className="text-sm text-destructive-foreground"
         />
       ) : null}
       {agent.result ? (
-        <ChatMarkdown text={agent.result} cwd={cwd} threadRef={threadRef} className="text-xs" />
+        <ChatMarkdown text={agent.result} cwd={cwd} threadRef={threadRef} className="text-sm" />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * A finished run's steps before its result, fetched when first unfolded. A prompt the card
+ * already shows as the title is left out.
+ */
+function AgentSteps({
+  threadRef,
+  taskId,
+  shownTitle,
+}: {
+  threadRef: ScopedThreadRef;
+  taskId: string;
+  shownTitle: string | null;
+}) {
+  const result = useAtomValue(
+    orchestrationEnvironment.taskTranscript({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId, taskId: RuntimeTaskId.make(taskId) },
+    }),
+  );
+  if (result._tag === "Failure") {
+    return <p className="text-xs text-destructive-foreground">Could not load the steps.</p>;
+  }
+  if (result._tag !== "Success") {
+    return <p className="text-xs text-muted-foreground">Loading…</p>;
+  }
+  const { omittedEntries } = result.value;
+  const entries = result.value.entries.filter(
+    (entry) => !(entry._tag === "prompt" && entry.text === shownTitle),
+  );
+  if (entries.length === 0) {
+    return <p className="text-xs text-muted-foreground">No steps were recorded.</p>;
+  }
+  const omittedAt = entries[0]?._tag === "prompt" ? 1 : 0;
+  return (
+    <ol className="flex flex-col gap-1.5 border-l-2 border-muted-foreground/20 pl-2">
+      {entries.map((entry, index) => (
+        // oxlint-disable-next-line react/no-array-index-key -- A run's steps never reorder.
+        <li key={index}>
+          {omittedEntries && index === omittedAt ? (
+            <p className="mb-1.5 text-2xs text-muted-foreground">
+              {omittedEntries} older {omittedEntries === 1 ? "step" : "steps"} not shown
+            </p>
+          ) : null}
+          <AgentStep entry={entry} />
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function AgentStep({ entry }: { entry: TaskTranscriptEntry }) {
+  const { cwd, threadRef } = use(AgentMarkdownContext);
+  switch (entry._tag) {
+    case "prompt":
+      return (
+        <p className="whitespace-pre-wrap break-words text-sm text-foreground/80">{entry.text}</p>
+      );
+    case "message":
+      return <ChatMarkdown text={entry.text} cwd={cwd} threadRef={threadRef} className="text-sm" />;
+    case "tool":
+      return <AgentToolStep entry={entry} />;
+  }
+}
+
+const AGENT_STEP_DETAIL_CLASS_NAME =
+  "max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-sm bg-muted/40 p-1.5 font-mono text-xs";
+
+/** Names a part of an expanded agent, such as a tool call's input. */
+function AgentDetailLabel({ children }: { children: string }) {
+  return (
+    <span className="text-2xs font-medium uppercase tracking-wider text-muted-foreground">
+      {children}
+    </span>
+  );
+}
+
+/** One tool call: its title, unfolding to its input and output. */
+function AgentToolStep({ entry }: { entry: Extract<TaskTranscriptEntry, { _tag: "tool" }> }) {
+  const { cwd } = use(AgentMarkdownContext);
+  const [open, setOpen] = useState(false);
+  const title = cwd ? entry.title.replaceAll(`${cwd}/`, "") : entry.title;
+  const titleClassName = cn(
+    "truncate font-mono text-xs",
+    entry.failed ? "text-destructive-foreground" : "text-foreground/80",
+  );
+  if (!entry.input && !entry.output) {
+    return <p className={cn(titleClassName, "pl-4")}>{title}</p>;
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-w-0 items-center gap-1 text-left hover:text-foreground"
+      >
+        {open ? (
+          <ChevronDown aria-hidden className="size-3 shrink-0 text-muted-foreground" />
+        ) : (
+          <ChevronRight aria-hidden className="size-3 shrink-0 text-muted-foreground" />
+        )}
+        <span className={titleClassName}>{title}</span>
+      </button>
+      {open && entry.input ? (
+        <>
+          <AgentDetailLabel>Input</AgentDetailLabel>
+          <pre className={cn(AGENT_STEP_DETAIL_CLASS_NAME, "text-foreground/80")}>
+            {entry.input}
+          </pre>
+        </>
+      ) : null}
+      {open && entry.output ? (
+        <>
+          <AgentDetailLabel>Output</AgentDetailLabel>
+          <pre className={cn(AGENT_STEP_DETAIL_CLASS_NAME, "text-foreground/90")}>
+            {entry.output}
+          </pre>
+        </>
       ) : null}
     </div>
   );
@@ -175,6 +330,8 @@ const AGENT_ROW_GRID_CLASS_NAME =
  */
 function AgentRow({ agent }: { agent: RuntimeSubagent }) {
   const [open, setOpen] = useState(false);
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const [titleClipped, setTitleClipped] = useState(false);
   const canExpand =
     !isActiveSubagentStatus(agent.status) && (agent.result !== null || agent.error !== null);
   const visuals = STATUS_VISUALS[agent.status];
@@ -199,7 +356,9 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
         <StatusDot status={agent.status} />
       </span>
       <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
-        <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
+        <span ref={titleRef} className="min-w-0 truncate text-sm font-medium">
+          {agent.title}
+        </span>
         {role ? (
           <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-3xs text-muted-foreground">
             {role}
@@ -243,13 +402,17 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
     <div>
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          const title = titleRef.current;
+          setTitleClipped(title !== null && title.scrollWidth > title.clientWidth);
+          setOpen((value) => !value);
+        }}
         aria-expanded={open}
         className={cn(AGENT_ROW_GRID_CLASS_NAME, "w-full text-left hover:bg-accent/40")}
       >
         {lines}
       </button>
-      {open ? <AgentOutcome agent={agent} /> : null}
+      {open ? <AgentOutcome agent={agent} fullTitle={titleClipped ? agent.title : null} /> : null}
     </div>
   );
 }

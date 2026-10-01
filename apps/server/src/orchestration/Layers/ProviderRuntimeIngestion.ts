@@ -18,6 +18,7 @@ import {
   type ProviderRuntimeEvent,
   type ResponseStreamingMode,
   RuntimeRequestId,
+  TASK_RESULT_MAX_CHARS,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -184,11 +185,17 @@ function maxCheckpointTurnCount(
   return maxTurnCount;
 }
 
-/** A finished task's result unfolds in the Agents panel; summary stays one line. */
-const TASK_RESULT_DETAIL_MAX_CHARS = 4_000;
-
 function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
+}
+
+const SHORTENED_RESULT_SUFFIX = "\n\n… (shortened)";
+
+/** A finished task's result for its expanded view, marked when cut so it never reads as whole. */
+function shortenTaskResult(value: string): string {
+  return value.length > TASK_RESULT_MAX_CHARS
+    ? `${value.slice(0, TASK_RESULT_MAX_CHARS - SHORTENED_RESULT_SUFFIX.length).trimEnd()}${SHORTENED_RESULT_SUFFIX}`
+    : value;
 }
 
 function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string | undefined {
@@ -870,9 +877,10 @@ export function runtimeEventToActivities(
             ...(event.payload.summary
               ? {
                   summary: truncateDetail(event.payload.summary),
-                  detail: truncateDetail(event.payload.summary, TASK_RESULT_DETAIL_MAX_CHARS),
+                  detail: shortenTaskResult(event.payload.summary),
                 }
               : {}),
+            ...(event.payload.hasTranscript ? { hasTranscript: true } : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
             ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
           },

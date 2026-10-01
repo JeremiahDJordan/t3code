@@ -21,6 +21,8 @@ import type {
   ProviderSession,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  ProviderReadTaskTranscriptInput,
+  ProviderReadTaskTranscriptResult,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
   MessageId,
@@ -127,6 +129,14 @@ export interface ProviderServiceShape {
   readonly uploadFeedback: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, ProviderServiceError>;
+
+  /**
+   * A finished task's steps, from the thread's provider. Never starts a session; empty when the
+   * thread has no binding or its provider keeps no transcript.
+   */
+  readonly readTaskTranscript: (
+    input: ProviderReadTaskTranscriptInput,
+  ) => Effect.Effect<ProviderReadTaskTranscriptResult>;
 
   /**
    * Canonical provider runtime event stream.

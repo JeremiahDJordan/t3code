@@ -2728,6 +2728,12 @@ const makeWsRpcLayer = (
             ),
             { "rpc.aggregate": "provider" },
           ),
+        [WS_METHODS.providerReadTaskTranscript]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerReadTaskTranscript,
+            providerService.readTaskTranscript(input),
+            { "rpc.aggregate": "provider" },
+          ),
         [WS_METHODS.serverUpdateProvider]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverUpdateProvider,

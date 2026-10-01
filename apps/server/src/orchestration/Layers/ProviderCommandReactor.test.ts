@@ -398,6 +398,7 @@ describe("ProviderCommandReactor", () => {
       },
       rollbackConversation: () => unsupported(),
       uploadFeedback: () => unsupported(),
+      readTaskTranscript: () => Effect.succeed({ entries: [] }),
       get streamEvents() {
         return Stream.fromPubSub(runtimeEventPubSub);
       },

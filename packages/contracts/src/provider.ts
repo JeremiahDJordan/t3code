@@ -5,6 +5,7 @@ import {
   EventId,
   IsoDateTime,
   ProviderItemId,
+  RuntimeTaskId,
   ThreadId,
   TurnId,
 } from "./baseSchemas.ts";
@@ -127,6 +128,38 @@ export const ProviderUploadFeedbackResult = Schema.Struct({
   feedbackId: TrimmedNonEmptyString,
 });
 export type ProviderUploadFeedbackResult = typeof ProviderUploadFeedbackResult.Type;
+
+export const ProviderReadTaskTranscriptInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: RuntimeTaskId,
+});
+export type ProviderReadTaskTranscriptInput = typeof ProviderReadTaskTranscriptInput.Type;
+
+/** One step of a subagent's run, oldest first. Long text arrives already shortened. */
+export const TaskTranscriptEntry = Schema.Union([
+  /** What the subagent was asked to do. */
+  Schema.TaggedStruct("prompt", { text: Schema.String }),
+  /** Text the subagent wrote between tool calls. */
+  Schema.TaggedStruct("message", { text: Schema.String }),
+  Schema.TaggedStruct("tool", {
+    title: Schema.String,
+    input: Schema.optional(Schema.String),
+    output: Schema.optional(Schema.String),
+    failed: Schema.Boolean,
+  }),
+]);
+export type TaskTranscriptEntry = typeof TaskTranscriptEntry.Type;
+
+/**
+ * The steps before the task's result, which the client already has. Empty when the provider
+ * keeps no transcript or it cannot be read.
+ */
+export const ProviderReadTaskTranscriptResult = Schema.Struct({
+  entries: Schema.Array(TaskTranscriptEntry),
+  /** Older steps left out, after the prompt, so the newest ones fit. */
+  omittedEntries: Schema.optional(Schema.Int),
+});
+export type ProviderReadTaskTranscriptResult = typeof ProviderReadTaskTranscriptResult.Type;
 
 export class ProviderUploadFeedbackError extends Schema.TaggedError<ProviderUploadFeedbackError>()(
   "ProviderUploadFeedbackError",

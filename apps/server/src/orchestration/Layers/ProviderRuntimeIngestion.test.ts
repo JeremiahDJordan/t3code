@@ -22,6 +22,7 @@ import {
   ProviderItemId,
   RuntimeRequestId,
   type ServerSettings,
+  TASK_RESULT_MAX_CHARS,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -148,6 +149,7 @@ function createProviderServiceHarness() {
     },
     rollbackConversation: () => unsupported(),
     uploadFeedback: () => unsupported(),
+    readTaskTranscript: () => Effect.succeed({ entries: [] }),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub).pipe(
         Stream.flatMap(({ events, enqueued }) =>
@@ -4863,7 +4865,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completedPayload?.detail).toBe("Typecheck finished without errors.");
   });
 
-  it("keeps a long task result in detail while the summary stays one line", async () => {
+  it("keeps a long task result in detail and whether it has a transcript", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
     const report = `## Findings\n${"The parser drops trailing commas. ".repeat(40)}`;
@@ -4876,7 +4878,12 @@ describe("ProviderRuntimeIngestion", () => {
       createdAt: now,
       threadId: asThreadId("thread-1"),
       turnId: asTurnId("turn-report-task"),
-      payload: { taskId: "report-task-1", status: "completed", summary: report },
+      payload: {
+        taskId: "report-task-1",
+        status: "completed",
+        summary: report,
+        hasTranscript: true,
+      },
     });
     harness.emit({
       type: "task.completed",
@@ -4900,8 +4907,13 @@ describe("ProviderRuntimeIngestion", () => {
     const reportPayload = payloadOf("evt-report-task-completed");
     expect(reportPayload?.detail).toBe(report);
     expect(reportPayload?.summary).toBe(`${report.slice(0, 177)}...`);
-    const oversizedDetail = payloadOf("evt-oversized-task-completed")?.detail;
-    expect(oversizedDetail).toBe(`${oversized.slice(0, 3_997)}...`);
+    expect(reportPayload?.hasTranscript).toBe(true);
+    const oversizedPayload = payloadOf("evt-oversized-task-completed");
+    const shortened = "\n\n… (shortened)";
+    expect(oversizedPayload?.detail).toBe(
+      `${oversized.slice(0, TASK_RESULT_MAX_CHARS - shortened.length)}${shortened}`,
+    );
+    expect(oversizedPayload).not.toHaveProperty("hasTranscript");
   });
 
   it("titles task completion from task.started when no progress event carried the name", async () => {
