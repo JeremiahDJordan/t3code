@@ -2698,6 +2698,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
+  // Null, not absent, when the build names no update feed: given none, electron-builder picks a
+  // provider from any GH_TOKEN, GITHUB_TOKEN or similar token in the environment, cannot find its
+  // repository in the staged app, and fails writing the update manifest.
+  buildConfig.publish = null;
   if (!isDesktopPreviewVersion(version)) {
     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
