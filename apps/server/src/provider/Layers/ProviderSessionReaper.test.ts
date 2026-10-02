@@ -7,6 +7,7 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -69,6 +70,7 @@ function makeReadModel(
       readonly updatedAt: string;
     } | null;
     readonly backgroundLiveness?: "working" | "monitoring" | null;
+    readonly latestUserMessageAt?: string | null;
   }>,
 ) {
   const now = "2026-01-01T00:00:00.000Z";
@@ -104,7 +106,7 @@ function makeReadModel(
       archivedAt: null,
       settledOverride: null,
       settledAt: null,
-      latestUserMessageAt: null,
+      latestUserMessageAt: thread.latestUserMessageAt ?? null,
       hasPendingApprovals: false,
       hasPendingUserInput: false,
       hasActionableProposedPlan: false,
@@ -366,6 +368,49 @@ describe("ProviderSessionReaper", () => {
     expect(harness.stopSession).not.toHaveBeenCalled();
     const remaining = await runtime!.runPromise(repository.getByThreadId({ threadId }));
     expect(Option.isSome(remaining)).toBe(true);
+  });
+
+  it("skips a stale session whose thread is about to start a turn", async () => {
+    const threadId = ThreadId.make("thread-reaper-queued-turn");
+    // The user just sent a message, and no turn has picked it up yet.
+    const harness = await createHarness({
+      readModel: makeReadModel([
+        {
+          id: threadId,
+          latestUserMessageAt: DateTime.formatIso(DateTime.nowUnsafe()),
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "claudeAgent",
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        },
+      ]),
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: "2026-04-14T00:00:00.000Z",
+        resumeCursor: { opaque: "resume-queued-turn" },
+        runtimePayload: null,
+      }),
+    );
+
+    await startReaper();
+    await Effect.runPromise(drainFibers);
+
+    expect(harness.stopSession).not.toHaveBeenCalled();
   });
 
   it("skips stale sessions while background work is still live", async () => {
