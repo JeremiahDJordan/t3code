@@ -332,6 +332,7 @@ import {
   useQueuedMessages,
   useQueuedMessageStore,
 } from "../queuedMessageStore";
+import { resendUserMessage } from "./chat/resendUserMessage";
 import { sendQueuedMessage } from "./chat/sendQueuedMessage";
 import { type ReviewCommentContext } from "../reviewCommentContext";
 import { environmentCatalog } from "../connection/catalog";
@@ -8644,6 +8645,25 @@ export default function ChatView(props: ChatViewProps) {
   const onRemoveQueuedMessage = useCallback((id: string) => {
     queuedMessageActionsRef.current.remove(id);
   }, []);
+  // Retry on a turn its provider ended without a reply sends the message that started it again.
+  // Kept in a ref, so the timeline's context stays stable, and updated after each render
+  // instead of during it.
+  const retryTurnRef = useRef(async (_messageId: string) => false);
+  useEffect(() => {
+    retryTurnRef.current = async (messageId) => {
+      const prompt = activeThread?.messages.find((message) => message.id === messageId);
+      if (!activeThreadRef || !prompt) {
+        toastManager.add({
+          type: "error",
+          title: "Could not find the message to send again",
+          description: "Send it again from the composer.",
+        });
+        return false;
+      }
+      return resendUserMessage(activeThreadRef, prompt);
+    };
+  });
+  const onRetryTurn = useCallback((messageId: string) => retryTurnRef.current(messageId), []);
   // Stop also cancels the queue: the messages return to the composer instead
   // of starting a new turn the moment the interrupted one settles.
   restoreQueuedMessagesRef.current = restoreQueuedMessagesToComposer;
@@ -9944,6 +9964,7 @@ export default function ChatView(props: ChatViewProps) {
                   { context: { terminalFocus: false } },
                 )}
                 onRemoveQueuedMessage={onRemoveQueuedMessage}
+                onRetryTurn={onRetryTurn}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}

@@ -32,7 +32,7 @@ import {
   View,
 } from "react-native";
 import Svg, { Defs, LinearGradient, Rect, Stop } from "react-native-svg";
-import type { EnvironmentId, ToolActivityIcon } from "@t3tools/contracts";
+import type { EnvironmentId, ToolActivityIcon, TurnId } from "@t3tools/contracts";
 import { toolActivityFaviconUrl } from "@t3tools/shared/favicon";
 
 import { AppText as Text } from "../../components/AppText";
@@ -427,6 +427,10 @@ interface ThreadWorkLogProps {
   readonly onCopyRow: (rowId: string, value: string) => void;
   readonly onToggleRow: (rowId: string, anchorKey: string) => void;
   readonly renderImage: MarkdownImageRenderer;
+  /** The turn whose warning that it ended without a reply offers Retry: the latest, once idle. */
+  readonly retryTurnId: TurnId | null;
+  /** Sends a message again for a turn its provider ended without a reply; false if it did not. */
+  readonly onRetryTurn: (messageId: string) => Promise<boolean>;
 }
 
 export function ThreadWorkLog(props: ThreadWorkLogProps) {
@@ -444,6 +448,8 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
         onToggleRow={props.onToggleRow}
         renderImage={props.renderImage}
         themeAppearance={props.themeAppearance}
+        retryTurnId={props.retryTurnId}
+        onRetryTurn={props.onRetryTurn}
       />
     ),
     [
@@ -456,6 +462,8 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       props.onToggleRow,
       props.renderImage,
       props.themeAppearance,
+      props.retryTurnId,
+      props.onRetryTurn,
     ],
   );
 
@@ -746,6 +754,13 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   },
 ) {
   const { row, expanded } = props;
+  const [retrySent, setRetrySent] = useState(false);
+  const retryMessageId = row.workEntry.retryMessageId;
+  const canRetry =
+    retryMessageId !== undefined &&
+    row.turnId !== null &&
+    row.turnId === props.retryTurnId &&
+    !retrySent;
   const canExpand = row.canExpand;
   const fullDetail = expanded ? row.getFullDetail() : null;
   const viewedImagePath = workEntryViewedImagePath(row.workEntry);
@@ -846,6 +861,24 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
           )}
 
           <View className="shrink-0 flex-row items-center gap-px">
+            {canRetry ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Retry, send the message again"
+                className="mr-1 rounded-full border border-border bg-background px-3 py-1"
+                onPress={() => {
+                  if (retryMessageId === undefined) return;
+                  setRetrySent(true);
+                  void Haptics.selectionAsync();
+                  // Offered again when the message could not be sent.
+                  void props.onRetryTurn(retryMessageId).then((resent) => {
+                    if (!resent) setRetrySent(false);
+                  });
+                }}
+              >
+                <Text className="font-t3-medium text-xs">Retry</Text>
+              </Pressable>
+            ) : null}
             {props.copied ? (
               <Text className="pr-1 font-t3-medium text-3xs text-adaptive-emerald-600-400">
                 Copied

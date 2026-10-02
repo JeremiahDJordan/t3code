@@ -80,6 +80,8 @@ export interface WorkLogEntry {
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
   /** Grouping key for subagent lifecycle rows (one row per agent). */
   taskId?: string;
+  /** On a provider's warning that its turn ended without a reply: the message Retry sends again. */
+  retryMessageId?: string;
   /** Agent role (subagent_type) for labeled timeline rows. */
   agentRole?: string;
   /**
@@ -590,6 +592,9 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           : activity.tone,
     sourceActivityKind: activity.kind,
   };
+  if (activity.kind === "runtime.warning" && typeof payload?.retryMessageId === "string") {
+    entry.retryMessageId = payload.retryMessageId;
+  }
   if (activity.kind === "user-input.answer-submitted") {
     const answer = decodeQuestionAttachmentAnswer(payload);
     if (Option.isSome(answer)) entry.questionAnswer = answer.value;

@@ -821,6 +821,8 @@ export type ToolDeniedPayload = typeof ToolDeniedPayload.Type;
 const RuntimeWarningPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
   detail: Schema.optional(Schema.Unknown),
+  /** The turn ended without a reply, so a client may offer to send its prompt again. */
+  retryable: Schema.optional(Schema.Boolean),
 });
 export type RuntimeWarningPayload = typeof RuntimeWarningPayload.Type;
 

@@ -1062,6 +1062,50 @@ it.layer(bobAdapterTestLayer)("BobAdapterLive", (it) => {
     ),
   );
 
+  it.effect("says so when Bob ends a turn without showing anything", () =>
+    withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_EMPTY_REPLY: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-empty-reply");
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        const turn = yield* adapter.sendTurn({ threadId, input: "are you there?" });
+
+        assert.deepStrictEqual(
+          Array.from(yield* events).flatMap((event) =>
+            event.type === "runtime.warning" || event.type === "turn.completed"
+              ? [[event.type, event.turnId, event.type === "runtime.warning" ? event.payload : {}]]
+              : [],
+          ),
+          [
+            [
+              "runtime.warning",
+              turn.turnId,
+              { message: "Bob ended its turn without replying.", retryable: true },
+            ],
+            ["turn.completed", turn.turnId, {}],
+          ],
+        );
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("does not warn about a turn in which Bob replied", () =>
+    withMockBob({ T3_ACP_BOB: "1" }, ({ adapter }) =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("bob-replied");
+        const events = yield* eventsUntil(adapter, (event) => event.type === "turn.completed");
+
+        yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+        yield* adapter.sendTurn({ threadId, input: "hello" });
+
+        assert.isFalse(Array.from(yield* events).some((event) => event.type === "runtime.warning"));
+        yield* adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
   it.effect("shows Bob's subagent runs as tasks linked to the tool call running them", () =>
     withMockBob({ T3_ACP_BOB: "1", T3_ACP_BOB_SUBAGENT: "1" }, ({ adapter }) =>
       Effect.gen(function* () {

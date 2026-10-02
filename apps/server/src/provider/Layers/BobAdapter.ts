@@ -200,6 +200,8 @@ interface BobSessionContext {
         interrupted: boolean;
         readonly plan: boolean;
         reply?: { readonly itemId: string | undefined; text: string };
+        /** Whether Bob showed anything this turn: text, thinking, a tool call or a plan. */
+        answered: boolean;
         /** The turn's tool calls Bob has not finished, by tool call id. */
         readonly openTools: Map<string, AcpToolCallState>;
         /** The turn's subagent runs, by tool call id, and whether T3 announced them started. */
@@ -1348,6 +1350,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     );
                     return;
                   case "PlanUpdated":
+                    if (ctx.openTurn) ctx.openTurn.answered = true;
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* offerRuntimeEvent(
                       makeAcpPlanUpdatedEvent({
@@ -1363,6 +1366,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     );
                     return;
                   case "ToolCallUpdated": {
+                    if (ctx.openTurn) ctx.openTurn.answered = true;
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* trackSubagent(ctx, event.toolCall, event.rawPayload);
                     const openTools = ctx.openTurn?.openTools;
@@ -1399,6 +1403,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     return;
                   }
                   case "ThoughtDelta":
+                    if (ctx.openTurn && event.text.trim()) ctx.openTurn.answered = true;
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     yield* offerRuntimeEvent(
                       makeAcpContentDeltaEvent({
@@ -1413,6 +1418,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
                     );
                     return;
                   case "ContentDelta":
+                    if (ctx.openTurn && event.text.trim()) ctx.openTurn.answered = true;
                     yield* logNative(ctx.threadId, "session/update", event.rawPayload);
                     if (ctx.openTurn?.plan) {
                       const turn = ctx.openTurn;
@@ -1583,6 +1589,24 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
         // one continues it.
         yield* input.uncount;
         if (ctx.promptsInFlight === 0) {
+          // Bob can end a turn having shown nothing, such as when its backend answers a long
+          // conversation with an empty reply. Without a word the thread looks ignored.
+          const turn = ctx.openTurn;
+          if (
+            turn?.id === turnId &&
+            !turn.answered &&
+            !turn.interrupted &&
+            result.stopReason !== "cancelled"
+          ) {
+            yield* offerRuntimeEvent({
+              type: "runtime.warning",
+              ...(yield* makeEventStamp()),
+              provider: PROVIDER,
+              threadId: ctx.threadId,
+              turnId,
+              payload: { message: "Bob ended its turn without replying.", retryable: true },
+            });
+          }
           yield* proposePlan(ctx, result.stopReason);
           yield* settleTurn(ctx, {
             state: result.stopReason === "cancelled" ? "cancelled" : "completed",
@@ -1648,6 +1672,8 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
           id: turnId,
           interrupted: false,
           plan: turn.plan,
+          // What Bob showed before the restart is unknown, so its silence since is no warning.
+          answered: true,
           // The calls still running, so a steer waits for them instead of cancelling them.
           openTools: new Map(
             tools.map((tool): [string, AcpToolCallState] => [
@@ -1825,6 +1851,7 @@ export function makeBobAdapter(bobSettings: BobSettings, options?: BobAdapterLiv
               id: turnId,
               interrupted: false,
               plan: input.interactionMode === "plan",
+              answered: false,
               openTools: new Map(),
               subagents: new Map(),
               settled: yield* Deferred.make<void>(),
