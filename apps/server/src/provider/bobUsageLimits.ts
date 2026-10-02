@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+
 import type {
   BobAuthMethod,
   ServerProviderUsageLimits,
@@ -203,6 +206,11 @@ function bobBudgetMonth(checkedAt: string) {
   };
 }
 
+/** When the Bobcoins of the month around `at` reset: 00:00 UTC on the first of the next month. */
+export function bobBudgetResetsAt(at: string): string {
+  return bobBudgetMonth(at).resetsAt;
+}
+
 /** The monthly Bobcoin window of one team, and its instance's plan. */
 function bobTeamUsage(
   selected: { readonly instance: BobProfileInstance; readonly team: BobProfileTeam } | undefined,
@@ -235,8 +243,20 @@ function bobTeamUsage(
     ...bobBudgetMonth(checkedAt),
     amount: { used: Math.max(0, usage), limit: budget, unit: "Bobcoins" },
   };
+  // The budget belongs to the team, so every Bob billing it, on any environment, is one account.
+  const instanceId = selected.instance.instance_id?.trim();
+  const teamId = selected.team.id?.trim();
   return {
-    usageLimits: makeUsageLimits({ checkedAt, windows: [window] }),
+    usageLimits: {
+      ...makeUsageLimits({ checkedAt, windows: [window] }),
+      ...(instanceId && teamId
+        ? {
+            credentialFingerprint: NodeCrypto.createHash("sha256")
+              .update(`bob-team\0${instanceId}\0${teamId}`)
+              .digest("hex"),
+          }
+        : {}),
+    },
     ...(plan ? { plan } : {}),
   };
 }

@@ -68,8 +68,16 @@ describe("bobProfileToUsage", () => {
             amount: { used: 0.689, limit: 50, unit: "Bobcoins" },
           },
         ],
+        credentialFingerprint: expect.any(String),
       },
     });
+  });
+
+  it("names the team it bills, so Bobs on one team pool as one account", () => {
+    const fingerprint = (activeProfileId: string | undefined) =>
+      bobProfileToUsage(profile, activeProfileId, checkedAt).usageLimits.credentialFingerprint;
+    expect(fingerprint(undefined)).toBe(fingerprint("instance-1:team-1"));
+    expect(fingerprint("instance-1:team-2")).not.toBe(fingerprint("instance-1:team-1"));
   });
 
   it("resets the window at the start of the next month in UTC", () => {

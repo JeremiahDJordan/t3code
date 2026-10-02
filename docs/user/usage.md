@@ -6,15 +6,17 @@ desktop when the terminal is not focused. Customize `usage.open` in
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, and Cursor history
-from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
-cost, split by token type and by speed. These estimates are not your subscription bill.
-**Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
-split, such as a provider-reported cost for a model without public rates, shows as **Other**.
-Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
+**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Cursor, and Bob
+Shell history from your connected environments. It shows token use, cache savings, model
+breakdowns, and estimated API-equivalent cost, split by token type and by speed. These estimates
+are not your subscription bill. **Premium** is what Fast and Ultrafast requests cost above
+standard rates. Cost that cannot be split, such as a provider-reported cost for a model without
+public rates, shows as **Other**. Select a model under **Breakdown** to see its trend, cache hit
+rate, and cost per million tokens.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
-record are missing from the totals.
+record, Bob turns that stop or fail before Bob replies, and the thread titles, commit messages,
+pull request text, and branch names Bob writes are missing from the totals.
 
 OpenCode reads its SQLite database and older JSON history. Antigravity reads local conversation
 databases, including T3-managed profiles. Set `OPENCODE_DATA_DIR` or `ANTIGRAVITY_DATA_DIR` on the
@@ -28,9 +30,13 @@ On macOS, choose **Enable Cursor usage** on Usage to allow T3 to read your exist
 from Keychain. You can turn it off in **Settings → Providers → Usage providers**. macOS may ask
 you to allow access on the server Mac.
 
+Bob bills in Bobcoins, not dollars, so Bob shows its tokens and Bobcoins but adds nothing to the
+cost estimate. Bob 2.0.5 and later record each request's context size rather than separate input
+and output, so Bob's tokens count as uncached input.
+
 Usage includes each configured account's history, including disabled accounts. Custom homes follow
-the account's home setting or its `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `GROK_HOME` environment
-variable. Pi reads `~/.pi/agent/sessions`, or the `sessions` directory under
+the account's home setting or its `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `GROK_HOME`, or, for Bob,
+`HOME` environment variable. Pi reads `~/.pi/agent/sessions`, or the `sessions` directory under
 `PI_CODING_AGENT_DIR`. Set `PI_CODING_AGENT_SESSION_DIR` to read a different session directory.
 To include sessions saved through `--session-dir` or Pi's `sessionDir` setting, set this environment
 variable to the same directory. Pi includes recorded tool and summary costs under `Tools/summaries`.
@@ -117,6 +123,9 @@ a custom Cursor endpoint, use an explicit token or file-based CLI login for limi
 Grok reports the remaining subscription allowance and reset time for its current billing period
 after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
 or endpoint configurations do not report subscription limits.
+
+Bob Shell reports its team's monthly Bobcoin allowance with IBM SSO or an API key. See
+[Bob Shell usage](./providers-bob.md#usage).
 
 API-key accounts may not report subscription limits. This also applies to Claude connections
 using a proxy through `ANTHROPIC_AUTH_TOKEN`.

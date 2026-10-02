@@ -13,6 +13,7 @@ export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "opencode",
   "antigravity",
   "pi",
+  "bob",
 ];
 
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
@@ -23,11 +24,13 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   opencode: "OpenCode",
   antigravity: "Antigravity",
   pi: "Pi",
+  bob: "Bob",
 };
 
 /**
  * Claude's brand orange holds in both themes; Codex and Grok are neutrals and
  * must flip with the theme or their bars vanish against the matching background.
+ * Bob uses the blue of its mark in each theme.
  */
 export function useProviderColors(): Record<UsageProviderKind, string> {
   const { themeAppearance: scheme } = useAppearancePreferences();
@@ -39,6 +42,7 @@ export function useProviderColors(): Record<UsageProviderKind, string> {
     opencode: "#5b9bbd",
     antigravity: "#8c7bd1",
     pi: "#4d9f8a",
+    bob: scheme === "dark" ? "#4587fd" : "#0e61fa",
   };
 }
 

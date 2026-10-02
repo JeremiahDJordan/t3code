@@ -1,4 +1,9 @@
-import { formatPercent, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
+import {
+  formatPercent,
+  formatTokens,
+  formatUsageSpend,
+  formatUsd,
+} from "@t3tools/shared/usageFormat";
 import { isModelCostUnknown, type ModelTotals } from "@t3tools/shared/usageMerge";
 import { useMemo } from "react";
 
@@ -67,7 +72,16 @@ export function UsageModelDialog({
   const hitRate = cacheHitRate(model);
   const perMillion = costPerMillionTokens(model);
   const stats = [
-    { label: "Cost", value: costUnknown ? "Unpriced" : formatUsd(model.costUsd) },
+    {
+      label: "Cost",
+      // A model billed in its provider's credits, such as Bob's Bobcoins, shows them.
+      value:
+        model.credits !== undefined
+          ? formatUsageSpend(model.costUsd, model.credits)
+          : costUnknown
+            ? "Unpriced"
+            : formatUsd(model.costUsd),
+    },
     { label: "Tokens", value: formatTokens(model.totalTokens) },
     perMillion === null ? null : { label: "Per 1M tokens", value: formatUsd(perMillion) },
     hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
@@ -146,7 +160,8 @@ export function UsageModelDialog({
         {model.unpricedTokens > 0 ? (
           <DialogFooter variant="bare" className="items-center sm:justify-between">
             <span className="text-xs text-muted-foreground">
-              {formatTokens(model.unpricedTokens)} tokens have no known price
+              {formatTokens(model.unpricedTokens)} tokens have no known{" "}
+              {model.credits === undefined ? "price" : "dollar price"}
             </span>
             <Button onClick={onSetPrice}>Set price</Button>
           </DialogFooter>

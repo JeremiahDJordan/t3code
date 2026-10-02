@@ -3591,6 +3591,13 @@ export default function ChatView(props: ChatViewProps) {
   // during a reconnect; the panel then stays hidden rather than being dropped.
   // A pending approval or question is part of the key: once it is answered,
   // from this client or any other, the agent resumes and spends quota.
+  // The thread's folder, where Bob can bill another team (the project's pinned one).
+  const usageLimitsCwd = activeProject
+    ? projectScriptCwd({
+        project: { cwd: activeProject.workspaceRoot },
+        worktreePath: activeThread?.worktreePath ?? null,
+      })
+    : null;
   const usageLimitsKey =
     activeProviderInstanceId === null || (isServerThread && activeThread === undefined)
       ? null
@@ -3620,12 +3627,14 @@ export default function ChatView(props: ChatViewProps) {
             providerStatuses,
             usageLimitSources,
             usageLimitsPanel.now,
+            usageLimitsCwd,
           )
         : null,
     [
       activeProviderInstanceId,
       providerStatuses,
       usageLimitSources,
+      usageLimitsCwd,
       usageLimitsKey,
       usageLimitsPanel,
     ],
@@ -3658,6 +3667,7 @@ export default function ChatView(props: ChatViewProps) {
             providerStatuses,
             usageLimitSources,
             now,
+            usageLimitsCwd,
           )
         : null;
     if (report && usageLimitsKey !== null) {

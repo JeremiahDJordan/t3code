@@ -76,6 +76,28 @@ describe("applyUsageLimitsUpdate", () => {
       resetCredits,
     });
   });
+
+  it("publishes a new amount even when the clamped percent is unchanged", () => {
+    // A team over its Bobcoin budget stays at 100% while spend keeps rising.
+    const monthly = {
+      id: "bobcoins",
+      kind: "monthly",
+      label: "Monthly",
+      usedPercent: 100,
+      amount: { used: 50, limit: 50, unit: "Bobcoins" },
+    } as const;
+    const previous = { checkedAt, windows: [monthly] };
+    const next = applyUsageLimitsUpdate({
+      previous,
+      checkedAt: "2026-09-03T12:00:05.000Z",
+      update: {
+        windows: [{ ...monthly, usedPercent: 120, amount: { ...monthly.amount, used: 60 } }],
+      },
+    });
+
+    expect(next).not.toBe(previous);
+    expect(next?.windows[0]?.amount?.used).toBe(60);
+  });
 });
 
 describe("resolveUsageLimitsAfterProbe", () => {
