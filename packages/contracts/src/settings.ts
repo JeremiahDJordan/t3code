@@ -47,6 +47,7 @@ import {
   ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
+import { CheckInRepeatLimitHours, DEFAULT_CHECK_IN_REPEAT_LIMIT_HOURS } from "./checkIns.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
@@ -901,6 +902,8 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "defaultProjectScripts",
   "enableAgentBrowserAccess",
   "enableAgentDeviceAccess",
+  "enableAgentCheckIns",
+  "checkInRepeatLimitHours",
   "textGenerationModelSelection",
   "sourceControlWriterModelSelection",
   "reviewGuideModelSelection",
@@ -944,6 +947,8 @@ export const ProjectSettingsOverrides = Schema.Struct({
   defaultProjectScripts: Schema.optionalKey(Schema.Array(ProjectScript)),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableAgentCheckIns: Schema.optionalKey(Schema.Boolean),
+  checkInRepeatLimitHours: Schema.optionalKey(CheckInRepeatLimitHours),
   textGenerationModelSelection: Schema.optionalKey(ModelSelection),
   sourceControlWriterModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   reviewGuideModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
@@ -1122,6 +1127,16 @@ export const ServerSettings = Schema.Struct({
   projectSettingsFolded: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 
   enableAgentDeviceAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * Whether agents get T3's check-in tools, which schedule a message back into their own
+   * thread later, run background commands and wait on other threads. Each delivery is a
+   * turn, so it spends the provider's quota.
+   */
+  enableAgentCheckIns: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** How many hours a repeating check-in, a wait, or a background command's status updates last. */
+  checkInRepeatLimitHours: CheckInRepeatLimitHours.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECK_IN_REPEAT_LIMIT_HOURS)),
+  ),
   /**
    * Kept separate from agent access so enabling the user's Device panel does
    * not also grant providers control of simulators and emulators.
@@ -1455,6 +1470,8 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(ProjectId, Schema.NullOr(ProjectSettingsOverrides)),
   ),
   enableAgentDeviceAccess: Schema.optionalKey(Schema.Boolean),
+  enableAgentCheckIns: Schema.optionalKey(Schema.Boolean),
+  checkInRepeatLimitHours: Schema.optionalKey(CheckInRepeatLimitHours),
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),

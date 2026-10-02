@@ -140,6 +140,15 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   agentActivityPublishing: Schema.optionalKey(Schema.Boolean),
   projectCloneTracking: Schema.optionalKey(Schema.Boolean),
+  /** Server keeps agents' check-ins and waits and streams each thread's
+      (`subscribeThreadCheckIns`, `checkIns.cancel`). Absent on servers without them, where
+      clients show none. */
+  threadCheckIns: Schema.optionalKey(Schema.Boolean),
+  /** Server runs agents' background commands and streams each thread's
+      (`subscribeThreadBackgroundCommands`, `backgroundCommands.stop`,
+      `backgroundCommands.openTerminal`, and `backgroundCommands.setMuted` where commands
+      carry `muted`). Absent on servers without them. */
+  threadBackgroundCommands: Schema.optionalKey(Schema.Boolean),
   environmentIcon: Schema.optionalKey(Schema.Boolean),
   desktopAppUpdate: Schema.optionalKey(Schema.Boolean),
   /** Server answers orchestration.subscribeCommandOutput. Absent on older servers,

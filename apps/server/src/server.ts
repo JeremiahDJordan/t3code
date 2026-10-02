@@ -5,6 +5,11 @@ import * as Random from "effect/Random";
 import * as Semaphore from "effect/Semaphore";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
+import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
+import * as ThreadBackgroundCommands from "./persistence/ThreadBackgroundCommands.ts";
+import * as ThreadCheckIns from "./persistence/ThreadCheckIns.ts";
+import * as TmuxServer from "./tmux/TmuxServer.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
@@ -501,9 +506,36 @@ const layerOrchestrationApplication = CheckpointDiffQuery.layer.pipe(
   Layer.provideMerge(layerOrchestrationV2Runtime),
 );
 
+// Check-ins and background commands share a change feed and the command repository, so they
+// are built together; background commands also need T3's private tmux server.
+const CheckInsLayerLive = BackgroundCommands.layer.pipe(
+  Layer.provideMerge(CheckInScheduler.layer),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      ThreadCheckIns.layer,
+      ThreadBackgroundCommands.layer,
+      ThreadBackgroundCommands.changesLayer,
+    ),
+  ),
+  Layer.provide(TmuxServer.layer.pipe(Layer.provide(ProcessRunner.layer))),
+);
+
+// Delivers check-ins and command notices, and follows running commands to their end.
+const CheckInsWorkerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    yield* (yield* CheckInScheduler.CheckInScheduler).start();
+    yield* (yield* BackgroundCommands.BackgroundCommands).watch();
+  }),
+);
+
 const layerThreadSettlementWorker = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
-).pipe(Layer.provide(layerPullRequestService), Layer.provide(ProjectionStoreV2.layer));
+).pipe(
+  Layer.provide(layerPullRequestService),
+  Layer.provide(ProjectionStoreV2.layer),
+  // A running background command holds its thread.
+  Layer.provide(BackgroundCommands.settlementHoldsLayer),
+);
 
 const layerThreadPullRequestWorker = Layer.effectDiscard(
   ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
@@ -545,6 +577,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
+  CheckInsWorkerLive,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   DatabaseStorage.layer.pipe(
     Layer.provide(ProjectionMaintenance.layer),
@@ -584,6 +617,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
+  Layer.provideMerge(CheckInsLayerLive),
   Layer.provideMerge(layerOrchestrationApplication),
   // Shared by the workflow engine, the workflow MCP tools and Copy script.
   Layer.provideMerge(Layer.mergeAll(WorkflowSandbox.layer, WorkflowSourceStore.layer)),
