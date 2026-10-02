@@ -1,5 +1,6 @@
 import {
   AntigravitySettings,
+  BobSettings,
   ClaudeSettings,
   CodexSettings,
   ProviderDriverKind,
@@ -26,6 +27,21 @@ export const providerClients = makeProviderClientRegistry([
   cursorClient,
   grokClient,
   openCodeClient,
+  {
+    driverKind: ProviderDriverKind.make("bob"),
+    label: "Bob",
+    settingsSchema: BobSettings,
+    badgeLabel: "Early Access",
+    environmentFields: [
+      {
+        name: "BOB_API_KEY",
+        label: "Bob API key",
+        description: "Used when the sign-in method is API key.",
+        placeholder: "Paste API key",
+        sensitive: true,
+      },
+    ],
+  },
   {
     driverKind: ProviderDriverKind.make("antigravity"),
     label: "Antigravity",

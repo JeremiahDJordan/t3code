@@ -3062,6 +3062,7 @@ it.layer(
 
             assert.deepStrictEqual(providers.map((provider) => provider.instanceId).toSorted(), [
               "antigravity",
+              "bob",
               "claudeAgent",
               "codex",
               "cursor",
