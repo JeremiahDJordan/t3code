@@ -66,6 +66,27 @@ If Bob ends a turn without replying, which its backend sometimes does with a lon
 conversation, the thread says so and offers **Retry**, which sends your message
 again.
 
+## Usage
+
+**Usage → Limits** and `/usage-limits` in the composer show your Bob team's
+monthly Bobcoin allowance: the Bobcoins used and left, and the time until it
+resets at the start of the month (00:00 UTC). On web and desktop, the ring with a
+coin beside the send button shows the share left; hover it for the amounts, or to
+open `/usage-limits`. If you belong to several teams, T3 Code shows the one last
+selected in Bob. In a project that pins a team in its `.bob/settings.json`,
+`/usage-limits` and the ring show that team's allowance instead. The allowance
+updates after each turn that spends Bobcoins.
+
+A thread's context meter shows how full Bob's context is and the Bobcoins the
+thread has spent. Bob does not report which model it runs, so the meter's limit
+assumes the context window of the model Bob is set to, or of its default model.
+
+**Usage → Cost** and **Usage → Tokens** show Bob's daily tokens and Bobcoins with
+your other providers. Thread titles, commit messages, pull request text, and branch
+names that Bob writes count toward the monthly allowance but are missing from
+these totals. T3 Code apps without Bob support, such as app.t3.codes, leave Bob
+out of their Usage page. See [Usage and limits](./usage.md#track-subscription-limits).
+
 ## Limits
 
 - Bob chooses its own model. The model picker has one Bob entry, and custom models

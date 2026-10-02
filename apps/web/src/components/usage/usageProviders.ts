@@ -1,4 +1,4 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type { UsageCredits, UsageProviderKind } from "@t3tools/contracts";
 
 import { ProviderDriverKind } from "@t3tools/contracts";
 
@@ -41,6 +41,12 @@ export const PROVIDER_PRESENTATION = {
     color: "#8c7bd1",
     driverKind: ProviderDriverKind.make("antigravity"),
   },
+  // The blue of Bob's mark in each theme.
+  bob: {
+    label: "Bob",
+    color: "light-dark(#0e61fa, #4587fd)",
+    driverKind: ProviderDriverKind.make("bob"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */
@@ -52,11 +58,14 @@ export function providersWithUsage(
     readonly provider: UsageProviderKind;
     readonly costUsd: number;
     readonly totalTokens: number;
+    readonly credits?: UsageCredits;
   }[],
 ): readonly UsageProviderKind[] {
   const active = new Set(
     totals
-      .filter((entry) => entry.totalTokens > 0 || entry.costUsd > 0)
+      .filter(
+        (entry) => entry.totalTokens > 0 || entry.costUsd > 0 || (entry.credits?.amount ?? 0) > 0,
+      )
       .map((entry) => entry.provider),
   );
   return PROVIDER_ORDER.filter((provider) => active.has(provider));

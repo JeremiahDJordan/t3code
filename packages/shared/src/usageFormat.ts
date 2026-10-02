@@ -4,7 +4,12 @@
  *
  * @module usageFormat
  */
-import { UsageDay, type UsageResolution, type UsageSummaryInput } from "@t3tools/contracts";
+import {
+  UsageDay,
+  type UsageCredits,
+  type UsageResolution,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
 
 import type { UsageContractMismatch } from "./usageMerge.ts";
 
@@ -19,6 +24,26 @@ const INTEGER = new Intl.NumberFormat("en-US");
 
 export function formatUsd(value: number): string {
   return CURRENCY.format(value);
+}
+
+/**
+ * Spend as the cost view shows it: dollars, a provider's own credits such as
+ * `12.30 Bobcoins` in place of `$0.00`, or both when a custom price applies.
+ * Credits keep more decimals below 1, as Bob Shell shows them.
+ */
+export function formatUsageSpend(costUsd: number, credits: UsageCredits | undefined): string {
+  if (credits === undefined) return formatUsd(costUsd);
+  const spent = `${formatUsageCredits(credits.amount)} ${credits.unit}`;
+  return costUsd > 0 ? `${formatUsd(costUsd)} · ${spent}` : spent;
+}
+
+/**
+ * A credit amount without its unit, for columns that name the unit once. Spend too small
+ * to show reads `<0.0001`, so it never looks like none.
+ */
+export function formatUsageCredits(amount: number): string {
+  if (amount > 0 && amount < 0.0001) return "<0.0001";
+  return amount.toFixed(amount >= 1 || amount === 0 ? 2 : amount >= 0.01 ? 3 : 4);
 }
 
 export function formatCount(value: number): string {
