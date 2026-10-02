@@ -3,6 +3,11 @@ import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
 import * as Semaphore from "effect/Semaphore";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
+import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
+import * as ThreadBackgroundCommands from "./persistence/ThreadBackgroundCommands.ts";
+import * as ThreadCheckIns from "./persistence/ThreadCheckIns.ts";
+import * as TmuxServer from "./tmux/TmuxServer.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
@@ -461,12 +466,39 @@ const OrchestrationApplicationLayerLive = CheckpointDiffQuery.layer.pipe(
   Layer.provideMerge(OrchestrationV2RuntimeLayerLive),
 );
 
+// Check-ins and background commands share a change feed and the command repository, so they
+// are built together; background commands also need T3's private tmux server.
+const CheckInsLayerLive = BackgroundCommands.layer.pipe(
+  Layer.provideMerge(CheckInScheduler.layer),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      ThreadCheckIns.layer,
+      ThreadBackgroundCommands.layer,
+      ThreadBackgroundCommands.changesLayer,
+    ),
+  ),
+  Layer.provide(TmuxServer.layer.pipe(Layer.provide(ProcessRunner.layer))),
+);
+
+// Delivers check-ins and command notices, and follows running commands to their end.
+const CheckInsWorkerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    yield* (yield* CheckInScheduler.CheckInScheduler).start();
+    yield* (yield* BackgroundCommands.BackgroundCommands).watch();
+  }),
+);
+
 // Automatic thread settlement (#8600): a server-owned sweep evaluates
 // inactivity and merged pull requests, then settles through the orchestrator
-// so every client sees the same shelf.
+// so every client sees the same shelf. A running background command holds its
+// thread.
 const ThreadSettlementWorkerLive = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
-).pipe(Layer.provide(PullRequestServiceLive), Layer.provide(ProjectionStoreV2.layer));
+).pipe(
+  Layer.provide(PullRequestServiceLive),
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(BackgroundCommands.settlementHoldsLayer),
+);
 
 const ThreadPullRequestWorkerLive = Layer.effectDiscard(
   ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
@@ -507,6 +539,7 @@ const ProviderInstallationRefreshLive = Layer.effectDiscard(
 const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
   AgentAwarenessRelay.layer,
   ThreadSettlementWorkerLive,
+  CheckInsWorkerLive,
   Layer.effectDiscard(StorageCleanup.make.pipe(Effect.flatMap((service) => service.start()))).pipe(
     Layer.provide(ProjectionStoreV2.layer),
   ),
@@ -527,6 +560,7 @@ const RuntimeCoreDependenciesBaseLive = Layer.mergeAll(
   ProviderInstallationRefreshLive,
   ReplayMarkers.layer,
 ).pipe(
+  Layer.provideMerge(CheckInsLayerLive),
   // Core Services
   Layer.provideMerge(OrchestrationApplicationLayerLive),
   Layer.provideMerge(OrchestrationEventInfrastructureLayerLive),

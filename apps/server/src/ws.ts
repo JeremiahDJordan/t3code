@@ -201,6 +201,8 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
+import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
@@ -1146,6 +1148,8 @@ const makeWsRpcLayer = (
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const checkInScheduler = yield* CheckInScheduler.CheckInScheduler;
+      const backgroundCommands = yield* BackgroundCommands.BackgroundCommands;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -3218,6 +3222,48 @@ const makeWsRpcLayer = (
               .cancel(input.threadId)
               .pipe(Effect.map((cancelled) => ({ cancelled }))),
             { "rpc.aggregate": "vcs" },
+          ),
+        [WS_METHODS.subscribeThreadCheckIns]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeThreadCheckIns,
+            checkInScheduler.stream(input.threadId),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.checkInCancel]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.checkInCancel,
+            checkInScheduler
+              .cancel(input.checkInId)
+              .pipe(Effect.map((cancelled) => ({ cancelled }))),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.subscribeThreadBackgroundCommands]: (input) =>
+          observeRpcStream(
+            WS_METHODS.subscribeThreadBackgroundCommands,
+            backgroundCommands.stream(input.threadId),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.backgroundCommandStop]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.backgroundCommandStop,
+            backgroundCommands
+              .stop(input.backgroundCommandId, "user")
+              .pipe(Effect.map((stopping) => ({ stopping }))),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.backgroundCommandSetMuted]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.backgroundCommandSetMuted,
+            backgroundCommands
+              .setMuted(input.backgroundCommandId, input.muted)
+              .pipe(Effect.map((updated) => ({ updated }))),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [WS_METHODS.backgroundCommandOpenTerminal]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.backgroundCommandOpenTerminal,
+            backgroundCommands.openTerminal(input.backgroundCommandId),
+            { "rpc.aggregate": "orchestration" },
           ),
         [WS_METHODS.vcsRefreshStatus]: (input) =>
           observeRpcEffect(

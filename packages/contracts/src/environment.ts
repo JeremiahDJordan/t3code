@@ -184,6 +184,15 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       Absent on older servers, where clients must clone with the blocking
       `sourceControl.cloneRepository` call instead. */
   projectCloneTracking: Schema.optionalKey(Schema.Boolean),
+  /** Server keeps agents' check-ins and waits and streams each thread's
+      (`subscribeThreadCheckIns`, `checkIns.cancel`). Absent on servers without them, where
+      clients show none. */
+  threadCheckIns: Schema.optionalKey(Schema.Boolean),
+  /** Server runs agents' background commands and streams each thread's
+      (`subscribeThreadBackgroundCommands`, `backgroundCommands.stop`,
+      `backgroundCommands.openTerminal`, and `backgroundCommands.setMuted` where commands
+      carry `muted`). Absent on servers without them. */
+  threadBackgroundCommands: Schema.optionalKey(Schema.Boolean),
   /** Server detects `platform.machine` and persists the `environmentIcon`
       setting. Older servers drop the key on write, so clients show the
       picker inert rather than offering a choice that would never stick. */
