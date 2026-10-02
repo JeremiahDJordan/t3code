@@ -29,6 +29,11 @@ sign-in expired, run `bob` on that machine again.
 
 An IBM SSO instance ignores any `BOB_API_KEY` set in the server's own environment.
 
+To use two accounts, such as an SSO login and an API key for when its Bobcoins run
+out, add a second Bob instance in **Settings → Providers** with **Add provider**. A
+thread can switch between them in the model picker and keeps its conversation, unless
+one instance's environment variables give Bob a different `HOME`.
+
 ## Projects and approvals
 
 T3 Code tells Bob to trust each project folder you open, and Bob remembers it, so

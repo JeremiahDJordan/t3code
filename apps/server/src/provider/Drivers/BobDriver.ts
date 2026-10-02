@@ -42,9 +42,10 @@ import {
   readBobUsageLimits,
   readBobUsageProfile,
 } from "../Layers/bobUsageLimits.ts";
+import { resolveBobTaskDatabasePath } from "../Layers/bobTaskUsage.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
-  defaultProviderContinuationIdentity,
+  type ProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
 } from "../ProviderDriver.ts";
@@ -118,10 +119,13 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
       const processEnv = mergeProviderInstanceEnvironment(environment);
-      const continuationIdentity = defaultProviderContinuationIdentity({
+      // Bob keeps its sessions in its task database, and any instance reading the same one can
+      // resume them, whatever it signs in with. So a thread moves between such instances, such
+      // as from an SSO login to an API key when one account runs out of Bobcoins.
+      const continuationIdentity: ProviderContinuationIdentity = {
         driverKind: DRIVER_KIND,
-        instanceId,
-      });
+        continuationKey: `bob:db:${resolveBobTaskDatabasePath(processEnv, path)}`,
+      };
       const stampIdentity = withInstanceIdentity({
         instanceId,
         driverKind: DRIVER_KIND,
