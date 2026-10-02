@@ -1446,6 +1446,11 @@ export const ServerSettings = Schema.Struct({
   bobUsageInUpstreamClients: BobUsageInUpstreamClients.pipe(
     Schema.withDecodingDefault(Effect.succeed("hidden" as const)),
   ),
+  /**
+   * Adds a finished subagent's earlier steps to its result in the thread's activity, for clients
+   * that cannot load them on demand. Off by default, since it makes every client's threads larger.
+   */
+  inlineSubagentSteps: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /** Exact model IDs, applied to past and future usage on this environment. */
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1742,6 +1747,7 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
   bobUsageInUpstreamClients: Schema.optionalKey(BobUsageInUpstreamClients),
+  inlineSubagentSteps: Schema.optionalKey(Schema.Boolean),
   /** Each entry replaces one model's rates; `null` restores automatic pricing. */
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),

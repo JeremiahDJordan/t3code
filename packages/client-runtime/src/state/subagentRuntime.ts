@@ -594,8 +594,10 @@ export function foldSubagentActivities(
         // final usage the update lacked (review finding: the early return
         // dropped both). Fill-if-missing keeps duplicate completions from
         // replacing the first result.
-        // detail carries the full result (summary is the one-line cut).
-        const outcome = asString(payload.detail) ?? asString(payload.summary);
+        // detail carries the full result (summary is the one-line cut), unless the server added
+        // the earlier steps after it (`inlineSubagentSteps`); then result has it alone.
+        const outcome =
+          asString(payload.result) ?? asString(payload.detail) ?? asString(payload.summary);
         const summary = outcome ? bounded(outcome, TASK_RESULT_MAX_CHARS) : null;
         if (payload.hasTranscript === true) agent.hasTranscript = true;
         if (isTerminalSubagentStatus(agent.status)) {

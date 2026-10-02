@@ -222,6 +222,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const supportsAgentThreads = targets.every(
     (target) => target.environment.serverConfig.environment.capabilities.agentThreads === true,
   );
+  const supportsInlineSubagentSteps = targets.every(
+    (target) =>
+      target.environment.serverConfig.environment.capabilities.inlineSubagentSteps === true,
+  );
   const disabledFor = (key: string) =>
     disabled ||
     (projectSelected &&
@@ -400,6 +404,18 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       />
                     ))}
                   </SettingsSection>
+                  {supportsInlineSubagentSteps ? (
+                    <SettingsSection title="Subagents">
+                      <FanoutSwitchRow
+                        icon={{ ios: "sparkles", android: "auto_awesome" }}
+                        label="Subagent steps in other apps"
+                        subtitle="Send a finished subagent's earlier steps with its result, so T3 Code apps that can't load them, such as the App Store app, show them too. Makes threads larger in every app."
+                        value={uniform("inlineSubagentSteps")}
+                        disabled={disabledFor("inlineSubagentSteps")}
+                        onValueChange={(value) => write({ inlineSubagentSteps: value })}
+                      />
+                    </SettingsSection>
+                  ) : null}
                   <SettingsSection title="Preview browser">
                     <FanoutSwitchRow
                       icon="globe"

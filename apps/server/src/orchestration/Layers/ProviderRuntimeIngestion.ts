@@ -35,6 +35,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { earlierStepsText } from "../../provider/taskTranscript.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -502,6 +503,8 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskTitle?: string,
+  /** A finished subagent's steps as text, added after its result (`inlineSubagentSteps`). */
+  taskSteps?: string,
 ): ReadonlyArray<OrchestrationThreadActivity> {
   const maybeSequence = (() => {
     const eventWithSequence = event as ProviderRuntimeEvent & { sessionSequence?: number };
@@ -856,6 +859,7 @@ export function runtimeEventToActivities(
     }
 
     case "task.completed": {
+      const result = event.payload.summary ? shortenTaskResult(event.payload.summary) : undefined;
       return [
         {
           id: event.eventId,
@@ -873,11 +877,14 @@ export function runtimeEventToActivities(
             status: event.payload.status,
             ...(taskTitle ? { title: truncateDetail(taskTitle, 120) } : {}),
             // summary + detail mirror task.progress: clients label the row from
-            // summary and keep detail for the preview/expanded body.
-            ...(event.payload.summary
+            // summary and keep detail for the preview/expanded body. With steps,
+            // detail carries them after the result, which `result` keeps alone.
+            ...(event.payload.summary && result
               ? {
                   summary: truncateDetail(event.payload.summary),
-                  detail: shortenTaskResult(event.payload.summary),
+                  ...(taskSteps
+                    ? { detail: `${result}\n\n${taskSteps}`, result }
+                    : { detail: result }),
                 }
               : {}),
             ...(event.payload.hasTranscript ? { hasTranscript: true } : {}),
@@ -2542,7 +2549,22 @@ const make = Effect.gen(function* () {
       }
 
       let taskTitle: string | undefined;
+      let taskSteps: string | undefined;
       if (event.type === "task.completed") {
+        if (event.payload.hasTranscript && event.payload.summary) {
+          const inline = yield* serverSettingsService.getSettings.pipe(
+            Effect.map((settings) => settings.inlineSubagentSteps),
+            Effect.orElseSucceed(() => false),
+          );
+          if (inline) {
+            taskSteps = earlierStepsText(
+              yield* providerService.readTaskTranscript({
+                threadId: thread.id,
+                taskId: event.payload.taskId,
+              }),
+            );
+          }
+        }
         taskTitle = yield* lookupTaskDescription(thread.id, event.payload.taskId);
         if (!taskTitle) {
           const taskActivity = yield* projectionThreadActivityRepository.getLatestTaskActivity({
@@ -2627,7 +2649,7 @@ const make = Effect.gen(function* () {
         }
       }
 
-      const activities = runtimeEventToActivities(activityEvent, taskTitle);
+      const activities = runtimeEventToActivities(activityEvent, taskTitle, taskSteps);
       yield* Effect.forEach(activities, (activity) =>
         providerCommandId(event, "thread-activity-append").pipe(
           Effect.flatMap((commandId) =>

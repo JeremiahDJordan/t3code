@@ -187,6 +187,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server gives agents the agent-threads MCP tools (start, read, message and wait on threads)
       and keeps the `enableAgentThreads` setting. Absent on servers without them. */
   agentThreads: Schema.optionalKey(Schema.Boolean),
+  /** Server keeps the `inlineSubagentSteps` setting, adding a finished subagent's steps to its
+      `task.completed` activity. Absent on servers without it. */
+  inlineSubagentSteps: Schema.optionalKey(Schema.Boolean),
   /** Server detects `platform.machine` and persists the `environmentIcon`
       setting. Older servers drop the key on write, so clients show the
       picker inert rather than offering a choice that would never stick. */

@@ -20,6 +20,7 @@ import {
   type OrchestrationCommand,
   ProjectId,
   ProviderItemId,
+  type ProviderReadTaskTranscriptResult,
   RuntimeRequestId,
   type ServerSettings,
   TASK_RESULT_MAX_CHARS,
@@ -121,6 +122,8 @@ function createProviderServiceHarness() {
     }>(),
   );
   const runtimeSessions: ProviderSession[] = [];
+  /** Task steps by task id, as the thread's provider would read them. */
+  const taskTranscripts = new Map<string, ProviderReadTaskTranscriptResult>();
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
@@ -149,7 +152,8 @@ function createProviderServiceHarness() {
     },
     rollbackConversation: () => unsupported(),
     uploadFeedback: () => unsupported(),
-    readTaskTranscript: () => Effect.succeed({ entries: [] }),
+    readTaskTranscript: (input) =>
+      Effect.succeed(taskTranscripts.get(input.taskId) ?? { entries: [] }),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub).pipe(
         Stream.flatMap(({ events, enqueued }) =>
@@ -208,6 +212,7 @@ function createProviderServiceHarness() {
     emit,
     emitAndWaitForEnqueue,
     setSession,
+    taskTranscripts,
   };
 }
 
@@ -438,6 +443,7 @@ describe("ProviderRuntimeIngestion", () => {
       emitAndDrain,
       sqlCount: sqlCounter.count,
       setProviderSession: provider.setSession,
+      taskTranscripts: provider.taskTranscripts,
       drain,
     };
   }
@@ -4974,6 +4980,58 @@ describe("ProviderRuntimeIngestion", () => {
       `${oversized.slice(0, TASK_RESULT_MAX_CHARS - shortened.length)}${shortened}`,
     );
     expect(oversizedPayload).not.toHaveProperty("hasTranscript");
+  });
+
+  /** Completes a subagent whose provider kept its steps, and returns its activity's payload. */
+  const completeSubagentWithSteps = async (serverSettings?: Partial<ServerSettings>) => {
+    const harness = await createHarness(serverSettings ? { serverSettings } : undefined);
+    harness.taskTranscripts.set("steps-task-1", {
+      entries: [
+        { _tag: "prompt", text: "Count the files." },
+        { _tag: "tool", title: "Bash: ls", input: "ls -A", output: "a.ts\nb.ts", failed: false },
+      ],
+    });
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-steps-task-completed"),
+      provider: ProviderDriverKind.make("bob"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-steps-task"),
+      payload: {
+        taskId: "steps-task-1",
+        status: "completed",
+        summary: "There are 2 files.",
+        hasTranscript: true,
+      },
+    });
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-steps-task-completed",
+      ),
+    );
+    return thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-steps-task-completed",
+    )?.payload as Record<string, unknown> | undefined;
+  };
+
+  it("adds a subagent's steps after its result when inlineSubagentSteps is on", async () => {
+    const payload = await completeSubagentWithSteps({ inlineSubagentSteps: true });
+    expect(payload?.result).toBe("There are 2 files.");
+    expect(payload?.detail).toBe(
+      [
+        "There are 2 files.",
+        "── Earlier steps ──",
+        "▸ Prompt\nCount the files.",
+        "▸ Bash: ls\nInput:\nls -A\nOutput:\na.ts\nb.ts",
+      ].join("\n\n"),
+    );
+  });
+
+  it("keeps a subagent's result alone while inlineSubagentSteps is off", async () => {
+    const payload = await completeSubagentWithSteps();
+    expect(payload?.detail).toBe("There are 2 files.");
+    expect(payload).not.toHaveProperty("result");
   });
 
   it("titles task completion from task.started when no progress event carried the name", async () => {

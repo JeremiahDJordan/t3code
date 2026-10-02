@@ -245,6 +245,7 @@ export const make = Effect.gen(function* () {
       threadCheckIns: true,
       threadBackgroundCommands: true,
       agentThreads: true,
+      inlineSubagentSteps: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
       ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
         ? {
