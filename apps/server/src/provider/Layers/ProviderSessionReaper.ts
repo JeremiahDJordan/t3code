@@ -1,4 +1,5 @@
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -6,6 +7,7 @@ import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { threadHasQueuedTurnStart } from "../../orchestration/ThreadSettlementPolicy.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   ProviderSessionReaper,
@@ -74,6 +76,21 @@ const makeProviderSessionReaper = (options?: ProviderSessionReaperLiveOptions) =
           yield* Effect.logDebug("provider.session.reaper.skipped-active-turn", {
             threadId: binding.threadId,
             activeTurnId: thread.session.activeTurnId,
+            idleDurationMs,
+          });
+          continue;
+        }
+
+        // A message the thread has not started a turn for is about to use the session: the
+        // turn start can still be on its way to the provider, and stopping the session now would
+        // cancel it without a word, such as a sweep due when a machine wakes as its user types.
+        if (
+          thread !== undefined &&
+          threadHasQueuedTurnStart(thread, DateTime.formatIso(DateTime.makeUnsafe(now)))
+        ) {
+          yield* Effect.logDebug("provider.session.reaper.skipped-queued-turn-start", {
+            threadId: binding.threadId,
+            latestUserMessageAt: thread.latestUserMessageAt,
             idleDurationMs,
           });
           continue;
