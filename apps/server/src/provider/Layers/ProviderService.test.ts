@@ -986,6 +986,97 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect(
+  "ProviderServiceLive resumes a thread on another instance that shares its continuation key",
+  () =>
+    Effect.gen(function* () {
+      const driverKind = CODEX_DRIVER;
+      const personalId = ProviderInstanceId.make("codex_personal");
+      const workId = ProviderInstanceId.make("codex_work");
+      const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-provider-switch-"));
+      const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+        Layer.provide(makeSqlitePersistenceLive(NodePath.join(tempDir, "state.sqlite"))),
+      );
+      // Two accounts reading one Codex home, as a second login of the same agent does.
+      const providerLayerFor = (
+        adapters: Record<string, ReturnType<typeof makeFakeCodexAdapter>>,
+      ) =>
+        makeProviderServiceLive().pipe(
+          Layer.provide(NodeServices.layer),
+          Layer.provide(
+            Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, {
+              getByInstance: (instanceId) => {
+                const fake = adapters[instanceId];
+                return fake
+                  ? Effect.succeed(fake.adapter)
+                  : Effect.fail(new ProviderUnsupportedError({ provider: driverKind }));
+              },
+              getInstanceInfo: (instanceId) =>
+                adapters[instanceId]
+                  ? Effect.succeed({
+                      instanceId,
+                      driverKind,
+                      displayName: undefined,
+                      enabled: true,
+                      continuationIdentity: {
+                        driverKind,
+                        continuationKey: "codex:/Users/example/.codex",
+                      },
+                    })
+                  : Effect.fail(new ProviderUnsupportedError({ provider: driverKind })),
+              listInstances: () =>
+                Effect.succeed(Object.keys(adapters).map((id) => ProviderInstanceId.make(id))),
+              subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), (pubsub) =>
+                PubSub.subscribe(pubsub),
+              ),
+            }),
+          ),
+          Layer.provide(ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer))),
+          Layer.provide(defaultServerSettingsLayer),
+          Layer.provide(serverConfigTestLayer),
+          Layer.provide(AnalyticsService.layerTest),
+          Layer.provide(
+            Layer.succeed(
+              ProviderEventLoggers.ProviderEventLoggers,
+              ProviderEventLoggers.NoOpProviderEventLoggers,
+            ),
+          ),
+        );
+      const threadId = asThreadId("thread-switch-account");
+      const initial = yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        return yield* provider.startSession(threadId, {
+          provider: driverKind,
+          providerInstanceId: personalId,
+          threadId,
+          cwd: fixtureCwd("project-switch-account"),
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(providerLayerFor({ [personalId]: makeFakeCodexAdapter() })));
+
+      // After a restart the personal session is gone; the thread continues on the work account.
+      const work = makeFakeCodexAdapter();
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          provider: driverKind,
+          providerInstanceId: workId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+      }).pipe(
+        Effect.provide(providerLayerFor({ [personalId]: makeFakeCodexAdapter(), [workId]: work })),
+      );
+
+      const resumed = work.startSession.mock.calls[0]?.[0] as
+        | { resumeCursor?: unknown; cwd?: string }
+        | undefined;
+      assert.deepEqual(resumed?.resumeCursor, initial.resumeCursor);
+      assert.equal(resumed?.cwd, fixtureCwd("project-switch-account"));
+      NodeFS.rmSync(tempDir, { recursive: true, force: true });
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.effect("ProviderServiceLive rejects new sessions for disabled custom instances", () =>
   Effect.gen(function* () {
     const instanceId = ProviderInstanceId.make("codex_personal");
