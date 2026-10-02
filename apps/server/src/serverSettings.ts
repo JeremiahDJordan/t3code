@@ -413,7 +413,7 @@ function migrateLegacySourceControlSettings(
 // Drivers that start disabled, so a session in the history means the user
 // turned them on before the instance kept an explicit flag.
 const HISTORY_RESTORED_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set(
-  ["cursor", "grok", "opencode"].map((driver) => ProviderDriverKind.make(driver)),
+  ["cursor", "grok", "bob", "opencode"].map((driver) => ProviderDriverKind.make(driver)),
 );
 
 /**
@@ -422,7 +422,7 @@ const HISTORY_RESTORED_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set(
  * wins. Blobs that match a fresh install (empty, or only an `enabled` flag
  * equal to the driver default) carry nothing and are dropped.
  *
- * A cursor/grok/opencode slot without an `enabled` flag is enabled when
+ * A cursor/grok/bob/opencode slot without an `enabled` flag is enabled when
  * provider history shows the driver was used, which is how those drivers
  * were opted into before they had an explicit flag. Callers run this only
  * while the settings file still has the retired map, so it happens once.
@@ -455,7 +455,7 @@ function migrateLegacyProviderSettings(
         : instance;
   }
 
-  // History restores a never-configured cursor/grok/opencode slot too.
+  // History restores a never-configured cursor/grok/bob/opencode slot too.
   const legacyEntries = new Map(Object.entries(legacyProviders));
   for (const driver of HISTORY_RESTORED_DRIVERS) {
     if (!legacyEntries.has(driver)) legacyEntries.set(driver, {});
@@ -791,13 +791,13 @@ const make = Effect.gen(function* () {
         provider_name AS "providerName",
         provider_instance_id AS "providerInstanceId"
       FROM projection_thread_sessions
-      WHERE provider_name IN ('cursor', 'grok', 'opencode')
+      WHERE provider_name IN ('cursor', 'grok', 'bob', 'opencode')
       UNION
       SELECT DISTINCT
         provider_name AS "providerName",
         provider_instance_id AS "providerInstanceId"
       FROM provider_session_runtime
-      WHERE provider_name IN ('cursor', 'grok', 'opencode')
+      WHERE provider_name IN ('cursor', 'grok', 'bob', 'opencode')
     `.pipe(
       Effect.mapError(
         (cause) =>

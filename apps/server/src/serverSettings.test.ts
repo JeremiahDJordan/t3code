@@ -888,6 +888,33 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       ).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("falls back to Bob when it is the only provider enabled", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const next = yield* serverSettings.updateSettings({
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: false,
+            config: {},
+          },
+          [ProviderInstanceId.make("claudeAgent")]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: false,
+            config: {},
+          },
+          [ProviderInstanceId.make("bob")]: {
+            driver: ProviderDriverKind.make("bob"),
+            enabled: true,
+            config: {},
+          },
+        },
+      });
+
+      assert.equal(next.textGenerationModelSelection.instanceId, "bob");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("skips explicitly disabled default instances when choosing a fallback", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
@@ -1182,7 +1209,11 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       yield* fileSystem.writeFileString(
         serverConfig.settingsPath,
         JSON.stringify({
-          providers: { opencode: { serverUrl: "http://127.0.0.1:4096" }, cursor: {} },
+          providers: {
+            opencode: { serverUrl: "http://127.0.0.1:4096" },
+            cursor: {},
+            bob: { sessionHost: "tmux" },
+          },
           providerInstances: {
             cursor_work: { driver: "cursor", config: {} },
             opencode_unused: { driver: "opencode", config: {} },
@@ -1192,6 +1223,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       yield* recordProviderUsage("opencode");
       yield* recordProviderUsage("grok", null);
       yield* recordProviderUsage("cursor", "cursor_work");
+      yield* recordProviderUsage("bob", null);
 
       const settings = yield* serverSettings.getSettings;
 
@@ -1202,6 +1234,12 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       });
       // Used without any legacy blob or instance: the slot is created enabled.
       assert.isTrue(settings.providerInstances[ProviderInstanceId.make("grok")]?.enabled);
+      // Bob starts disabled like Cursor; history turns its legacy blob on, settings kept.
+      assert.deepEqual(settings.providerInstances[ProviderInstanceId.make("bob")], {
+        driver: ProviderDriverKind.make("bob"),
+        enabled: true,
+        config: { sessionHost: "tmux" },
+      });
       assert.isTrue(settings.providerInstances[ProviderInstanceId.make("cursor_work")]?.enabled);
       // Using any cursor instance counts as opting into the driver.
       assert.isTrue(settings.providerInstances[ProviderInstanceId.make("cursor")]?.enabled);
