@@ -27,6 +27,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
+import { readClaudeSubagentTranscript } from "./claudeSubagentTranscript.ts";
 import { type ClaudeScopedLimitNames, claudeRateLimitEventToUpdate } from "./claudeUsageLimits.ts";
 import {
   ApprovalRequestId,
@@ -90,7 +91,11 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
-import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
+import {
+  claudeSignedOutMessage,
+  makeClaudeEnvironment,
+  resolveClaudeHomePath,
+} from "../Drivers/ClaudeHome.ts";
 import { planClaudeSkillDispatch } from "../Drivers/ClaudeSkillDispatch.ts";
 import { discoverClaudeSkills } from "../Drivers/ClaudeSkills.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
@@ -3928,6 +3933,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           },
         );
         const typedUsage = normalizeTaskUsage(message.usage);
+        const linkage = taskLinkageFor(context.taskAgents, message.task_id);
+        // Claude Code writes a subagent's conversation to its own transcript, which
+        // `readTaskTranscript` reads; a workflow coordinator has none.
+        const hasTranscript =
+          classifyTaskAgentKind(linkage) === "agent" && linkage.taskType !== "local_workflow";
         yield* offerRuntimeEvent({
           ...base,
           type: "task.completed",
@@ -3938,7 +3948,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             ...(message.usage ? { usage: message.usage } : {}),
             ...(typedUsage ? { typedUsage } : {}),
             ...(message.output_file ? { outputFile: message.output_file } : {}),
-            ...taskLinkageFor(context.taskAgents, message.task_id),
+            ...(hasTranscript ? { hasTranscript: true } : {}),
+            ...linkage,
           },
         });
         return;
@@ -5660,6 +5671,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ),
   );
 
+  // Where this instance's Claude Code writes its transcripts: its home, or `~/.claude`.
+  const claudeConfigDir = yield* resolveClaudeHomePath(claudeSettings, options?.environment).pipe(
+    Effect.provideService(Path.Path, path),
+  );
+  const readTaskTranscript: NonNullable<ClaudeAdapterShape["readTaskTranscript"]> = (input) => {
+    const sessionId = readClaudeResumeState(input.resumeCursor)?.resume;
+    return sessionId
+      ? readClaudeSubagentTranscript(claudeConfigDir, sessionId, input.taskId).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        )
+      : Effect.succeed({ entries: [] });
+  };
+
   return {
     provider: PROVIDER,
     capabilities: {
@@ -5677,6 +5702,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     listSessions,
     hasSession,
     stopAll,
+    readTaskTranscript,
     get streamEvents() {
       return Stream.fromQueue(runtimeEventQueue);
     },

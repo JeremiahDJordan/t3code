@@ -222,10 +222,24 @@ function AgentSteps({
   if (result._tag !== "Success") {
     return <p className="text-xs text-muted-foreground">Loading…</p>;
   }
-  const { omittedEntries } = result.value;
-  const entries = result.value.entries.filter(
-    (entry) => !(entry._tag === "prompt" && entry.text === shownTitle),
+  return (
+    <AgentStepList
+      entries={result.value.entries.filter(
+        (entry) => !(entry._tag === "prompt" && entry.text === shownTitle),
+      )}
+      omittedEntries={result.value.omittedEntries ?? 0}
+    />
   );
+}
+
+/** A run's steps, oldest first, noting how many older ones were left out. */
+function AgentStepList({
+  entries,
+  omittedEntries,
+}: {
+  entries: ReadonlyArray<TaskTranscriptEntry>;
+  omittedEntries: number;
+}) {
   if (entries.length === 0) {
     return <p className="text-xs text-muted-foreground">No steps were recorded.</p>;
   }

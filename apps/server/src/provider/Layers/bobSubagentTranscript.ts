@@ -8,25 +8,13 @@
  *
  * @module provider/Layers/bobSubagentTranscript
  */
-import {
-  type ProviderReadTaskTranscriptResult,
-  TASK_RESULT_MAX_CHARS,
-  type TaskTranscriptEntry,
-} from "@t3tools/contracts";
+import type { ProviderReadTaskTranscriptResult, TaskTranscriptEntry } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import { finishTaskTranscript } from "../taskTranscript.ts";
 import { readBobDatabase } from "./bobDatabase.ts";
-
-/** How much of a prompt or message a step keeps. */
-const TRANSCRIPT_TEXT_MAX_CHARS = 4_000;
-/** How much of a report too long for the task's result the steps keep. */
-const TRANSCRIPT_REPORT_MAX_CHARS = 32_000;
-/** How much of a tool call's input or output a step keeps. */
-const TRANSCRIPT_TOOL_TEXT_MAX_CHARS = 2_000;
-/** Steps returned at most, so a long run stays a small response. */
-const TRANSCRIPT_MAX_ENTRIES = 100;
 
 /** The parent's tool message for one subagent run. `idx_messages_task` keeps this indexed. */
 const SUBAGENT_TOOL_MESSAGE = `SELECT data FROM messages
@@ -57,10 +45,6 @@ const BobNestedMessage = Schema.Struct({
   _meta: Schema.optional(Schema.Struct({ hide: Schema.optional(Schema.Unknown) })),
 });
 const decodeBobNestedMessage = Schema.decodeUnknownOption(BobNestedMessage);
-
-function shorten(text: string, maxChars: number): string {
-  return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
-}
 
 /** A message's text: Bob stores a string, or text parts for multimodal content. */
 function contentText(content: unknown): string {
@@ -126,8 +110,8 @@ function toEntry(raw: unknown): TaskTranscriptEntry | undefined {
       return {
         _tag: "tool",
         title: bobToolTitle(message.toolUsage?.labels?.displayName, signature?.name, args),
-        ...(input ? { input: shorten(input, TRANSCRIPT_TOOL_TEXT_MAX_CHARS) } : {}),
-        ...(text ? { output: shorten(text, TRANSCRIPT_TOOL_TEXT_MAX_CHARS) } : {}),
+        ...(input ? { input } : {}),
+        ...(text ? { output: text } : {}),
         failed: signature?.isError === true,
       };
     }
@@ -137,33 +121,11 @@ function toEntry(raw: unknown): TaskTranscriptEntry | undefined {
   }
 }
 
-/**
- * The steps of a subagent's conversation before its report, which the task's result already
- * carries; a report too long for the result ends the steps instead, so it can be read whole. A
- * long run keeps its prompt and its newest steps.
- */
+/** The steps of a subagent's conversation before its report (see `finishTaskTranscript`). */
 export function bobSubagentTranscriptEntries(
   messages: ReadonlyArray<unknown>,
 ): ProviderReadTaskTranscriptResult {
-  const all = messages.flatMap((message) => toEntry(message) ?? []);
-  const report = all.at(-1);
-  const keepReport = report?._tag === "message" && report.text.length > TASK_RESULT_MAX_CHARS;
-  if (report?._tag === "message" && !keepReport) all.pop();
-  const entries = all.map((entry, index): TaskTranscriptEntry => {
-    if (entry._tag === "tool") return entry;
-    const kept = keepReport && index === all.length - 1;
-    return {
-      ...entry,
-      text: shorten(entry.text, kept ? TRANSCRIPT_REPORT_MAX_CHARS : TRANSCRIPT_TEXT_MAX_CHARS),
-    };
-  });
-  if (entries.length <= TRANSCRIPT_MAX_ENTRIES) return { entries };
-  const head = entries[0]?._tag === "prompt" ? entries.slice(0, 1) : [];
-  const tail = entries.slice(entries.length - (TRANSCRIPT_MAX_ENTRIES - head.length));
-  return {
-    entries: [...head, ...tail],
-    omittedEntries: entries.length - head.length - tail.length,
-  };
+  return finishTaskTranscript(messages.flatMap((message) => toEntry(message) ?? []));
 }
 
 /**
