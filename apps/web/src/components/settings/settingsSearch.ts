@@ -643,6 +643,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["allow disable enable open drive preview tools sessions project override"],
   },
   {
+    id: "agent-check-ins",
+    title: "Agent check-ins",
+    to: "/settings/integrations",
+    scope: "project-defaults",
+    searchTerms: [
+      "schedule reminder later wake background command build ci poll tmux watch wait thread finish project override",
+    ],
+  },
+  {
+    id: "check-in-repeat-limit",
+    title: "Repeating check-ins end after",
+    to: "/settings/integrations",
+    scope: "project-defaults",
+    searchTerms: ["hours expire stop repeat interval check-in limit wait"],
+  },
+  {
     id: "device-hosts",
     title: "Device hosts",
     to: "/settings/integrations",

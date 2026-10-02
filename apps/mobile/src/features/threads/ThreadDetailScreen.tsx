@@ -118,6 +118,7 @@ import { PendingApprovalCard } from "./PendingApprovalCard";
 import { ComposerErrorNotice } from "./ComposerErrorNotice";
 import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
+import { ThreadCheckIns } from "./ThreadCheckIns";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { ProviderSubagentBar } from "./ProviderSubagentBar";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
@@ -1289,6 +1290,14 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       />
                     </Animated.View>
                   ) : null}
+                  <ThreadCheckIns
+                    environmentId={props.environmentId}
+                    threadId={props.selectedThread.id}
+                    supported={props.serverConfig?.environment.capabilities.threadCheckIns === true}
+                    commandsSupported={
+                      props.serverConfig?.environment.capabilities.threadBackgroundCommands === true
+                    }
+                  />
                   {usageLimitsReport && activeUserInputRequestId === null ? (
                     <Animated.View
                       className="shrink-0 px-4 pb-3"
