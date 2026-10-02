@@ -1,4 +1,3 @@
-import type { ThreadTokenUsageSnapshot, TurnTokenUsage } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
@@ -78,56 +77,6 @@ export const readBobTaskCosts = Effect.fn("readBobTaskCosts")(function* (
   );
 });
 
-/** Spend between two readings. A total that went down means Bob started over. */
-function bobTaskCostsSince(
-  current: BobTaskCosts,
-  previous: BobTaskCosts | undefined,
-): BobTaskCosts {
-  if (
-    !previous ||
-    current.input < previous.input ||
-    current.output < previous.output ||
-    current.cost < previous.cost
-  ) {
-    return current;
-  }
-  return {
-    input: current.input - previous.input,
-    output: current.output - previous.output,
-    cacheRead: Math.max(0, current.cacheRead - previous.cacheRead),
-    cacheWrite: Math.max(0, current.cacheWrite - previous.cacheWrite),
-    cost: current.cost - previous.cost,
-    contextTokens: current.contextTokens,
-    tokensRecorded: current.tokensRecorded,
-  };
-}
-
-const NO_TASK_COSTS: BobTaskCosts = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  cost: 0,
-  contextTokens: 0,
-  tokensRecorded: false,
-};
-
-/** Whether a reading changed anything since `previous`; no previous reading is no spend. */
-export function sameBobTaskCosts(
-  previous: BobTaskCosts | undefined,
-  current: BobTaskCosts,
-): boolean {
-  const before = previous ?? NO_TASK_COSTS;
-  return (
-    before.input === current.input &&
-    before.output === current.output &&
-    before.cacheRead === current.cacheRead &&
-    before.cacheWrite === current.cacheWrite &&
-    before.cost === current.cost &&
-    before.contextTokens === current.contextTokens
-  );
-}
-
 /**
  * Context windows (maximum input tokens) of the models IBM's Bob gateway listed in
  * `/inference/v1/model/info`: a snapshot taken on 2026-09-24 with Bob 2.0.5. ACP reports
@@ -161,60 +110,4 @@ const BOB_ROUTER_DEFAULT_MODEL = "premium-ide";
  */
 export function bobContextWindow(configuredModel: string | undefined): number | undefined {
   return BOB_MODEL_CONTEXT_WINDOWS[configuredModel?.trim() || BOB_ROUTER_DEFAULT_MODEL];
-}
-
-/**
- * Thread usage from a reading; `last*` is what was spent since `previous`. Without Bob's
- * token counts it is the context size and Bobcoins alone. `maxTokens` is the session's
- * context window when T3 knows it (see `bobContextWindow`). That window is assumed, so a
- * context larger than it proves it wrong and is reported as a count without a window.
- */
-export function bobThreadTokenUsage(
-  current: BobTaskCosts,
-  previous: BobTaskCosts | undefined,
-  maxTokens?: number,
-): ThreadTokenUsageSnapshot {
-  const cost = { amount: current.cost, currency: "Bobcoins" };
-  const window =
-    maxTokens !== undefined && maxTokens > 0 && current.contextTokens <= maxTokens
-      ? { maxTokens }
-      : {};
-  if (!current.tokensRecorded) return { usedTokens: current.contextTokens, ...window, cost };
-  const last = bobTaskCostsSince(current, previous);
-  const totalProcessedTokens = current.input + current.output;
-  return {
-    usedTokens: current.contextTokens,
-    ...window,
-    ...(totalProcessedTokens > current.contextTokens ? { totalProcessedTokens } : {}),
-    inputTokens: current.input,
-    cachedInputTokens: Math.min(current.input, current.cacheRead),
-    outputTokens: current.output,
-    lastInputTokens: last.input,
-    lastCachedInputTokens: Math.min(last.input, last.cacheRead),
-    lastOutputTokens: last.output,
-    cost,
-  };
-}
-
-/** Usage of the turn that started at `turnStart`, unavailable when Bob kept no token counts. */
-export function bobTurnTokenUsage(
-  current: BobTaskCosts,
-  turnStart: BobTaskCosts | undefined,
-  completed: boolean,
-): TurnTokenUsage {
-  if (!current.tokensRecorded) {
-    return { usageStatus: "unavailable", usageScope: "main_agent", hasSubagents: false };
-  }
-  const turn = bobTaskCostsSince(current, turnStart);
-  return {
-    usageStatus: completed ? "complete" : "partial",
-    usageScope: "main_agent",
-    inputTokens: turn.input,
-    cachedInputTokens: Math.min(turn.input, turn.cacheRead),
-    cacheCreationTokens: Math.min(turn.input, turn.cacheWrite),
-    outputTokens: turn.output,
-    // Bob keeps subagent tokens on their own tasks, so these counts are the main agent's.
-    // The task row does not say whether subagents ran.
-    hasSubagents: false,
-  };
 }

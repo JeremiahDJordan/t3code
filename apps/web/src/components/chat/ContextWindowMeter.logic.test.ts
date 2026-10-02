@@ -292,5 +292,6 @@ describe("formatContextWindowCost", () => {
   it("keeps ordinary and sub-cent ACP costs readable", () => {
     expect(formatContextWindowCost({ amount: 0.42, currency: "USD" })).toBe("USD 0.42");
     expect(formatContextWindowCost({ amount: 0.0042, currency: "USD" })).toBe("USD 0.0042");
+    expect(formatContextWindowCost({ amount: 0.24, currency: "Bobcoins" })).toBe("0.24 Bobcoins");
   });
 });

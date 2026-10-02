@@ -141,5 +141,9 @@ export function formatContextWindowCost(cost: {
   readonly currency: string;
 }): string {
   const fractionDigits = Math.abs(cost.amount) > 0 && Math.abs(cost.amount) < 0.01 ? 4 : 2;
-  return `${cost.currency} ${cost.amount.toFixed(fractionDigits)}`;
+  const amount = cost.amount.toFixed(fractionDigits);
+  // A currency code leads, as "USD 0.42"; a provider's own unit follows, as "0.24 Bobcoins".
+  return /^[A-Z]{3}$/.test(cost.currency)
+    ? `${cost.currency} ${amount}`
+    : `${amount} ${cost.currency}`;
 }

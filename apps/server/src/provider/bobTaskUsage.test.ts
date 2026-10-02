@@ -11,8 +11,6 @@ import * as Path from "effect/Path";
 import {
   bobContextWindow,
   type BobTaskCosts,
-  bobThreadTokenUsage,
-  bobTurnTokenUsage,
   readBobTaskCosts,
   resolveBobTaskDatabasePath,
 } from "./bobTaskUsage.ts";
@@ -50,33 +48,6 @@ const costOnlyTurn: BobTaskCosts = {
   tokensRecorded: false,
 };
 
-describe("bobThreadTokenUsage", () => {
-  it("reports the context size, running totals, the change since the last reading, and Bobcoins", () => {
-    expect(bobThreadTokenUsage(secondTurn, firstTurn)).toEqual({
-      usedTokens: 18_500,
-      totalProcessedTokens: 31_500,
-      inputTokens: 30_000,
-      cachedInputTokens: 24_000,
-      outputTokens: 1_500,
-      lastInputTokens: 18_000,
-      lastCachedInputTokens: 15_000,
-      lastOutputTokens: 700,
-      cost: { amount: 0.118, currency: "Bobcoins" },
-    });
-  });
-
-  it("counts a whole reading as new when Bob's totals went down", () => {
-    expect(bobThreadTokenUsage(firstTurn, secondTurn).lastInputTokens).toBe(12_000);
-  });
-
-  it("reports only the context size and Bobcoins when Bob kept no token counts", () => {
-    expect(bobThreadTokenUsage(costOnlyTurn, firstTurn)).toEqual({
-      usedTokens: 11_000,
-      cost: { amount: 0.044, currency: "Bobcoins" },
-    });
-  });
-});
-
 describe("bobContextWindow", () => {
   it("assumes the router's usual model when Bob pins none", () => {
     expect(bobContextWindow(undefined)).toBe(270_000);
@@ -87,60 +58,6 @@ describe("bobContextWindow", () => {
     expect(bobContextWindow("wxO-model")).toBe(1_000_000);
     expect(bobContextWindow("fast")).toBe(200_000);
     expect(bobContextWindow("ultra")).toBeUndefined();
-  });
-});
-
-describe("bobThreadTokenUsage with a context window", () => {
-  it("reports the window with and without Bob's token counts", () => {
-    expect(bobThreadTokenUsage(secondTurn, firstTurn, 270_000).maxTokens).toBe(270_000);
-    expect(
-      bobThreadTokenUsage({ ...secondTurn, tokensRecorded: false }, firstTurn, 270_000),
-    ).toEqual({
-      usedTokens: 18_500,
-      maxTokens: 270_000,
-      cost: { amount: 0.118, currency: "Bobcoins" },
-    });
-    expect(bobThreadTokenUsage(secondTurn, firstTurn).maxTokens).toBeUndefined();
-  });
-
-  it("drops an assumed window the context has outgrown, keeping a full one", () => {
-    const outgrown = { ...secondTurn, contextTokens: 300_000 };
-    const usage = bobThreadTokenUsage(outgrown, firstTurn, 270_000);
-    expect(usage.usedTokens).toBe(300_000);
-    expect(usage).not.toHaveProperty("maxTokens");
-    expect(bobThreadTokenUsage({ ...outgrown, tokensRecorded: false }, firstTurn, 270_000)).toEqual(
-      { usedTokens: 300_000, cost: { amount: 0.118, currency: "Bobcoins" } },
-    );
-    expect(
-      bobThreadTokenUsage({ ...secondTurn, contextTokens: 270_000 }, firstTurn, 270_000).maxTokens,
-    ).toBe(270_000);
-  });
-});
-
-describe("bobTurnTokenUsage", () => {
-  it("reports what the turn spent since it began", () => {
-    expect(bobTurnTokenUsage(secondTurn, firstTurn, true)).toEqual({
-      usageStatus: "complete",
-      usageScope: "main_agent",
-      inputTokens: 18_000,
-      cachedInputTokens: 15_000,
-      cacheCreationTokens: 500,
-      outputTokens: 700,
-      hasSubagents: false,
-    });
-    expect(bobTurnTokenUsage(firstTurn, undefined, false)).toMatchObject({
-      usageStatus: "partial",
-      inputTokens: 12_000,
-      outputTokens: 800,
-    });
-  });
-
-  it("reports the turn's tokens as unavailable, not zero, when Bob kept no counts", () => {
-    expect(bobTurnTokenUsage(costOnlyTurn, undefined, true)).toEqual({
-      usageStatus: "unavailable",
-      usageScope: "main_agent",
-      hasSubagents: false,
-    });
   });
 });
 
