@@ -61,6 +61,18 @@ function normalizeSelectionOptions(
       };
 }
 
+/**
+ * An instance's continuation group: instances in one group resume each other's sessions, such
+ * as two accounts of the same agent, so a thread can move between them.
+ */
+export function providerContinuationGroupKey(
+  config: T3ServerConfig | null | undefined,
+  instanceId: string,
+): string | undefined {
+  return config?.providers.find((provider) => provider.instanceId === instanceId)?.continuation
+    ?.groupKey;
+}
+
 /** Whether a known Antigravity selection needs setup or a different model. */
 export function isModelSelectionUnavailable(
   config: T3ServerConfig | null | undefined,
