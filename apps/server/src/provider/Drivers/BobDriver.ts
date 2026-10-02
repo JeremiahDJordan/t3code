@@ -36,11 +36,16 @@ import {
 } from "../Layers/BobProvider.ts";
 import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
 import {
+  readBobConfiguredModel,
   readBobPinnedTeams,
   readBobUsageLimits,
   readBobUsageProfile,
 } from "../Layers/bobUsageLimits.ts";
-import { resolveBobTaskDatabasePath } from "../Layers/bobTaskUsage.ts";
+import {
+  bobContextWindow,
+  readBobTaskCosts,
+  resolveBobTaskDatabasePath,
+} from "../Layers/bobTaskUsage.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
   type ProviderContinuationIdentity,
@@ -103,9 +108,10 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       // Bob keeps its sessions in its task database, and any instance reading the same one can
       // resume them, whatever it signs in with. So a thread moves between such instances, such
       // as from an SSO login to an API key when one account runs out of Bobcoins.
+      const taskDatabasePath = resolveBobTaskDatabasePath(processEnv, path);
       const continuationIdentity: ProviderContinuationIdentity = {
         driverKind: DRIVER_KIND,
-        continuationKey: `bob:db:${resolveBobTaskDatabasePath(processEnv, path)}`,
+        continuationKey: `bob:db:${taskDatabasePath}`,
       };
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -200,6 +206,25 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         selfInvocation,
         onAvailableCommands,
         onAvailableModes,
+        // Bob reads its model setting on every turn, so the window follows it. That window is
+        // assumed, so a context larger than it proves it wrong and is reported without one.
+        readTaskUsage: (sessionId) =>
+          Effect.gen(function* () {
+            const costs = yield* readBobTaskCosts(taskDatabasePath, sessionId);
+            if (!costs) return undefined;
+            const window = bobContextWindow(yield* readBobConfiguredModel(processEnv));
+            return {
+              used: costs.contextTokens,
+              size: window !== undefined && costs.contextTokens <= window ? window : 0,
+              bobcoins: costs.cost,
+            };
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.orElseSucceed(() => undefined),
+          ),
+        onBobcoinsSpent: (cwd) =>
+          refreshUsageLimits(cwd, true).pipe(Effect.forkIn(driverScope), Effect.asVoid),
         continuationRequests,
         nativeLogging: (threadId) =>
           makeNativeLogger({

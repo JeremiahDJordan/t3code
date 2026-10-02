@@ -63,7 +63,10 @@ function permissionRequest(
 describe("BobAdapterV2 flavor", () => {
   it("reads Bob's HTML-escaped tool titles as Bob meant them", () => {
     assert.equal(decodeBobTitle("echo a&#x3D;b &amp;&amp; ls &lt;dir&gt;"), "echo a=b && ls <dir>");
-    assert.equal(decodeBobTitle("keeps &bogus; and &#0; as they are"), "keeps &bogus; and &#0; as they are");
+    assert.equal(
+      decodeBobTitle("keeps &bogus; and &#0; as they are"),
+      "keeps &bogus; and &#0; as they are",
+    );
   });
 
   it("recognizes a subagent by its title ending in its description, and strips its report's tags", () => {
@@ -71,9 +74,16 @@ describe("BobAdapterV2 flavor", () => {
       toolCallId: "call-1",
       kind: "other",
       status: "inProgress",
-      data: { title: "Running subagent: Count the files", rawInput: { description: "Count the files" } },
+      data: {
+        title: "Running subagent: Count the files",
+        rawInput: { description: "Count the files" },
+      },
     });
-    assert.deepInclude(running, { nativeTaskId: "call-1", prompt: "Count the files", status: "running" });
+    assert.deepInclude(running, {
+      nativeTaskId: "call-1",
+      prompt: "Count the files",
+      status: "running",
+    });
     assert.isNull(running?.result);
     const finished = flavor.extractSubagentUpdate?.({
       toolCallId: "call-1",
@@ -143,7 +153,10 @@ describe("BobAdapterV2 flavor", () => {
 
   it("explains Bob's setup refusals and the reason in a failed turn", () => {
     const signIn = flavor.promptFailure?.(
-      new EffectAcpErrors.AcpRequestError({ code: -32000, errorMessage: "Authentication required" }),
+      new EffectAcpErrors.AcpRequestError({
+        code: -32000,
+        errorMessage: "Authentication required",
+      }),
     );
     assert.equal(signIn?.message, BOB_SSO_SIGN_IN_MESSAGE);
     const details = flavor.promptFailure?.(
@@ -178,6 +191,8 @@ const runBobTurn = (input: {
   readonly text: string;
   readonly interactionMode?: "default" | "plan";
   readonly mockEnv?: Record<string, string>;
+  /** Bob's task usage by reading, the first when the session opens. */
+  readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -196,6 +211,8 @@ const runBobTurn = (input: {
       source: execScriptSource({ scriptPath: mockPath }),
     });
     const commands: Array<{ names: ReadonlyArray<string>; cwd: string }> = [];
+    const spentIn: Array<string> = [];
+    let usageReading = 0;
     const modes: Array<{ ids: ReadonlyArray<string>; cwd: string }> = [];
     const instanceId = ProviderInstanceId.make("bob-turn-test");
     const adapter = makeBobAdapterV2({
@@ -216,6 +233,15 @@ const runBobTurn = (input: {
         Effect.sync(() => {
           modes.push({ ids: available.map((mode) => mode.id), cwd });
         }),
+      ...(input.usageReadings
+        ? {
+            readTaskUsage: () => Effect.sync(() => input.usageReadings?.[usageReading++]),
+            onBobcoinsSpent: (cwd: string) =>
+              Effect.sync(() => {
+                spentIn.push(cwd);
+              }),
+          }
+        : {}),
     });
     const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
       runtimeMode: "full-access",
@@ -286,8 +312,9 @@ const runBobTurn = (input: {
         const message = JSON.parse(line) as { readonly method?: string };
         return message.method ? [message.method] : [];
       });
-    return { events, methods, commands, modes, workspace } satisfies BobTurnResult & {
+    return { events, methods, commands, modes, workspace, spentIn } satisfies BobTurnResult & {
       readonly workspace: string;
+      readonly spentIn: ReadonlyArray<string>;
     };
   });
 
@@ -295,25 +322,31 @@ const terminalOf = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
   events.find((event) => event.type === "turn.terminal");
 
 describe("BobAdapterV2 turns", () => {
-  it.effect("runs a turn without ever asking Bob to authenticate, and learns its commands and modes", () =>
-    Effect.gen(function* () {
-      const result = yield* runBobTurn({ text: "hello" });
-      assert.equal(terminalOf(result.events)?.status, "completed");
-      assert.notInclude(result.methods, "authenticate");
-      assert.include(result.methods, "session/new");
-      assert.include(result.methods, "session/prompt");
-      assert.isTrue(
-        result.events.some(
-          (event) =>
-            event.type === "message.updated" && JSON.stringify(event.message).includes("Hello from Bob."),
-        ),
-      );
-      assert.deepEqual(result.modes[0], {
-        ids: ["agent", "ask", "plan", "reviewer"],
-        cwd: result.workspace,
-      });
-      assert.deepEqual(result.commands.at(-1), { names: ["init", "review"], cwd: result.workspace });
-    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  it.effect(
+    "runs a turn without ever asking Bob to authenticate, and learns its commands and modes",
+    () =>
+      Effect.gen(function* () {
+        const result = yield* runBobTurn({ text: "hello" });
+        assert.equal(terminalOf(result.events)?.status, "completed");
+        assert.notInclude(result.methods, "authenticate");
+        assert.include(result.methods, "session/new");
+        assert.include(result.methods, "session/prompt");
+        assert.isTrue(
+          result.events.some(
+            (event) =>
+              event.type === "message.updated" &&
+              JSON.stringify(event.message).includes("Hello from Bob."),
+          ),
+        );
+        assert.deepEqual(result.modes[0], {
+          ids: ["agent", "ask", "plan", "reviewer"],
+          cwd: result.workspace,
+        });
+        assert.deepEqual(result.commands.at(-1), {
+          names: ["init", "review"],
+          cwd: result.workspace,
+        });
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
   it.effect("fails a turn Bob ends without replying as retryable", () =>
@@ -342,6 +375,26 @@ describe("BobAdapterV2 turns", () => {
             JSON.stringify(event.plan).includes("1. Read the code."),
         ),
       );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("reports Bob's context and Bobcoins from its task database after a turn", () =>
+    Effect.gen(function* () {
+      const result = yield* runBobTurn({
+        text: "hello",
+        usageReadings: [
+          { used: 0, size: 0, bobcoins: 1 },
+          { used: 1_200, size: 200_000, bobcoins: 1.42 },
+        ],
+      });
+      const usage = result.events.findLast(
+        (event) => event.type === "provider_thread.updated" && event.providerThread.contextUsage,
+      );
+      assert.deepEqual(
+        usage?.type === "provider_thread.updated" ? usage.providerThread.contextUsage : undefined,
+        { usedTokens: 1_200, maxTokens: 200_000, cost: { amount: 1.42, currency: "Bobcoins" } },
+      );
+      assert.deepEqual(result.spentIn, [result.workspace]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 

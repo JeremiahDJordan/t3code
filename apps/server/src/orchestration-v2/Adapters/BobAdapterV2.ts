@@ -156,7 +156,8 @@ const extractBobSubagentUpdate = (
     model: null,
     status,
     childSessionId: null,
-    result: status === "completed" || status === "failed" ? (bobSubagentSummary(toolCall) ?? null) : null,
+    result:
+      status === "completed" || status === "failed" ? (bobSubagentSummary(toolCall) ?? null) : null,
   };
 };
 
@@ -189,6 +190,14 @@ function isBobEmptyReply(cause: unknown): boolean {
   return isAcpRequestError(cause) && asRecord(cause.data)?.[BOB_EMPTY_REPLY_MARKER] === true;
 }
 
+/** A Bob task's context size and Bobcoins, as an ACP usage update would carry them. */
+export interface BobTaskUsage {
+  readonly used: number;
+  /** The context window, or 0 when T3 does not know it. */
+  readonly size: number;
+  readonly bobcoins: number;
+}
+
 export interface BobAdapterV2Hooks {
   /** Receives the slash commands a session reports, with the session's workspace. */
   readonly onAvailableCommands?: (
@@ -200,6 +209,13 @@ export interface BobAdapterV2Hooks {
     modes: ReadonlyArray<AcpSessionMode>,
     cwd: string,
   ) => Effect.Effect<void>;
+  /**
+   * Reads a task's usage from Bob's task database. Bob reports no usage over ACP, so after each
+   * turn the adapter is given it as a standard usage update.
+   */
+  readonly readTaskUsage?: (sessionId: string) => Effect.Effect<BobTaskUsage | undefined>;
+  /** Called after a turn that spent Bobcoins, with the session's workspace. */
+  readonly onBobcoinsSpent?: (cwd: string) => Effect.Effect<void>;
 }
 
 /** What the wrapper tracks for one `bob acp` process, by the runtime the adapter holds. */
@@ -208,6 +224,14 @@ interface BobRuntimeState {
   answered: boolean;
   /** The reply since the last tool call, which a plan turn proposes as its plan. */
   lastReply: string;
+  /** Bob's task: the session this process opened or resumed. */
+  sessionId?: string;
+  /** The task's Bobcoins at the last reading, to tell whether a turn spent any. */
+  lastCost?: number;
+  /** The adapter's update handler, which takes the usage Bob does not report itself. */
+  handler?: (
+    notification: EffectAcpSchema.SessionNotification,
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   captureProposedPlan?: (input: { readonly planMarkdown: string }) => Effect.Effect<void>;
 }
 
@@ -269,28 +293,62 @@ function wrapBobRuntime(
         : Effect.void,
     ),
   );
+  /** Remembers the task a session opened, and its Bobcoins so far, to tell what a turn spends. */
+  const opened = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) =>
+    Effect.gen(function* () {
+      state.sessionId = started.sessionId;
+      const usage = hooks.readTaskUsage ? yield* hooks.readTaskUsage(started.sessionId) : undefined;
+      state.lastCost = usage?.bobcoins ?? 0;
+    }).pipe(Effect.andThen(reportModes));
+  /** Gives the adapter Bob's usage after a turn, and says when the turn spent Bobcoins. */
+  const reportUsage = Effect.gen(function* () {
+    const { sessionId, handler } = state;
+    if (!sessionId || !handler || !hooks.readTaskUsage) return;
+    const usage = yield* hooks.readTaskUsage(sessionId);
+    if (!usage) return;
+    yield* handler({
+      sessionId,
+      update: {
+        sessionUpdate: "usage_update",
+        used: usage.used,
+        size: usage.size,
+        cost: { amount: usage.bobcoins, currency: "Bobcoins" },
+      },
+    }).pipe(Effect.ignore);
+    const spent = state.lastCost !== undefined && usage.bobcoins > state.lastCost;
+    state.lastCost = usage.bobcoins;
+    if (spent && hooks.onBobcoinsSpent) yield* hooks.onBobcoinsSpent(cwd);
+  });
   const wrapped: AcpSessionRuntime.AcpSessionRuntime["Service"] = {
     ...runtime,
-    start: () => runtime.start().pipe(Effect.tap(() => reportModes)),
+    start: () => runtime.start().pipe(Effect.tap(opened)),
     // Bob advertises `session/load` but replays every message through it; resume restores the
     // task without the replay.
     loadSession: (sessionId, options) =>
-      runtime.resumeSession(sessionId, options).pipe(Effect.tap(() => reportModes)),
+      runtime.resumeSession(sessionId, options).pipe(Effect.tap(opened)),
+    resumeSession: (sessionId, options) =>
+      runtime.resumeSession(sessionId, options).pipe(Effect.tap(opened)),
     handleSessionUpdate: (handler) =>
-      runtime.handleSessionUpdate((notification) => {
-        observeBobUpdate(state, notification.update);
-        const commands =
-          notification.update.sessionUpdate === "available_commands_update" &&
-          hooks.onAvailableCommands
-            ? hooks.onAvailableCommands(notification.update.availableCommands, cwd)
-            : Effect.void;
-        return commands.pipe(Effect.andThen(handler(notification)));
-      }),
+      Effect.sync(() => {
+        state.handler = handler;
+      }).pipe(
+        Effect.andThen(
+          runtime.handleSessionUpdate((notification) => {
+            observeBobUpdate(state, notification.update);
+            const commands =
+              notification.update.sessionUpdate === "available_commands_update" &&
+              hooks.onAvailableCommands
+                ? hooks.onAvailableCommands(notification.update.availableCommands, cwd)
+                : Effect.void;
+            return commands.pipe(Effect.andThen(handler(notification)));
+          }),
+        ),
+      ),
     prompt: (payload, options) =>
       Effect.gen(function* () {
         state.answered = false;
         state.lastReply = "";
-        const result = yield* runtime.prompt(payload, options);
+        const result = yield* runtime.prompt(payload, options).pipe(Effect.ensuring(reportUsage));
         if (result.stopReason !== "end_turn") return result;
         // Bob's backend can answer a long conversation with an empty reply, and Bob then ends
         // the turn having shown nothing. Without a word the thread looks ignored.
