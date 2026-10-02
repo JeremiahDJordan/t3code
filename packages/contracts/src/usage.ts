@@ -38,6 +38,9 @@ export const UsageProviderKind = Schema.Literals([
   "cursor",
   "opencode",
   "antigravity",
+  // This fork's Bob, with bucket `credits`. Upstream clients skip unknown providers and keys on
+  // decode, so the version stays upstream's.
+  "bob",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
@@ -84,6 +87,13 @@ export const UsageTokenTotals = Schema.Struct({
   reasoningTokens: NonNegativeInt,
 });
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
+
+/** Spend in a provider's own billing unit, such as Bob Shell's Bobcoins. Never dollars. */
+export const UsageCredits = Schema.Struct({
+  amount: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+  unit: TrimmedNonEmptyString,
+});
+export type UsageCredits = typeof UsageCredits.Type;
 
 /**
  * A bucket's cost split by token category, in USD. A provider-reported cost is
@@ -132,6 +142,12 @@ export const UsageBucket = Schema.Struct({
   /** What fast and ultrafast requests cost above the standard rate. Absent when zero. */
   speedPremiumUsd: Schema.optional(Schema.Number),
   costSource: UsageCostSource,
+  /**
+   * Spend the provider reported in its own billing unit, such as Bob Shell's
+   * Bobcoins. It is not money: it never enters `costUsd`, and such records are
+   * `unpriced` unless the user set a custom price for the model.
+   */
+  credits: Schema.optional(UsageCredits),
   /** Distinct assistant responses, after de-duplication. */
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
@@ -141,7 +157,18 @@ export const UsageBucket = Schema.Struct({
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
- * Identifies the physical transcript directory a source read from.
+ * Adds spend in a provider's own unit. Amounts in different units cannot be
+ * added, so a `next` in another unit leaves `total` unchanged.
+ */
+export function addUsageCredits(total: UsageCredits | undefined, next: UsageCredits): UsageCredits {
+  if (total === undefined) return next;
+  return total.unit === next.unit
+    ? { amount: total.amount + next.amount, unit: total.unit }
+    : total;
+}
+
+/**
+ * Identifies the physical transcript directory, or database file, a source read from.
  *
  * Two environments on the same machine (worktree servers, for example) resolve
  * the same provider home and would otherwise double count. The client drops

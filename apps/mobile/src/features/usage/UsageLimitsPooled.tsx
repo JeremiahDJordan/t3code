@@ -10,6 +10,7 @@ import {
   displayLimitWindows,
   formatDuration,
   formatResetsIn,
+  formatWindowAmount,
   remainingPercent,
   type LimitAccount,
   type LimitPoolWindow,
@@ -27,7 +28,11 @@ import { environmentPresentations } from "../../state/presentation";
 import { ResetCredits } from "./UsageLimitsSection";
 import { useProviderColors } from "./usageProviders";
 
-const DRIVER_LABEL: Partial<Record<string, string>> = { codex: "Codex", claudeAgent: "Claude" };
+const DRIVER_LABEL: Partial<Record<string, string>> = {
+  bob: "Bob",
+  codex: "Codex",
+  claudeAgent: "Claude",
+};
 const PACE_LABEL = { ahead: "Ahead of pace", on: "On pace", under: "Under pace" } as const;
 
 function accountName(account: LimitAccount) {
@@ -263,7 +268,9 @@ export function UsageLimitsSection({
                       selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds]
                     }
                     label={details?.label}
-                    description={details?.description}
+                    description={
+                      details?.description ?? formatWindowAmount(window.amount) ?? undefined
+                    }
                   />
                 );
               })}
@@ -388,6 +395,11 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
               <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
                 {remainingPercent(window)}% left
               </Text>
+              {window.amount ? (
+                <Text selectable className="text-sm tabular-nums text-foreground-muted">
+                  {formatWindowAmount(window.amount)}
+                </Text>
+              ) : null}
               {window.resetsAt ? (
                 <Text selectable className="text-sm text-foreground-muted">
                   Resets{" "}

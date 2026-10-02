@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+
 import type {
   BobAuthMethod,
   ServerProviderUsageLimits,
@@ -235,8 +238,20 @@ function bobTeamUsage(
     ...bobBudgetMonth(checkedAt),
     amount: { used: Math.max(0, usage), limit: budget, unit: "Bobcoins" },
   };
+  // The budget belongs to the team, so every Bob billing it, on any environment, is one account.
+  const instanceId = selected.instance.instance_id?.trim();
+  const teamId = selected.team.id?.trim();
   return {
-    usageLimits: makeUsageLimits({ checkedAt, windows: [window] }),
+    usageLimits: {
+      ...makeUsageLimits({ checkedAt, windows: [window] }),
+      ...(instanceId && teamId
+        ? {
+            credentialFingerprint: NodeCrypto.createHash("sha256")
+              .update(`bob-team\0${instanceId}\0${teamId}`)
+              .digest("hex"),
+          }
+        : {}),
+    },
     ...(plan ? { plan } : {}),
   };
 }

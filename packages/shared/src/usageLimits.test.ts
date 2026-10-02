@@ -17,9 +17,11 @@ import {
   collectExternalUsageLinks,
   collectLimitNotices,
   collectLimitPools,
+  composerBudgetWindow,
   displayLimitWindows,
   elapsedShare,
   formatResetsIn,
+  formatWindowAmount,
   limitsNotice,
   paceOf,
   providersWithLimits,
@@ -77,6 +79,18 @@ describe("pace", () => {
     expect(formatResetsIn({ ...window, resetsAt: "2026-09-03T11:00:00.000Z" }, now)).toBe(
       "resets now",
     );
+  });
+});
+
+describe("formatWindowAmount", () => {
+  it("names what is used and what is left, never less than none", () => {
+    expect(formatWindowAmount({ used: 12.4, limit: 50, unit: "Bobcoins" })).toBe(
+      "12.40 of 50.00 Bobcoins used · 37.60 left",
+    );
+    expect(formatWindowAmount({ used: 52, limit: 50, unit: "Bobcoins" })).toBe(
+      "52.00 of 50.00 Bobcoins used · 0.00 left",
+    );
+    expect(formatWindowAmount(undefined)).toBeNull();
   });
 });
 
@@ -665,6 +679,53 @@ describe("pools", () => {
     expect(session?.members.map((member) => member.account.key)).toEqual(["hub:a", "hub:b"]);
     expect(pools[0]?.accounts.map((account) => account.key)).toEqual(["hub:a", "hub:b"]);
   });
+
+  describe("Bob instances on one environment", () => {
+    const bobInstances = (type: string) => {
+      const bob = (instanceId: string, displayName: string) =>
+        provider({
+          driver: ProviderDriverKind.make("bob"),
+          instanceId: ProviderInstanceId.make(instanceId),
+          displayName,
+          auth: { status: "authenticated", type },
+          usageLimits: {
+            checkedAt,
+            windows: [
+              {
+                id: "monthly",
+                kind: "monthly",
+                label: "Monthly",
+                usedPercent: 13.56,
+                amount: { used: 6.78, limit: 50, unit: "Bobcoins" },
+              },
+            ],
+          },
+        });
+      return new Map([
+        [
+          EnvironmentId.make("env-a"),
+          {
+            ...laptop,
+            serverConfig: { providers: [bob("bob", "Bob"), bob("bob_tmux", "Bob (tmux)")] },
+          },
+        ],
+      ]);
+    };
+
+    it("counts SSO instances once, since they share the machine's IBM login", () => {
+      const accounts = collectLimitAccounts(bobInstances("sso"));
+      expect(accounts).toHaveLength(1);
+      expect(collectLimitPools(accounts, now)[0]?.windows[0]?.amount).toEqual({
+        used: 6.78,
+        limit: 50,
+        unit: "Bobcoins",
+      });
+    });
+
+    it("keeps API-key instances apart, since each can carry its own key", () => {
+      expect(collectLimitAccounts(bobInstances("api_key"))).toHaveLength(2);
+    });
+  });
 });
 
 describe("pooled account columns", () => {
@@ -744,6 +805,25 @@ describe("pooled account columns", () => {
       now,
     );
     expect(keys(pool!)).toEqual([["b", "a"]]);
+  });
+
+  it("sums amounts only when every account reports them in the same unit", () => {
+    const monthly = { ...window, id: "monthly", kind: "monthly", label: "Monthly" } as const;
+    const coins = (used: number, limit: number, unit = "Bobcoins") => ({
+      ...monthly,
+      amount: { used, limit, unit },
+    });
+    const amountOf = (accounts: LimitAccount[]) =>
+      collectLimitPools(accounts, now)[0]!.windows[0]!.amount;
+    expect(amountOf([account("a", [coins(10, 50)]), account("b", [coins(5, 40)])])).toEqual({
+      used: 15,
+      limit: 90,
+      unit: "Bobcoins",
+    });
+    expect(amountOf([account("a", [coins(10, 50)]), account("b", [monthly])])).toBeUndefined();
+    expect(
+      amountOf([account("a", [coins(10, 50)]), account("b", [coins(5, 40, "credits")])]),
+    ).toBeUndefined();
   });
 
   it("sorts unknown resets last and breaks ties consistently", () => {
@@ -1010,6 +1090,59 @@ describe("/usage-limits", () => {
         [provider({ enabled: false, usageLimits: limits })],
         [],
         now,
+      ),
+    ).toBeNull();
+  });
+
+  it("shows a folder's own limits, such as a pinned Bob team's, for a thread there", () => {
+    const pinnedLimits = { ...limits, windows: [{ ...window, usedPercent: 90 }] };
+    const withFolder = provider({
+      usageLimits: limits,
+      workspaceSnapshots: [
+        {
+          cwd: "/pinned",
+          checkedAt: limits.checkedAt,
+          slashCommands: [],
+          skills: [],
+          usageLimits: pinnedLimits,
+        },
+      ],
+    });
+    /** The first bar's use for a thread in `cwd`. */
+    const usedIn = (cwd: string | null) =>
+      collectProviderUsageLimits(selected.instanceId, [withFolder], [], now, cwd)?.accounts[0]
+        ?.limits.windows[0]?.usedPercent;
+    expect(usedIn("/pinned")).toBe(90);
+    // Clients send the folder as they have it, trailing separator included.
+    expect(usedIn("/pinned/")).toBe(90);
+    expect(usedIn("/elsewhere")).toBe(window.usedPercent);
+    expect(usedIn(null)).toBe(window.usedPercent);
+  });
+
+  it("gives the composer the first window with amounts, from the folder's own limits", () => {
+    const coins = { used: 5, limit: 50, unit: "Bobcoins" };
+    const monthly = { ...window, id: "monthly", kind: "monthly", amount: coins } as const;
+    const bob = provider({
+      usageLimits: { ...limits, windows: [window, monthly] },
+      workspaceSnapshots: [
+        {
+          cwd: "/pinned",
+          checkedAt: limits.checkedAt,
+          slashCommands: [],
+          skills: [],
+          usageLimits: { ...limits, windows: [{ ...monthly, usedPercent: 90 }] },
+        },
+      ],
+    });
+    expect(composerBudgetWindow(bob, null)).toBe(monthly);
+    expect(composerBudgetWindow(bob, "/pinned/")?.usedPercent).toBe(90);
+    expect(composerBudgetWindow(provider({ usageLimits: limits }), null)).toBeNull();
+    expect(
+      composerBudgetWindow(
+        provider({
+          usageLimits: { ...limits, windows: [monthly], unavailable: { reason: "probeFailed" } },
+        }),
+        null,
       ),
     ).toBeNull();
   });

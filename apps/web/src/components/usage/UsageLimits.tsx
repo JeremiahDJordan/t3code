@@ -13,6 +13,7 @@ import {
   elapsedShare,
   formatDuration,
   formatResetsIn,
+  formatWindowAmount,
   type LimitPace,
   paceOf,
   remainingPercent,
@@ -176,6 +177,7 @@ export function LimitWindows({
       {windows.map((window) => {
         const pace = paceOf(window, now);
         const resetsIn = formatResetsIn(window, now);
+        const amount = formatWindowAmount(window.amount);
         return (
           <Fragment key={window.id}>
             <span className="flex min-w-0 items-center gap-2 text-xs">
@@ -189,6 +191,11 @@ export function LimitWindows({
               {pace ? <PaceIcon pace={pace} /> : null}
               <span className="ms-auto shrink-0">{resetsIn ?? ""}</span>
             </span>
+            {amount ? (
+              <span className="col-span-full text-xs text-muted-foreground tabular-nums">
+                {amount}
+              </span>
+            ) : null}
           </Fragment>
         );
       })}

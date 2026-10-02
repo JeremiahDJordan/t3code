@@ -7,8 +7,10 @@
  * @module usageMerge
  */
 import {
+  addUsageCredits,
   USAGE_MERGE_COMPATIBLE_SINCE,
   type EnvironmentId,
+  type UsageCredits,
   type UsageBucket,
   type UsageProviderKind,
   type UsageSource,
@@ -27,6 +29,8 @@ export interface ProviderTotals {
   readonly provider: UsageProviderKind;
   readonly costUsd: number;
   readonly totalTokens: number;
+  /** Spend in the provider's own unit, such as Bob's Bobcoins. Never part of `costUsd`. */
+  readonly credits?: UsageCredits;
   readonly records: number;
   readonly sessions: number;
   readonly costShare: number;
@@ -39,6 +43,8 @@ export interface ModelTotals {
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly tokens: UsageTokenTotals;
+  /** Spend in the provider's own unit, such as Bob's Bobcoins. Never part of `costUsd`. */
+  readonly credits?: UsageCredits;
   readonly records: number;
   /**
    * Records whose tokens are counted here but which contributed nothing to
@@ -62,11 +68,19 @@ export function isModelCostUnknown(model: ModelTotals): boolean {
   return model.records > 0 && model.unpricedRecords >= model.records;
 }
 
+/** One provider's share of a day or hour. */
+export interface PeriodProviderTotals {
+  readonly costUsd: number;
+  readonly totalTokens: number;
+  /** Spend in the provider's own unit, such as Bob's Bobcoins. Never part of `costUsd`. */
+  readonly credits?: UsageCredits;
+}
+
 export interface DailyTotals {
   readonly day: string;
   readonly costUsd: number;
   readonly totalTokens: number;
-  readonly byProvider: ReadonlyMap<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+  readonly byProvider: ReadonlyMap<UsageProviderKind, PeriodProviderTotals>;
 }
 
 export interface HourlyTotals {
@@ -74,7 +88,7 @@ export interface HourlyTotals {
   readonly hourStart: string;
   readonly costUsd: number;
   readonly totalTokens: number;
-  readonly byProvider: ReadonlyMap<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+  readonly byProvider: ReadonlyMap<UsageProviderKind, PeriodProviderTotals>;
 }
 
 export interface CostQuality {
@@ -304,6 +318,27 @@ function ownedContribution(
   };
 }
 
+/** Mutable accumulator behind every per-provider and per-model figure. */
+interface SpendAccumulator {
+  costUsd: number;
+  totalTokens: number;
+  credits?: UsageCredits;
+}
+
+/** Adds a bucket's dollars, tokens, and own-unit credits to `target`. */
+function addSpend(target: SpendAccumulator, bucket: UsageBucket, tokens: number): void {
+  target.costUsd += bucket.costUsd;
+  target.totalTokens += tokens;
+  if (bucket.credits !== undefined) {
+    target.credits = addUsageCredits(target.credits, bucket.credits);
+  }
+}
+
+/** The accumulated credits as an optional field, omitted when there are none. */
+function creditsField(totals: SpendAccumulator): { readonly credits?: UsageCredits } {
+  return totals.credits === undefined ? {} : { credits: totals.credits };
+}
+
 function bucketTokens(bucket: UsageBucket): number {
   // reasoningTokens is a subset of outputTokens and must not be added again.
   return (
@@ -402,14 +437,12 @@ export function mergeUsage(
 
   const providerAccumulator = new Map<
     UsageProviderKind,
-    { costUsd: number; totalTokens: number; records: number; sessions: number }
+    SpendAccumulator & { records: number; sessions: number }
   >();
   const modelAccumulator = new Map<
     string,
-    {
+    SpendAccumulator & {
       provider: UsageProviderKind;
-      costUsd: number;
-      totalTokens: number;
       tokens: UsageTokenTotals;
       records: number;
       unpricedRecords: number;
@@ -421,7 +454,7 @@ export function mergeUsage(
     {
       costUsd: number;
       totalTokens: number;
-      byProvider: Map<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+      byProvider: Map<UsageProviderKind, SpendAccumulator>;
     }
   >();
   const hourlyAccumulator = new Map<
@@ -431,7 +464,7 @@ export function mergeUsage(
       hourStart: string;
       costUsd: number;
       totalTokens: number;
-      byProvider: Map<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+      byProvider: Map<UsageProviderKind, SpendAccumulator>;
     }
   >();
   const contributingEnvironments: EnvironmentId[] = [];
@@ -487,8 +520,7 @@ export function mergeUsage(
         records: 0,
         sessions: 0,
       };
-      provider.costUsd += bucket.costUsd;
-      provider.totalTokens += tokens;
+      addSpend(provider, bucket, tokens);
       provider.records += bucket.records;
       providerAccumulator.set(bucket.provider, provider);
 
@@ -508,8 +540,7 @@ export function mergeUsage(
         unpricedRecords: 0,
         unpricedTokens: 0,
       };
-      model.costUsd += bucket.costUsd;
-      model.totalTokens += tokens;
+      addSpend(model, bucket, tokens);
       model.tokens = {
         uncachedInputTokens: model.tokens.uncachedInputTokens + bucket.totals.uncachedInputTokens,
         cachedInputTokens: model.tokens.cachedInputTokens + bucket.totals.cachedInputTokens,
@@ -527,13 +558,12 @@ export function mergeUsage(
       const day = dailyAccumulator.get(bucket.day) ?? {
         costUsd: 0,
         totalTokens: 0,
-        byProvider: new Map<UsageProviderKind, { costUsd: number; totalTokens: number }>(),
+        byProvider: new Map<UsageProviderKind, SpendAccumulator>(),
       };
       day.costUsd += bucket.costUsd;
       day.totalTokens += tokens;
       const dayProvider = day.byProvider.get(bucket.provider) ?? { costUsd: 0, totalTokens: 0 };
-      dayProvider.costUsd += bucket.costUsd;
-      dayProvider.totalTokens += tokens;
+      addSpend(dayProvider, bucket, tokens);
       day.byProvider.set(bucket.provider, dayProvider);
       dailyAccumulator.set(bucket.day, day);
 
@@ -543,7 +573,7 @@ export function mergeUsage(
           hourStart: bucket.hourStart,
           costUsd: 0,
           totalTokens: 0,
-          byProvider: new Map<UsageProviderKind, { costUsd: number; totalTokens: number }>(),
+          byProvider: new Map<UsageProviderKind, SpendAccumulator>(),
         };
         hour.costUsd += bucket.costUsd;
         hour.totalTokens += tokens;
@@ -551,8 +581,7 @@ export function mergeUsage(
           costUsd: 0,
           totalTokens: 0,
         };
-        hourProvider.costUsd += bucket.costUsd;
-        hourProvider.totalTokens += tokens;
+        addSpend(hourProvider, bucket, tokens);
         hour.byProvider.set(bucket.provider, hourProvider);
         hourlyAccumulator.set(bucket.hourStart, hour);
       }
@@ -566,6 +595,7 @@ export function mergeUsage(
       provider,
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
+      ...creditsField(totals),
       records: totals.records,
       sessions: totals.sessions,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
@@ -580,6 +610,7 @@ export function mergeUsage(
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
       tokens: totals.tokens,
+      ...creditsField(totals),
       records: totals.records,
       unpricedRecords: totals.unpricedRecords,
       unpricedTokens: totals.unpricedTokens,

@@ -6,7 +6,7 @@
  *
  * @module usageTranscripts
  */
-import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageCredits, UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
 /**
  * Billing speed of a request. Faster speeds bill at a model-specific premium.
@@ -29,6 +29,8 @@ export interface UsageRecord {
   readonly reportedCostUsd: number | null;
   /** Only Claude Code and Codex record a speed; other providers are `standard`. */
   readonly speed: UsageSpeed;
+  /** Spend in the provider's own unit, such as Bob's Bobcoins. Never dollars. */
+  readonly credits?: UsageCredits;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.

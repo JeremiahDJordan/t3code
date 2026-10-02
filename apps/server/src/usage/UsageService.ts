@@ -58,6 +58,7 @@ import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { resolveAntigravityInstanceDirectories } from "../provider/antigravityAuthSupport.ts";
+import { resolveBobTaskDatabasePath } from "../provider/bobTaskUsage.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { makeAntigravityUsageCache, readAntigravityUsage } from "./antigravityUsageReader.ts";
@@ -73,6 +74,7 @@ import {
   type CursorCredentialSource,
 } from "./cursorAccountCache.ts";
 import * as CursorUsageReader from "./cursorUsageReader.ts";
+import { readBobUsage } from "./bobUsageReader.ts";
 import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
@@ -866,6 +868,42 @@ export const make = Effect.gen(function* () {
       );
     });
 
+    // Bob keeps its history in one task database per home. Every account
+    // counts, disabled ones too, and an explicit default slot replaces the
+    // legacy settings, as for the transcript providers above.
+    const bob = Effect.gen(function* () {
+      const environments = Object.values(settings.providerInstances).flatMap((instance) =>
+        instance.driver === "bob" ? [instance.environment] : [],
+      );
+      if (!Object.hasOwn(settings.providerInstances, "bob")) environments.push(undefined);
+      const databases = new Set<string>();
+      for (const environment of environments) {
+        const databasePath = resolveBobTaskDatabasePath(
+          mergeProviderInstanceEnvironment(environment, hostEnvironment),
+          path,
+        );
+        databases.add(
+          yield* fileSystem.realPath(databasePath).pipe(Effect.orElseSucceed(() => databasePath)),
+        );
+      }
+      return yield* Effect.forEach(
+        [...databases],
+        (databasePath) =>
+          Effect.gen(function* () {
+            const result = yield* Effect.promise(() => readBobUsage(databasePath, windowStartMs));
+            return {
+              provider: "bob",
+              dir: databasePath,
+              volumeId: yield* Effect.promise(() => readDirectoryVolumeId(databasePath)),
+              files: result.missing && !result.error ? null : result.files,
+              status: result.error ? "partial" : "ok",
+              ...(result.error ? { message: "Some Bob history could not be read." } : {}),
+            } satisfies ScannedDir;
+          }),
+        { concurrency: "unbounded" },
+      );
+    });
+
     const antigravity = Effect.gen(function* () {
       const antigravityRoots = yield* envRoots("ANTIGRAVITY_DATA_DIR", [
         ...["antigravity", "antigravity-cli", "antigravity-ide", "antigravity-backup"].map((name) =>
@@ -987,11 +1025,12 @@ export const make = Effect.gen(function* () {
     // Independent sources scan together. Transcript directories go one at a
     // time, so open files stay at `TRANSCRIPT_READ_CONCURRENCY`. The result
     // keeps this order, since aggregation keeps the first copy of a duplicate.
-    const [transcripts, openCodeDirs, antigravityDirs, cursorDirs] = yield* Effect.all(
+    const [transcripts, openCodeDirs, antigravityDirs, bobDirs, cursorDirs] = yield* Effect.all(
       [
         Effect.forEach(dirs, (dir) => scanTranscriptDir(dir, windowStartMs)),
         openCode,
         antigravity,
+        bob,
         cursor,
       ],
       { concurrency: "unbounded" },
@@ -1000,6 +1039,7 @@ export const make = Effect.gen(function* () {
       ...transcripts,
       ...openCodeDirs,
       ...antigravityDirs,
+      ...bobDirs,
       ...cursorDirs,
     ];
     return scanned;

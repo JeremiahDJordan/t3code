@@ -1,5 +1,5 @@
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type { UsageCredits, UsageProviderKind } from "@t3tools/contracts";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
@@ -8,6 +8,7 @@ import {
   formatHourShort,
   formatRelativeHourShort,
   formatTokens,
+  formatUsageSpend,
   formatUsd,
 } from "@t3tools/shared/usageFormat";
 import { cn } from "~/lib/utils";
@@ -40,6 +41,8 @@ export interface DayColumn {
   readonly bands: readonly {
     readonly provider: UsageProviderKind;
     readonly value: number;
+    /** Cost view only: spend in the provider's own unit, shown in the readout but never plotted. */
+    readonly credits?: UsageCredits;
   }[];
   readonly total: number;
 }
@@ -49,27 +52,26 @@ interface Point {
   readonly y: number;
 }
 
-function valueFor(
-  totals: DailyTotals | HourlyTotals | undefined,
-  provider: UsageProviderKind,
-  metric: UsageChartMetric,
-): number {
-  const entry = totals?.byProvider.get(provider);
-  if (entry === undefined) return 0;
-  return metric === "tokens" ? entry.totalTokens : entry.costUsd;
-}
-
+/**
+ * One column per period with every provider's value. Credits such as Bobcoins
+ * are not dollars, so the cost view carries them beside the band's dollar value
+ * instead of plotting them on the axis.
+ */
 export function buildPeriodColumns(
   periods: readonly string[],
   byPeriod: ReadonlyMap<string, DailyTotals | HourlyTotals>,
   metric: UsageChartMetric,
 ): readonly DayColumn[] {
   return periods.map((period) => {
-    const entry = byPeriod.get(period);
-    const bands = PROVIDER_ORDER.map((provider) => ({
-      provider,
-      value: valueFor(entry, provider, metric),
-    }));
+    const totals = byPeriod.get(period);
+    const bands = PROVIDER_ORDER.map((provider) => {
+      const entry = totals?.byProvider.get(provider);
+      const value =
+        entry === undefined ? 0 : metric === "tokens" ? entry.totalTokens : entry.costUsd;
+      return metric === "cost" && entry?.credits !== undefined
+        ? { provider, value, credits: entry.credits }
+        : { provider, value };
+    });
     return { bands, total: bands.reduce((sum, band) => sum + band.value, 0) };
   });
 }
@@ -441,6 +443,7 @@ export function UsageProviderChart({
               <div className="mb-1 text-muted-foreground">{formatTooltipPeriod(hoveredPeriod)}</div>
               {providers.map((provider) => {
                 const { label, driverKind } = PROVIDER_PRESENTATION[provider];
+                const band = hoveredColumn?.bands.find((entry) => entry.provider === provider);
                 return (
                   <div key={provider} className="flex items-center justify-between gap-3">
                     <span className="flex items-center gap-1.5 text-muted-foreground">
@@ -459,9 +462,9 @@ export function UsageProviderChart({
                           : "text-foreground",
                       )}
                     >
-                      {format(
-                        hoveredColumn?.bands.find((band) => band.provider === provider)?.value ?? 0,
-                      )}
+                      {band?.credits === undefined
+                        ? format(band?.value ?? 0)
+                        : formatUsageSpend(band.value, band.credits)}
                     </span>
                   </div>
                 );
