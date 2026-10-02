@@ -27,6 +27,7 @@ import { BranchNamingSettings } from "./components/BranchNamingSettings";
 import { SettingsChoiceRow } from "./components/SettingsChoiceRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
+import { CheckInHoursField } from "./components/CheckInHoursField";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
@@ -55,7 +56,12 @@ const PAGE_PROJECT_KEYS: Record<SettingsPage, readonly ProjectScopedServerSettin
     "branchNamePrefix",
     "branchNameInstructions",
   ],
-  "agent-behavior": ["responseStreamingMode", "enableAgentBrowserAccess"],
+  "agent-behavior": [
+    "responseStreamingMode",
+    "enableAgentBrowserAccess",
+    "enableAgentCheckIns",
+    "checkInRepeatLimitHours",
+  ],
   maintenance: ["continueThreadsAfterServerUpdate"],
 };
 
@@ -206,6 +212,10 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const supportsContinuation = targets.every(
     (target) =>
       target.environment.serverConfig.environment.capabilities.threadRestartContinuation === true,
+  );
+  // A server without check-ins drops their keys, so an edit there would snap back.
+  const supportsCheckIns = targets.every(
+    (target) => target.environment.serverConfig.environment.capabilities.threadCheckIns === true,
   );
   const disabledFor = (key: string) =>
     disabled ||
@@ -389,6 +399,29 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       onValueChange={(value) => write({ enableAgentBrowserAccess: value })}
                     />
                   </SettingsSection>
+                  {supportsCheckIns ? (
+                    <SettingsSection title="Check-ins and background commands">
+                      <SettingsSwitchRow
+                        icon="clock"
+                        label="Agent check-ins"
+                        subtitle="Let agents schedule a message back into their thread later, hear when another thread finishes, and run long commands that tell them when they end. Each message is a turn."
+                        value={uniform("enableAgentCheckIns")}
+                        disabled={disabledFor("enableAgentCheckIns")}
+                        onValueChange={(value) => write({ enableAgentCheckIns: value })}
+                      />
+                      <View className="flex-row items-center gap-4 px-4 py-4 android:min-h-14 android:py-3">
+                        <View className="w-[22px] android:w-6" />
+                        <Text className="flex-1 text-foreground text-lg android:text-base">
+                          Repeats end after (hours)
+                        </Text>
+                        <CheckInHoursField
+                          value={uniform("checkInRepeatLimitHours")}
+                          disabled={disabledFor("checkInRepeatLimitHours")}
+                          onValueChange={(hours) => write({ checkInRepeatLimitHours: hours })}
+                        />
+                      </View>
+                    </SettingsSection>
+                  ) : null}
                 </>
               ) : null}
 

@@ -1,0 +1,243 @@
+import { useNavigation } from "@react-navigation/native";
+import type {
+  EnvironmentId,
+  ThreadBackgroundCommand,
+  ThreadCheckIn,
+  ThreadId,
+} from "@t3tools/contracts";
+import type { ReactNode } from "react";
+import {
+  backgroundCommandStatusLabel,
+  canMuteBackgroundCommand,
+  checkInScheduleLabel,
+  checkInTitle,
+} from "@t3tools/client-runtime/state/checkIns";
+import {
+  type AtomCommandResult,
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { Alert, Pressable, ScrollView, useWindowDimensions, View } from "react-native";
+
+import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/AppText";
+import { checkInEnvironment } from "../../state/checkIns";
+import { useEnvironmentQuery } from "../../state/query";
+import { useAtomCommand } from "../../state/use-atom-command";
+
+/** `Every 20m · next Tue 2:40 PM`, `At Tue 2:40 PM`, `Stops waiting Tue 4:00 PM`, or due. */
+function scheduleLabel(checkIn: ThreadCheckIn): string {
+  const at = new Date(checkIn.nextAt).toLocaleString(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const label = checkInScheduleLabel(checkIn, at);
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+}
+
+function commandStatusLabel(command: ThreadBackgroundCommand): string {
+  // With the weekday, since commands outlive midnight.
+  const startedAt = new Date(command.startedAt).toLocaleString(undefined, {
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  return backgroundCommandStatusLabel(command, startedAt);
+}
+
+/** Tells the user why a check-in or command action failed; an interrupted one stays quiet. */
+function alertFailure(result: AtomCommandResult<unknown, unknown>, title: string) {
+  if (result._tag !== "Failure" || isAtomCommandInterrupted(result)) return;
+  const error = squashAtomCommandFailure(result);
+  Alert.alert(title, error instanceof Error ? error.message : undefined);
+}
+
+function RowAction(props: {
+  readonly label: string;
+  readonly accessibilityLabel: string;
+  readonly disabled?: boolean;
+  readonly onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={props.accessibilityLabel}
+      disabled={props.disabled}
+      className="rounded-full border border-border bg-background px-3 py-1.5 disabled:opacity-50"
+      onPress={props.onPress}
+    >
+      <Text className="font-t3-medium text-xs">{props.label}</Text>
+    </Pressable>
+  );
+}
+
+function Row(props: {
+  readonly symbol: "clock" | "terminal";
+  readonly title: string;
+  readonly detail: string;
+  readonly monospace?: boolean;
+  readonly children: ReactNode;
+}) {
+  return (
+    <View className="flex-row items-center gap-3">
+      <SymbolView
+        name={props.symbol}
+        size={16}
+        tintColorClassName="accent-icon-muted"
+        type="monochrome"
+      />
+      <View className="min-w-0 flex-1">
+        <Text
+          className={props.monospace ? "font-mono text-sm" : "font-t3-medium text-sm"}
+          numberOfLines={1}
+        >
+          {props.title}
+        </Text>
+        <Text className="text-xs text-foreground-muted" numberOfLines={1}>
+          {props.detail}
+        </Text>
+      </View>
+      {props.children}
+    </View>
+  );
+}
+
+/**
+ * The agent's background commands and scheduled check-ins in this thread, above the composer.
+ * Commands offer Terminal, Mute for one that sends updates while it runs, and Stop; check-ins
+ * offer Cancel. Renders nothing on servers without
+ * them or while the thread has none.
+ */
+export function ThreadCheckIns(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+  readonly supported: boolean;
+  readonly commandsSupported: boolean;
+}) {
+  const navigation = useNavigation();
+  const checkInsQuery = useEnvironmentQuery(
+    props.supported
+      ? checkInEnvironment.threadCheckIns({
+          environmentId: props.environmentId,
+          input: { threadId: props.threadId },
+        })
+      : null,
+  );
+  const commandsQuery = useEnvironmentQuery(
+    props.commandsSupported
+      ? checkInEnvironment.threadBackgroundCommands({
+          environmentId: props.environmentId,
+          input: { threadId: props.threadId },
+        })
+      : null,
+  );
+  const cancel = useAtomCommand(checkInEnvironment.cancel);
+  const stop = useAtomCommand(checkInEnvironment.stopBackgroundCommand);
+  const setMuted = useAtomCommand(checkInEnvironment.setBackgroundCommandMuted);
+  const openTerminal = useAtomCommand(checkInEnvironment.openBackgroundCommandTerminal);
+  const { height } = useWindowDimensions();
+  const checkIns = checkInsQuery.data ?? [];
+  const commands = commandsQuery.data ?? [];
+  if (checkIns.length === 0 && commands.length === 0) return null;
+  return (
+    <View className="shrink-0 px-4 pb-3">
+      {/* Capped, so a fan-out's many waits leave the conversation in view. */}
+      <View className="overflow-hidden rounded-2xl border border-border bg-card">
+        <ScrollView
+          bounces={false}
+          style={{ maxHeight: Math.round(height * 0.4) }}
+          contentContainerClassName="gap-2 px-3.5 py-3"
+        >
+          {commands.map((command) => (
+            <Row
+              key={command.id}
+              symbol="terminal"
+              title={command.command}
+              detail={commandStatusLabel(command)}
+              monospace
+            >
+              {command.status === "running" ? (
+                <>
+                  <RowAction
+                    label="Terminal"
+                    accessibilityLabel={`Open a terminal on ${command.command}`}
+                    onPress={() =>
+                      void openTerminal({
+                        environmentId: props.environmentId,
+                        input: { backgroundCommandId: command.id },
+                      }).then((result) => {
+                        if (result._tag !== "Success") {
+                          alertFailure(result, "Could not open a terminal on the command");
+                          return;
+                        }
+                        void navigation.navigate("ThreadTerminal", {
+                          environmentId: String(props.environmentId),
+                          threadId: String(props.threadId),
+                          terminalId: result.value.terminalId,
+                        });
+                      })
+                    }
+                  />
+                  {canMuteBackgroundCommand(command) ? (
+                    <RowAction
+                      label={command.muted ? "Unmute" : "Mute"}
+                      accessibilityLabel={
+                        command.muted
+                          ? `Send the agent updates about ${command.command} again`
+                          : `Stop sending the agent updates about ${command.command} until it ends`
+                      }
+                      onPress={() =>
+                        void setMuted({
+                          environmentId: props.environmentId,
+                          input: { backgroundCommandId: command.id, muted: !command.muted },
+                        }).then((result) =>
+                          alertFailure(
+                            result,
+                            command.muted
+                              ? "Could not unmute the command"
+                              : "Could not mute the command",
+                          ),
+                        )
+                      }
+                    />
+                  ) : null}
+                  <RowAction
+                    label="Stop"
+                    accessibilityLabel={`Stop ${command.command}`}
+                    disabled={command.stopRequestedBy !== null}
+                    onPress={() =>
+                      void stop({
+                        environmentId: props.environmentId,
+                        input: { backgroundCommandId: command.id },
+                      }).then((result) => alertFailure(result, "Could not stop the command"))
+                    }
+                  />
+                </>
+              ) : null}
+            </Row>
+          ))}
+          {checkIns.map((checkIn) => (
+            <Row
+              key={checkIn.id}
+              symbol="clock"
+              title={checkInTitle(checkIn)}
+              detail={scheduleLabel(checkIn)}
+            >
+              <RowAction
+                label="Cancel"
+                accessibilityLabel={`Cancel check-in: ${checkInTitle(checkIn)}`}
+                onPress={() =>
+                  void cancel({
+                    environmentId: props.environmentId,
+                    input: { checkInId: checkIn.id },
+                  }).then((result) => alertFailure(result, "Could not cancel the check-in"))
+                }
+              />
+            </Row>
+          ))}
+        </ScrollView>
+      </View>
+    </View>
+  );
+}
