@@ -231,3 +231,51 @@ Choose **Snooze → Custom…** from a thread's menu to pick a date and time in 
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
 several selected threads together. Choose **Wake thread** to bring a thread back early.
+
+## Let the agent check back later
+
+An agent can schedule a check-in: a message T3 Code sends back into the thread later, once or
+on repeat, so it can look at a long build, CI run or deploy without you asking. Ask in your own
+words, such as "check on the build every 20 minutes". A check-in arrives once the agent is idle
+and never interrupts or steers a turn; a repeat that falls due while the agent is still working
+is skipped. Each check-in is a turn, so it uses your provider's quota. For recurring work with
+no end, use [Scheduled tasks](./project-settings.md#scheduled-tasks-on-mobile) instead.
+
+An agent can also wait on another thread in the same project, such as one it handed work to,
+and hear when that thread next finishes a turn, with the end of its reply. The agent ends its
+turn while it waits.
+
+Scheduled check-ins and waits show above the composer, each with **Cancel**. What T3 Code sends
+shows in the conversation as a notice, such as **Check-in: look at the build**; several that fall
+due together arrive as one. A thread holds at most five check-ins, and archiving it cancels them.
+Repeating check-ins and waits stop after 24 hours unless you change that in **Settings →
+Integrations → Check-ins and background commands**, where you can also turn them off for all
+projects or one. On mobile, open **Settings → Server settings → Agent behavior**. Turning
+check-ins off stops agents scheduling new ones; cancel any already scheduled from the thread.
+
+## Run long commands in the background
+
+An agent can run a long command in the background, such as a build or a long test suite. It runs
+on T3 Code's own tmux server, so it keeps going after the agent's turn and even if T3 Code
+restarts, and its output goes to files in the folder's `.t3/jobs`, which version control
+ignores. T3 Code tells the agent the moment the command ends and, if the agent asks, sends it
+status updates on a schedule while it runs; those stop at the same limit as repeating check-ins.
+The agent can also ask to hear about certain lines as they appear, such as failing tests, at
+most every five minutes.
+
+Running commands show above the composer with **Terminal**, which opens a terminal on the
+command; **Mute**, which holds back its status updates and matching lines until you unmute it,
+though the agent still hears when it ends; and **Stop**. Stopping a command gives the agent a
+short turn to hear about it. Closing the command's terminal leaves it running, but Ctrl-C in that
+terminal ends it. A thread with a running command does not settle on its own.
+
+Background commands need tmux 3.2 or later on the machine running T3 Code, and the thread in
+Full access, since they run outside the agent's sandbox. Archiving a thread stops its commands;
+deleting it also removes their output. The check-ins switch in Settings turns them off too. If
+you run the server as a systemd service, T3 Code starts tmux in its own scope so restarting the
+service leaves commands running; that needs your user's systemd instance, and a service without
+one needs `KillMode=process`.
+
+T3 Code apps without this support, such as the App Store app and app.t3.codes, show the notices
+in the conversation but not the scheduled check-ins, the running commands, or their buttons. From
+those apps, ask the agent to cancel a check-in or stop a command, or archive the thread.
