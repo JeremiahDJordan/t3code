@@ -86,6 +86,7 @@ import {
   buildModelOptions,
   groupByProvider,
   isModelSelectionUnavailable,
+  providerContinuationGroupKey,
 } from "../../lib/modelOptions";
 import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import type { RemoteClientConnectionState } from "../../lib/connection";
@@ -526,11 +527,22 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [props.serverConfig, currentModelSelection],
   );
   const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
-  // An existing thread is bound to its harness: sessions can't move between
-  // provider instances, so the picker only offers the thread's own group.
+  // An existing thread is bound to its harness: its session moves only to an instance that
+  // resumes it, one in the same continuation group, such as another account of the same agent.
+  const threadContinuationKey = providerContinuationGroupKey(
+    props.serverConfig,
+    currentModelSelection.instanceId,
+  );
   const threadProviderGroups = useMemo(
-    () => providerGroups.filter((group) => group.providerKey === currentModelSelection.instanceId),
-    [providerGroups, currentModelSelection.instanceId],
+    () =>
+      providerGroups.filter(
+        (group) =>
+          group.providerKey === currentModelSelection.instanceId ||
+          (threadContinuationKey !== undefined &&
+            providerContinuationGroupKey(props.serverConfig, group.providerKey) ===
+              threadContinuationKey),
+      ),
+    [providerGroups, currentModelSelection.instanceId, threadContinuationKey, props.serverConfig],
   );
   const currentModelOption =
     modelOptions.find(
