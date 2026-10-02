@@ -397,9 +397,10 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   Bob reader shares. Dropping its busy timeout degrades usage, import, the Usage page
   and subagent steps at once.
 - Subagent steps: `hasTranscript` on `task.completed` in contracts, its copy in
-  `ProviderRuntimeIngestion.ts` and in `subagentRuntime.ts`, and
-  `ProviderService.readTaskTranscript` with its `ws.ts` handler. Losing the copy in
-  ingestion hides **Show earlier steps** without an error.
+  `ProviderRuntimeIngestion.ts` and in `subagentRuntime.ts`,
+  `ProviderService.readTaskTranscript` with its `ws.ts` handler, and in
+  `ClaudeAdapter.ts` the `hasTranscript` on `task_notification` and `readTaskTranscript`.
+  Losing the copy in ingestion hides **Show earlier steps** without an error.
 - Check-ins: `server.ts` (`CheckInScheduler.layer`), `OrchestrationReactor.ts`
   (starting it; without that nothing is ever delivered), `McpHttpServer.ts` (the
   toolkit), `ProviderService.ts` (the `check-ins` capability), `ServerEnvironment.ts`
