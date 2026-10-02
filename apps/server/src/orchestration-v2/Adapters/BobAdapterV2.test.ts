@@ -17,6 +17,7 @@ import {
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -174,6 +175,48 @@ describe("BobAdapterV2 flavor", () => {
     );
     assert.equal(details?.message, "The model is overloaded.");
   });
+
+  it("stops a turn as a usage limit only when Bob says its Bobcoins are spent", () => {
+    // Bob 2.0.5's budget errors, as its ACP library sends them.
+    const failure = (name: string, title: string, description: string) =>
+      flavor.promptFailure?.(
+        new EffectAcpErrors.AcpRequestError({
+          code: -32603,
+          errorMessage: "Internal error",
+          data: { details: `${name}: ${JSON.stringify({ title, description })}` },
+        }),
+      );
+    const monthly = failure(
+      "BudgetExceededError",
+      "Budget Exceeded",
+      "Oh no! It looks like you've gone over your budget allowance of 50 Bobcoins.",
+    );
+    assert.equal(monthly?.class, "usage_limit");
+    assert.match(monthly?.resetAt ?? "", /^\d{4}-\d{2}-01T00:00:00\.000Z$/);
+    const team = failure(
+      "BudgetExceededError",
+      "Team Budget Exceeded",
+      "Your team budget has been exceeded. Please contact your account owner.",
+    );
+    assert.equal(team?.class, "usage_limit");
+    assert.isDefined(team?.resetAt);
+    const trial = failure(
+      "TrialExpiredError",
+      "Your Free trial has expired",
+      "You have reached the end of your free trial period. Upgrade your plan to continue.",
+    );
+    assert.equal(trial?.class, "usage_limit");
+    assert.isUndefined(trial?.resetAt);
+    // The same error class for a suspended plan, or a profile Bob could not read.
+    for (const description of [
+      "Your plan has been suspended. You can manage your subscription to update your plan and continue.",
+      "Unable to retrieve profile information.",
+    ]) {
+      const other = failure("BudgetExceededError", "Plan suspended", description);
+      assert.equal(other?.class, "provider_error");
+      assert.equal(other?.message, description);
+    }
+  });
 });
 
 const sessionLayer = Layer.mergeAll(
@@ -199,6 +242,8 @@ const runBobTurn = (input: {
   readonly text: string;
   readonly interactionMode?: "default" | "plan";
   readonly mockEnv?: Record<string, string>;
+  /** Bob's task usage by reading, the first when the session opens. */
+  readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -217,6 +262,8 @@ const runBobTurn = (input: {
       source: execScriptSource({ scriptPath: mockPath }),
     });
     const commands: Array<{ names: ReadonlyArray<string>; cwd: string }> = [];
+    const spentIn: Array<string> = [];
+    let usageReading = 0;
     const modes: Array<{ ids: ReadonlyArray<string>; cwd: string }> = [];
     const instanceId = ProviderInstanceId.make("bob-turn-test");
     const adapter = yield* makeBobAdapterV2({
@@ -232,6 +279,15 @@ const runBobTurn = (input: {
         Effect.sync(() => {
           modes.push({ ids: available.map((mode) => mode.id), cwd });
         }),
+      ...(input.usageReadings
+        ? {
+            readTaskUsage: () => Effect.sync(() => input.usageReadings?.[usageReading++]),
+            onBobcoinsSpent: (cwd: string) =>
+              Effect.sync(() => {
+                spentIn.push(cwd);
+              }),
+          }
+        : {}),
     });
     const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
       runtimeMode: "full-access",
@@ -302,8 +358,9 @@ const runBobTurn = (input: {
         const message = JSON.parse(line) as { readonly method?: string };
         return message.method ? [message.method] : [];
       });
-    return { events, methods, commands, modes, workspace } satisfies BobTurnResult & {
+    return { events, methods, commands, modes, workspace, spentIn } satisfies BobTurnResult & {
       readonly workspace: string;
+      readonly spentIn: ReadonlyArray<string>;
     };
   });
 
@@ -352,6 +409,22 @@ describe("BobAdapterV2 turns", () => {
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
+  it.effect("stops a turn over the team's Bobcoins as a usage limit that resets monthly", () =>
+    Effect.gen(function* () {
+      const terminal = terminalOf((yield* runBobTurn({ text: "spend too much" })).events);
+      assert.equal(terminal?.status, "failed");
+      if (terminal?.status !== "failed") return;
+      assert.deepInclude(terminal.failure, {
+        class: "usage_limit",
+        code: "BudgetExceededError",
+        message: "Oh no! It looks like you've gone over your budget allowance of 50 Bobcoins.",
+      });
+      // Bobcoins reset at 00:00 UTC on the first of the next month.
+      assert.match(terminal.failure.resetAt ?? "", /^\d{4}-\d{2}-01T00:00:00\.000Z$/);
+      assert.isTrue(Date.parse(terminal.failure.resetAt ?? "") > (yield* Clock.currentTimeMillis));
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
   it.effect("proposes a plan turn's final reply as the plan", () =>
     Effect.gen(function* () {
       const result = yield* runBobTurn({ text: "plan the change", interactionMode: "plan" });
@@ -364,6 +437,26 @@ describe("BobAdapterV2 turns", () => {
             JSON.stringify(event.plan).includes("1. Read the code."),
         ),
       );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("reports Bob's context and Bobcoins from its task database after a turn", () =>
+    Effect.gen(function* () {
+      const result = yield* runBobTurn({
+        text: "hello",
+        usageReadings: [
+          { used: 0, size: 0, bobcoins: 1 },
+          { used: 1_200, size: 200_000, bobcoins: 1.42 },
+        ],
+      });
+      const usage = result.events.findLast(
+        (event) => event.type === "provider_thread.updated" && event.providerThread.contextUsage,
+      );
+      assert.deepEqual(
+        usage?.type === "provider_thread.updated" ? usage.providerThread.contextUsage : undefined,
+        { usedTokens: 1_200, maxTokens: 200_000, cost: { amount: 1.42, currency: "Bobcoins" } },
+      );
+      assert.deepEqual(result.spentIn, [result.workspace]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 

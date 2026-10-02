@@ -39,6 +39,7 @@ import type {
   RuntimeRequestId,
   ScopedThreadRef,
   ServerProvider,
+  ServerProviderUsageWindow,
   ThreadId,
   SnapShotSource,
 } from "@t3tools/contracts";
@@ -64,7 +65,7 @@ import {
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { folderDropTarget, resolveDroppedFolderPath } from "./folderDrop";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
-import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
+import { USAGE_LIMITS_COMMAND, composerBudgetWindow } from "@t3tools/shared/usageLimits";
 import {
   memo,
   type ComponentProps,
@@ -311,6 +312,7 @@ import {
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
 } from "./composerProviderState";
+import { ComposerBudgetMeter } from "./ComposerBudgetMeter";
 import { ContextWindowMeter, ContextWindowMeterPlaceholder } from "./ContextWindowMeter";
 import {
   providerSupportsManualCompaction,
@@ -1340,6 +1342,8 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   canOperateThread: boolean;
+  budgetWindow: ServerProviderUsageWindow | null;
+  onOpenUsageLimits?: (() => void) | undefined;
   activeContextWindow: ContextWindowSnapshot | null;
   reserveContextWindowMeter: boolean;
   activeThreadModelDisplayName: string | null;
@@ -1380,6 +1384,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 }) {
   return (
     <>
+      {props.budgetWindow ? (
+        <ComposerBudgetMeter window={props.budgetWindow} onOpenLimits={props.onOpenUsageLimits} />
+      ) : null}
       {props.activeContextWindow ? (
         <ContextWindowMeter
           usage={props.activeContextWindow}
@@ -2150,6 +2157,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderEntry],
   );
   const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
+  const budgetWindow = useMemo(
+    () => (selectedProviderStatus ? composerBudgetWindow(selectedProviderStatus, gitCwd) : null),
+    [selectedProviderStatus, gitCwd],
+  );
   const selectedProviderSkills = useMemo(
     () =>
       selectedProviderStatus ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd) : [],
@@ -7281,6 +7292,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}
+                    // The resting row reserves room for the context meter only.
+                    budgetWindow={isComposerResting ? null : budgetWindow}
+                    onOpenUsageLimits={onUsageLimitsCommand}
                     activeContextWindow={
                       settings.contextWindowMeterEnabled ? activeContextWindow : null
                     }

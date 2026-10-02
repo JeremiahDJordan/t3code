@@ -1,6 +1,7 @@
 import type {
   ProviderInstanceId,
   ServerSettings,
+  UsageCredits,
   UsageProviderKind,
   UsageReadError,
   UsageSource,
@@ -20,6 +21,8 @@ export interface UsageRecord {
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
   readonly speed: UsageSpeed;
+  /** Spend in the provider's own unit, such as Bob's Bobcoins. Never dollars. */
+  readonly credits?: UsageCredits;
   readonly dedupeKey: string | null;
 }
 

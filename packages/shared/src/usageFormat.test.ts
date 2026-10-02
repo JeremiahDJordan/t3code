@@ -7,8 +7,36 @@ import {
   formatHourShort,
   formatPercent,
   formatRelativeHourShort,
+  formatUsageCredits,
+  formatUsageSpend,
   makeWindow,
 } from "./usageFormat.ts";
+
+describe("formatUsageSpend", () => {
+  it("shows a provider's own credits instead of zero dollars", () => {
+    expect(formatUsageSpend(0, { amount: 12.3, unit: "Bobcoins" })).toBe("12.30 Bobcoins");
+    expect(formatUsageSpend(0, { amount: 0.0042, unit: "Bobcoins" })).toBe("0.0042 Bobcoins");
+    expect(formatUsageSpend(0, undefined)).toBe("$0.00");
+  });
+
+  it("shows both when a custom price gives credits a dollar cost", () => {
+    expect(formatUsageSpend(1.5, { amount: 0.25, unit: "Bobcoins" })).toBe(
+      "$1.50 · 0.250 Bobcoins",
+    );
+  });
+
+  it("shows bare credit amounts for columns that name the unit, with zero like dollars", () => {
+    expect(formatUsageCredits(3.184)).toBe("3.18");
+    expect(formatUsageCredits(0.2143)).toBe("0.214");
+    expect(formatUsageCredits(0)).toBe("0.00");
+  });
+
+  it("keeps spend too small to show distinct from none", () => {
+    expect(formatUsageCredits(0.00004)).toBe("<0.0001");
+    expect(formatUsageCredits(0.0001)).toBe("0.0001");
+    expect(formatUsageSpend(0, { amount: 0.00004, unit: "Bobcoins" })).toBe("<0.0001 Bobcoins");
+  });
+});
 
 describe("formatPercent", () => {
   it("distinguishes a small positive share from zero", () => {

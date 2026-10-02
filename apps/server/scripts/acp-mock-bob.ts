@@ -10,8 +10,9 @@
  * subagents run as a "Running subagent: …" tool call with the report in `<task_result>` tags,
  * and tasks move with `_bob/task/export` and `_bob/task/import`.
  *
- * A prompt's text picks what Bob does: "use a subagent", "run a command" and "say nothing" (an
- * empty reply). Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
+ * A prompt's text picks what Bob does: "use a subagent", "run a command", "say nothing" (an
+ * empty reply) and "spend too much", which Bob's gateway refuses as over the team's monthly
+ * Bobcoins. Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
  * `T3_ACP_BOB_RESUME_NOT_FOUND` makes every resume fail as an unknown task.
@@ -124,6 +125,18 @@ function runPrompt(params: Json): Json {
     });
   }
   if (text.includes("say nothing")) return { stopReason: "end_turn" };
+  if (text.includes("spend too much")) {
+    // Bob's ACP library sends a thrown error's message as `details`.
+    const data = {
+      title: "Budget Exceeded",
+      description: "Oh no! It looks like you've gone over your budget allowance of 50 Bobcoins.",
+    };
+    throw new Refusal({
+      code: -32603,
+      message: "Internal error",
+      data: { details: `BudgetExceededError: ${JSON.stringify(data)}` },
+    });
+  }
   if (text.includes("use a subagent")) {
     const description = "Count the files";
     notify(sessionId, {

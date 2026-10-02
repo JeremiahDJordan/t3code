@@ -38,14 +38,20 @@ import {
   makeBobUsageLimitsRefresh,
 } from "../BobProvider.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import { readBobPinnedTeams, readBobUsageLimits, readBobUsageProfile } from "../bobUsageLimits.ts";
-import { resolveBobTaskDatabasePath } from "../bobTaskUsage.ts";
+import {
+  readBobConfiguredModel,
+  readBobPinnedTeams,
+  readBobUsageLimits,
+  readBobUsageProfile,
+} from "../bobUsageLimits.ts";
+import { bobContextWindow, readBobTaskCosts, resolveBobTaskDatabasePath } from "../bobTaskUsage.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   type ProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
 } from "@t3tools/provider-core/server/driver";
+import { bobUsageReader } from "./BobUsage.ts";
 import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
@@ -78,7 +84,11 @@ export type BobDriverEnv =
   | ServerConfig
   | ServerSettingsService;
 
-export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
+export const BobDriver: ProviderDriver<
+  BobSettings,
+  BobDriverEnv,
+  FileSystem.FileSystem | Path.Path
+> = {
   driverKind: DRIVER_KIND,
   metadata: {
     displayName: "Bob",
@@ -86,6 +96,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
   },
   configSchema: BobSettings,
   defaultConfig: (): BobSettings => decodeBobSettings({}),
+  usage: bobUsageReader,
   /** Builds one Bob instance: its snapshot, its per-workspace command catalog, and its adapter. */
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
@@ -102,9 +113,10 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       // Bob keeps its sessions in its task database, and any instance reading the same one can
       // resume them, whatever it signs in with. So a thread moves between such instances, such
       // as from an SSO login to an API key when one account runs out of Bobcoins.
+      const taskDatabasePath = resolveBobTaskDatabasePath(processEnv, path);
       const continuationIdentity: ProviderContinuationIdentity = {
         driverKind: DRIVER_KIND,
-        continuationKey: `bob:db:${resolveBobTaskDatabasePath(processEnv, path)}`,
+        continuationKey: `bob:db:${taskDatabasePath}`,
       };
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -195,6 +207,25 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         selfInvocation,
         onAvailableCommands,
         onAvailableModes,
+        // Bob reads its model setting on every turn, so the window follows it. That window is
+        // assumed, so a context larger than it proves it wrong and is reported without one.
+        readTaskUsage: (sessionId) =>
+          Effect.gen(function* () {
+            const costs = yield* readBobTaskCosts(taskDatabasePath, sessionId);
+            if (!costs) return undefined;
+            const window = bobContextWindow(yield* readBobConfiguredModel(processEnv));
+            return {
+              used: costs.contextTokens,
+              size: window !== undefined && costs.contextTokens <= window ? window : 0,
+              bobcoins: costs.cost,
+            };
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.orElseSucceed(() => undefined),
+          ),
+        onBobcoinsSpent: (cwd) =>
+          refreshUsageLimits(cwd, true).pipe(Effect.forkIn(driverScope), Effect.asVoid),
         continuationRequests,
         nativeLogging: (threadId) =>
           makeNativeLogger({

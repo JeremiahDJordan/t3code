@@ -13,6 +13,9 @@ import {
 
 import * as DateTime from "effect/DateTime";
 
+import { normalizeProjectPathForComparison } from "./path.ts";
+import { formatUsageCredits } from "./usageFormat.ts";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -126,6 +129,15 @@ const nativeReport = (provider: ServerProvider): AccountReport => ({
 });
 
 /**
+ * The account an instance reports when no email names it: its own, except Bob's SSO instances,
+ * which all read the machine-wide `~/.bob` login and so bill one team.
+ */
+function fallbackAccountKey(environmentId: EnvironmentId, provider: ServerProvider): string {
+  const sharedLogin = provider.driver === "bob" && provider.auth.type === "sso";
+  return `${environmentId}:${sharedLogin ? "bob:sso" : provider.instanceId}`;
+}
+
+/**
  * Pass every enabled login, read or not, so an unreadable workspace still
  * counts as one.
  */
@@ -237,7 +249,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
     const label = presentation.entry.target.label;
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
       if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
-      merge(resolveKey(nativeReport(provider)) ?? `${environmentId}:${provider.instanceId}`, {
+      merge(resolveKey(nativeReport(provider)) ?? fallbackAccountKey(environmentId, provider), {
         key: `${environmentId}:${provider.instanceId}`,
         driver: provider.driver,
         displayName: provider.displayName?.trim() || null,
@@ -326,6 +338,8 @@ export interface LimitPoolWindow {
   }>;
   readonly remainingPercent: number;
   readonly usedPercent: number;
+  /** The members' amounts summed, when every member reports them in the same unit. */
+  readonly amount: ServerProviderUsageWindow["amount"];
   readonly pace: LimitPace | null;
   readonly resets: ReadonlyArray<{
     readonly member: LimitPoolMember;
@@ -452,6 +466,18 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
             ];
       })
       .sort((left, right) => left.at - right.at);
+    const amounts = members.flatMap((m) => (m.window.amount ? [m.window.amount] : []));
+    const unit = amounts[0]?.unit;
+    const amount =
+      unit !== undefined &&
+      amounts.length === members.length &&
+      amounts.every((a) => a.unit === unit)
+        ? {
+            used: amounts.reduce((sum, a) => sum + a.used, 0),
+            limit: amounts.reduce((sum, a) => sum + a.limit, 0),
+            unit,
+          }
+        : undefined;
     return {
       id,
       kind: first.kind,
@@ -462,6 +488,7 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
       ),
       usedPercent: Math.round(usedPercent),
       remainingPercent: Math.round(100 - usedPercent),
+      amount,
       pace: meanElapsed === null ? null : paceOfShares(timedUsed, meanElapsed),
       resets,
     };
@@ -481,6 +508,13 @@ export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
 
 export function remainingPercent(window: ServerProviderUsageWindow): number {
   return Math.round(100 - Math.max(0, Math.min(100, window.usedPercent)));
+}
+
+/** `12.40 of 50.00 Bobcoins used · 37.60 left`, or null for a window that reports only a share. */
+export function formatWindowAmount(amount: ServerProviderUsageWindow["amount"]): string | null {
+  if (!amount) return null;
+  const left = Math.max(0, amount.limit - amount.used);
+  return `${formatUsageCredits(amount.used)} of ${formatUsageCredits(amount.limit)} ${amount.unit} used · ${formatUsageCredits(left)} left`;
 }
 
 function resetMillis(window: ServerProviderUsageWindow): number | null {
@@ -596,12 +630,43 @@ export function withUsageLimitsCommands(
   });
 }
 
+/**
+ * The window the composer shows as a budget: the first of the provider's windows, in the
+ * folder's own limits where it has them, that reports amounts, such as Bob's monthly Bobcoins.
+ * Null when none does.
+ */
+export function composerBudgetWindow(
+  provider: ServerProvider,
+  cwd: string | null,
+): ServerProviderUsageWindow | null {
+  const limits = (cwd ? withWorkspaceUsageLimits(provider, cwd) : provider).usageLimits;
+  if (!limits || limitsNotice(limits) !== null) return null;
+  return limits.windows.find((window) => window.amount !== undefined) ?? null;
+}
+
+/**
+ * A provider with the limits of work in `cwd`, when that folder has its own, such as a Bob
+ * folder that pins another team.
+ */
+function withWorkspaceUsageLimits(provider: ServerProvider, cwd: string): ServerProvider {
+  const folder = normalizeProjectPathForComparison(cwd);
+  const usageLimits = provider.workspaceSnapshots?.find(
+    (snapshot) => normalizeProjectPathForComparison(snapshot.cwd) === folder,
+  )?.usageLimits;
+  return usageLimits ? { ...provider, usageLimits } : provider;
+}
+
+/** With `cwd`, a folder's own limits replace its provider's, for a thread working there. */
 export function collectProviderUsageLimits(
   instanceId: ProviderInstanceId,
-  providers: readonly ServerProvider[],
+  allProviders: readonly ServerProvider[],
   sources: UsageLimitSourceSnapshots,
   now: number,
+  cwd?: string | null,
 ): UsageLimitsReport | null {
+  const providers = cwd
+    ? allProviders.map((provider) => withWorkspaceUsageLimits(provider, cwd))
+    : allProviders;
   const selected = providers.find((provider) => provider.instanceId === instanceId);
   if (!selected || !hasProviderUsageLimits(selected.driver, providers, sources)) return null;
   const native = providersWithLimits(providers).filter(

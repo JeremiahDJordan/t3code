@@ -1,10 +1,12 @@
 // @effect-diagnostics globalDate:off
-import type {
-  UsageBucket,
-  UsageCategoryCost,
-  UsageDay,
-  UsageResolution,
-  UsageTokenTotals,
+import {
+  addUsageCredits,
+  type UsageBucket,
+  type UsageCategoryCost,
+  type UsageCredits,
+  type UsageDay,
+  type UsageResolution,
+  type UsageTokenTotals,
 } from "@t3tools/contracts";
 
 import { EMPTY_TOTALS, type UsageRecord } from "@t3tools/provider-core/server/usage";
@@ -52,6 +54,13 @@ function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
 const QUARTER_HOUR_MS = 15 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 
+/**
+ * Records billed in a provider's own credits name its routing tiers (Bob's
+ * `premium-ide`), not public models, so the public rate table would only guess.
+ * Custom prices still apply because the user chose them.
+ */
+const NO_PUBLIC_RATES: RateTable = new Map();
+
 interface MutableBucket {
   totals: { -readonly [K in keyof UsageTokenTotals]: number };
   costUsd: number;
@@ -60,6 +69,7 @@ interface MutableBucket {
   fastCostUsd: number;
   ultrafastCostUsd: number;
   speedPremiumUsd: number;
+  credits: UsageCredits | undefined;
   records: number;
   unpricedRecords: number;
   providerReportedRecords: number;
@@ -172,7 +182,8 @@ export class UsageAggregator {
         : Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS);
     const bucket = this.#bucketFor(day, hourIndex, record.provider, record.model, sourcePath ?? "");
 
-    const priced = priceUsage(this.#options.rates, record, this.#options.priceOverrides);
+    const rates = record.credits === undefined ? this.#options.rates : NO_PUBLIC_RATES;
+    const priced = priceUsage(rates, record, this.#options.priceOverrides);
 
     const totals = bucket.totals;
     totals.uncachedInputTokens += record.totals.uncachedInputTokens;
@@ -197,11 +208,10 @@ export class UsageAggregator {
     if (record.speed === "fast") bucket.fastCostUsd += priced.costUsd;
     if (record.speed === "ultrafast") bucket.ultrafastCostUsd += priced.costUsd;
     bucket.speedPremiumUsd += priced.speedPremiumUsd;
-    bucket.cacheSavingsUsd += cacheSavingsUsd(
-      this.#options.rates,
-      record,
-      this.#options.priceOverrides,
-    );
+    bucket.cacheSavingsUsd += cacheSavingsUsd(rates, record, this.#options.priceOverrides);
+    if (record.credits !== undefined) {
+      bucket.credits = addUsageCredits(bucket.credits, record.credits);
+    }
     bucket.records += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;
@@ -254,6 +264,7 @@ export class UsageAggregator {
         fastCostUsd: 0,
         ultrafastCostUsd: 0,
         speedPremiumUsd: 0,
+        credits: undefined,
         records: 0,
         unpricedRecords: 0,
         providerReportedRecords: 0,
@@ -297,6 +308,7 @@ export class UsageAggregator {
         ...(ultrafastCostUsd === 0 ? {} : { ultrafastCostUsd }),
         ...(speedPremiumUsd === 0 ? {} : { speedPremiumUsd }),
         costSource: resolveCostSource(bucket),
+        ...(bucket.credits === undefined ? {} : { credits: bucket.credits }),
         records: bucket.records,
         unpricedRecords: bucket.unpricedRecords,
         sessions: bucket.sessions.size,

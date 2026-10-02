@@ -1,4 +1,4 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type { UsageCredits, UsageProviderKind } from "@t3tools/contracts";
 
 import { ProviderDriverKind } from "@t3tools/contracts";
 
@@ -40,6 +40,12 @@ export const PROVIDER_PRESENTATION = {
     color: "#4d9f8a",
     driverKind: ProviderDriverKind.make("pi"),
   },
+  // The blue of Bob's mark in each theme.
+  bob: {
+    label: "Bob",
+    color: "light-dark(#0e61fa, #4587fd)",
+    driverKind: ProviderDriverKind.make("bob"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 export const PROVIDER_ORDER = Object.keys(PROVIDER_PRESENTATION) as UsageProviderKind[];
@@ -49,11 +55,14 @@ export function providersWithUsage(
     readonly provider: UsageProviderKind;
     readonly costUsd: number;
     readonly totalTokens: number;
+    readonly credits?: UsageCredits;
   }[],
 ): readonly UsageProviderKind[] {
   const active = new Set(
     totals
-      .filter((entry) => entry.totalTokens > 0 || entry.costUsd > 0)
+      .filter(
+        (entry) => entry.totalTokens > 0 || entry.costUsd > 0 || (entry.credits?.amount ?? 0) > 0,
+      )
       .map((entry) => entry.provider),
   );
   return PROVIDER_ORDER.filter((provider) => active.has(provider));

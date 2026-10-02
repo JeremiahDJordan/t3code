@@ -24,6 +24,7 @@ import {
   formatPercent,
   formatTokens,
   formatUsageContractMismatch,
+  formatUsageSpend,
   formatUsd,
   makeWindow,
 } from "@t3tools/shared/usageFormat";
@@ -649,6 +650,11 @@ function ProviderSection(props: {
         }
         const provider = row.provider;
         const share = metric === "cost" ? provider.costShare : provider.tokenShare;
+        // Spend only in a provider's own credits has no share of the dollars.
+        const costShareLabel =
+          provider.credits && !provider.costUsd
+            ? `Billed in ${provider.credits.unit}`
+            : `${formatPercent(share)} of cost`;
         return (
           <View
             key={provider.provider}
@@ -664,7 +670,7 @@ function ProviderSection(props: {
               </View>
               <Text className="text-lg tabular-nums text-foreground">
                 {metric === "cost"
-                  ? formatUsd(provider.costUsd)
+                  ? formatUsageSpend(provider.costUsd, provider.credits)
                   : formatTokens(provider.totalTokens)}
               </Text>
             </View>
@@ -677,8 +683,8 @@ function ProviderSection(props: {
             </View>
             <Text className="text-sm text-foreground-muted">
               {metric === "cost"
-                ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
-                : `${formatPercent(share)} of tokens · ${formatUsd(provider.costUsd)}`}
+                ? `${costShareLabel} · ${formatTokens(provider.totalTokens)} tokens`
+                : `${formatPercent(share)} of tokens · ${formatUsageSpend(provider.costUsd, provider.credits)}`}
             </Text>
           </View>
         );
@@ -863,19 +869,25 @@ function ModelsSection(props: { readonly merged: MergedUsage; readonly metric: U
             <Text className="text-sm text-foreground-muted">
               {metric === "tokens"
                 ? `${formatPercent(model.tokenShare)} of tokens · ${
-                    isModelCostUnknown(model) ? "no known rates" : formatUsd(model.costUsd)
+                    model.credits !== undefined
+                      ? formatUsageSpend(model.costUsd, model.credits)
+                      : isModelCostUnknown(model)
+                        ? "no known rates"
+                        : formatUsd(model.costUsd)
                   }`
                 : isModelCostUnknown(model)
-                  ? `no known rates · ${formatTokens(model.totalTokens)} tokens`
+                  ? `${model.credits === undefined ? "no known rates" : `billed in ${model.credits.unit}`} · ${formatTokens(model.totalTokens)} tokens`
                   : `${formatPercent(model.costShare)} of cost · ${formatTokens(model.totalTokens)} tokens`}
             </Text>
           </View>
           <Text className="text-base tabular-nums text-foreground">
             {metric === "tokens"
               ? formatTokens(model.totalTokens)
-              : isModelCostUnknown(model)
-                ? "Unpriced"
-                : formatUsd(model.costUsd)}
+              : model.credits !== undefined
+                ? formatUsageSpend(model.costUsd, model.credits)
+                : isModelCostUnknown(model)
+                  ? "Unpriced"
+                  : formatUsd(model.costUsd)}
           </Text>
         </View>
       ))}

@@ -14,6 +14,7 @@ import {
   elapsedShare,
   formatDuration,
   formatResetsIn,
+  formatWindowAmount,
   limitsNotice,
   paceOf,
   remainingPercent,
@@ -52,6 +53,7 @@ function WindowRow(props: {
   const timeLeft = elapsed === null ? null : Math.round((1 - elapsed) * 100);
   const pace = paceOf(window, now);
   const resetsIn = formatResetsIn(window, now);
+  const amount = formatWindowAmount(window.amount);
   return (
     <View className="gap-1">
       <View className="flex-row items-baseline justify-between gap-3">
@@ -84,6 +86,9 @@ function WindowRow(props: {
           />
         ) : null}
       </View>
+      {amount ? (
+        <Text className="text-xs tabular-nums text-foreground-tertiary">{amount}</Text>
+      ) : null}
       {pace || resetsIn ? (
         <View className="flex-row justify-between gap-3">
           <Text className="text-xs text-foreground-tertiary">{pace ? PACE_LABEL[pace] : ""}</Text>
