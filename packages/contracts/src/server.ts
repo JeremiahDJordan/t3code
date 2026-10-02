@@ -141,6 +141,11 @@ export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   /** Skills are available, but command discovery still needs a retry. */
   slashCommandsPending: Schema.optional(Schema.Boolean),
   skills: Schema.Array(ServerProviderSkill),
+  /**
+   * Limits for work in this folder when they differ from the instance's, such as a Bob folder
+   * that pins another team. Absent means the instance's `usageLimits` apply.
+   */
+  usageLimits: Schema.optional(ServerProviderUsageLimits),
 });
 export type ServerProviderWorkspaceSnapshot = typeof ServerProviderWorkspaceSnapshot.Type;
 

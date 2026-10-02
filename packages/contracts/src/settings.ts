@@ -710,6 +710,55 @@ export const ClaudeSettings = makeProviderSettingsSchema(
 export type ClaudeSettings = typeof ClaudeSettings.Type;
 
 /**
+ * How Bob Shell signs in. IBM SSO uses the login `bob` stores after signing in
+ * in a terminal. API key reads `BOB_API_KEY` from the instance environment.
+ */
+const BOB_AUTH_METHODS = [
+  { value: "sso", label: "IBM SSO" },
+  { value: "apiKey", label: "API key" },
+] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
+export const BobAuthMethod = Schema.Literals(BOB_AUTH_METHODS.map((method) => method.value));
+export type BobAuthMethod = typeof BobAuthMethod.Type;
+
+export const BobSettings = makeProviderSettingsSchema(
+  {
+    // Off by default like Cursor and Grok. Users opt in from Settings.
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    authMethod: BobAuthMethod.pipe(
+      Schema.withDecodingDefault(Effect.succeed("sso" as const)),
+      Schema.annotateKey({
+        title: "Sign-in method",
+        description:
+          "IBM SSO uses the login from running bob in a terminal. API key reads BOB_API_KEY from this instance's environment variables; mark it sensitive.",
+        providerSettingsForm: {
+          control: "select",
+          options: BOB_AUTH_METHODS,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    binaryPath: makeBinaryPathSetting("bob").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the IBM Bob Shell binary.",
+        providerSettingsForm: { placeholder: "bob", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(CustomModelSetting).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: ["authMethod", "binaryPath"],
+  },
+);
+export type BobSettings = typeof BobSettings.Type;
+
+/**
  * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
  * in the browser. The API key and Agent Platform methods take credentials from
  * the instance config and never open a browser.
@@ -1395,7 +1444,7 @@ export const providerInstanceConfigEnabledFlag = (config: unknown): boolean | un
  * `enabled` decoding default of each driver's settings schema.
  */
 const DEFAULT_DISABLED_PROVIDER_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set(
-  ["cursor", "grok", "muse", "pi", "opencode", "antigravity"].map((driver) =>
+  ["cursor", "grok", "bob", "muse", "pi", "opencode", "antigravity"].map((driver) =>
     ProviderDriverKind.make(driver),
   ),
 );
