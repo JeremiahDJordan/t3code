@@ -4,6 +4,11 @@ import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
 import * as Semaphore from "effect/Semaphore";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
+import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
+import * as ThreadBackgroundCommands from "./persistence/ThreadBackgroundCommands.ts";
+import * as ThreadCheckIns from "./persistence/ThreadCheckIns.ts";
+import * as TmuxServer from "./tmux/TmuxServer.ts";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
 import * as PullRequestWatchReactor from "./orchestration-v2/PullRequestWatchReactor.ts";
 import * as DelegatedTaskQuestionReactor from "./orchestration-v2/DelegatedTaskQuestionReactor.ts";
@@ -508,12 +513,39 @@ const layerOrchestrationApplication = CheckpointDiffQuery.layer.pipe(
   Layer.provideMerge(layerOrchestrationV2Runtime),
 );
 
+// Check-ins and background commands share a change feed and the command repository, so they
+// are built together; background commands also need T3's private tmux server.
+const CheckInsLayerLive = BackgroundCommands.layer.pipe(
+  Layer.provideMerge(CheckInScheduler.layer),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      ThreadCheckIns.layer,
+      ThreadBackgroundCommands.layer,
+      ThreadBackgroundCommands.changesLayer,
+    ),
+  ),
+  Layer.provide(TmuxServer.layer.pipe(Layer.provide(ProcessRunner.layer))),
+);
+
+// Delivers check-ins and command notices, and follows running commands to their end.
+const CheckInsWorkerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    yield* (yield* CheckInScheduler.CheckInScheduler).start();
+    yield* (yield* BackgroundCommands.BackgroundCommands).watch();
+  }),
+);
+
 // Automatic thread settlement (#8600): a server-owned sweep evaluates
 // inactivity and merged pull requests, then settles through the orchestrator
-// so every client sees the same shelf.
+// so every client sees the same shelf. A running background command holds its
+// thread.
 const layerThreadSettlementWorker = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
-).pipe(Layer.provide(layerPullRequestService), Layer.provide(ProjectionStoreV2.layer));
+).pipe(
+  Layer.provide(layerPullRequestService),
+  Layer.provide(ProjectionStoreV2.layer),
+  Layer.provide(BackgroundCommands.settlementHoldsLayer),
+);
 
 const layerThreadPullRequestWorker = Layer.effectDiscard(
   ThreadPullRequestService.make.pipe(Effect.flatMap((service) => service.start())),
@@ -556,6 +588,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // Asks T3 Connect to deliver webhooks it held while this environment was offline.
   HeldHooksWaker.layer,
   layerThreadSettlementWorker,
+  CheckInsWorkerLive,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
   layerThreadPullRequestWorker,
   Layer.effectDiscard(
@@ -594,6 +627,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // for the normal (on-delete) path.
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
+  Layer.provideMerge(CheckInsLayerLive),
   // Core Services
   Layer.provideMerge(layerOrchestrationApplication),
   // Shared by the workflow engine, the workflow MCP tools and Copy script.
