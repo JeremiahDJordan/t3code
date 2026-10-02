@@ -306,6 +306,8 @@ interface TimelineRowSharedState {
   onSteerQueuedMessage: (id: string) => void;
   steerQueuedMessageShortcutLabel: string | null;
   onRemoveQueuedMessage: (id: string) => void;
+  /** Sends a message again for a turn its provider ended without a reply; false if it did not. */
+  onRetryTurn: ((messageId: string) => Promise<boolean>) | undefined;
 }
 
 interface TimelineRowActivityState {
@@ -472,6 +474,7 @@ interface MessagesTimelineProps {
   onSteerQueuedMessage?: (id: string) => void;
   steerQueuedMessageShortcutLabel?: string | null;
   onRemoveQueuedMessage?: (id: string) => void;
+  onRetryTurn?: (messageId: string) => Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +533,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onSteerQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
   steerQueuedMessageShortcutLabel = null,
   onRemoveQueuedMessage = NOOP_QUEUED_MESSAGE_ACTION,
+  onRetryTurn,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
   const rememberedPosition = useMemo(
@@ -1180,6 +1184,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onSteerQueuedMessage,
       steerQueuedMessageShortcutLabel,
       onRemoveQueuedMessage,
+      onRetryTurn,
     }),
     [
       readyCitationRequest,
@@ -1216,6 +1221,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onSteerQueuedMessage,
       steerQueuedMessageShortcutLabel,
       onRemoveQueuedMessage,
+      onRetryTurn,
     ],
   );
   const backgroundWorktreeSetup =
@@ -4745,6 +4751,40 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   );
 });
 
+/**
+ * Retry on a warning that its turn ended without a reply, while that turn is the latest and the
+ * thread is idle. Its own component, so only these rows follow the thread's working state.
+ */
+function RetryTurnButton({
+  turnId,
+  messageId,
+}: {
+  turnId: TurnId | null | undefined;
+  messageId: string;
+}) {
+  const { onRetryTurn } = use(TimelineRowCtx);
+  const { isWorking, latestTurnId } = use(TimelineRowActivityCtx);
+  const [sent, setSent] = useState(false);
+  if (sent || !onRetryTurn || isWorking || !turnId || turnId !== latestTurnId) return null;
+  return (
+    <Button
+      size="xs"
+      variant="outline"
+      onPointerDown={stopRowToggle}
+      onClick={(event) => {
+        event.stopPropagation();
+        setSent(true);
+        // Offered again when the message could not be sent.
+        void onRetryTurn(messageId).then((resent) => {
+          if (!resent) setSent(false);
+        });
+      }}
+    >
+      Retry
+    </Button>
+  );
+}
+
 const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
@@ -4914,6 +4954,9 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
               ) : null}
             </p>
           </div>
+          {workEntry.retryMessageId ? (
+            <RetryTurnButton turnId={workEntry.turnId} messageId={workEntry.retryMessageId} />
+          ) : null}
           {showFailedIndicator &&
           !showDestructiveRowStyle &&
           !toolIconAcceptsTint(entryIconName, entryToolIcon) ? (

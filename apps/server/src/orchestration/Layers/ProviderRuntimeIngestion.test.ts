@@ -4865,6 +4865,66 @@ describe("ProviderRuntimeIngestion", () => {
     expect(completedPayload?.detail).toBe("Typecheck finished without errors.");
   });
 
+  it("names the message that started a turn on a warning that offers Retry", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("empty-reply-turn");
+    const base = {
+      provider: ProviderDriverKind.make("bob"),
+      threadId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+    };
+    // The prompt carries its client's clock, here well ahead of the server's.
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("start-empty-reply-turn"),
+      threadId,
+      message: {
+        messageId: asMessageId("retry-prompt"),
+        role: "user",
+        text: "Go",
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: "2026-01-01T00:05:00.000Z",
+    });
+    harness.setProviderSession({
+      provider: base.provider,
+      status: "running",
+      runtimeMode: "approval-required",
+      threadId,
+      createdAt: base.createdAt,
+      updatedAt: base.createdAt,
+      activeTurnId: turnId,
+    });
+    await harness.emitAndDrain([
+      { ...base, type: "turn.started", eventId: asEventId("empty-reply-started"), turnId },
+      {
+        ...base,
+        type: "runtime.warning",
+        eventId: asEventId("empty-reply-warning"),
+        turnId,
+        payload: { message: "Bob ended its turn without replying.", retryable: true },
+      },
+      {
+        ...base,
+        type: "runtime.warning",
+        eventId: asEventId("plain-warning"),
+        turnId,
+        payload: { message: "Something else." },
+      },
+    ]);
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    const payloadOf = (id: string) =>
+      thread?.activities.find((activity) => activity.id === id)?.payload as
+        | Record<string, unknown>
+        | undefined;
+    expect(payloadOf("empty-reply-warning")?.retryMessageId).toBe("retry-prompt");
+    expect(payloadOf("plain-warning")).not.toHaveProperty("retryMessageId");
+  });
+
   it("keeps a long task result in detail and whether it has a transcript", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

@@ -83,6 +83,8 @@ export interface ThreadFeedActivity {
 
 export interface WorkLogEntry {
   readonly questionAnswer?: UserInputAttachmentAnswerPayload;
+  /** On a provider's warning that its turn ended without a reply: the message Retry sends again. */
+  retryMessageId?: string;
   id: string;
   createdAt: string;
   turnId: TurnId | null;
@@ -281,6 +283,11 @@ export function isContextCompactionActivityGroup(
 
 function isUserInputActivityGroup(entry: ThreadFeedActivityGroup): boolean {
   return entry.activities.some((activity) => activity.workEntry.questionAnswer !== undefined);
+}
+
+/** Holds an offer to retry a turn that ended without a reply, which no fold hides. */
+function isRetryActivityGroup(entry: ThreadFeedActivityGroup): boolean {
+  return entry.activities.some((activity) => activity.workEntry.retryMessageId !== undefined);
 }
 
 function normalizeDraftAnswer(value: string | undefined): string | null {
@@ -530,6 +537,9 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     asTrimmedString(payload?.toolCallId) ?? asTrimmedString(asRecord(payload?.data)?.toolCallId);
   if (toolCallId) {
     entry.toolCallId = toolCallId;
+  }
+  if (activity.kind === "runtime.warning" && typeof payload?.retryMessageId === "string") {
+    entry.retryMessageId = payload.retryMessageId;
   }
   if (isTaskActivity && payload) {
     if (payload.agentKind !== "agent") {
@@ -1711,7 +1721,10 @@ function deriveThreadFeedTurnFolds(
           (entry) =>
             entry.id !== firstAssistantMessageId &&
             entry.id !== terminalAssistantMessageId &&
-            !(entry.type === "activity-group" && isUserInputActivityGroup(entry)),
+            !(
+              entry.type === "activity-group" &&
+              (isUserInputActivityGroup(entry) || isRetryActivityGroup(entry))
+            ),
         )
         .map((entry) => entry.id),
     );
@@ -2131,7 +2144,12 @@ function appendActivityGroupRows(
   };
   for (const activity of activities) {
     const spawn = activity.workEntry.agentSpawn;
-    if (activity.workEntry.tone !== "error" && spawn === undefined) {
+    // Failures, subagent batches and an offer to retry a turn get rows of their own.
+    if (
+      activity.workEntry.tone !== "error" &&
+      spawn === undefined &&
+      activity.workEntry.retryMessageId === undefined
+    ) {
       groupableRun.push(activity);
       continue;
     }

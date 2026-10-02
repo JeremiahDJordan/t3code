@@ -25,6 +25,8 @@ const bobSignedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
 const bobSignedOutFile = process.env.T3_ACP_BOB_SIGNED_OUT_FILE;
 const bobLicenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
 const bobExitOnPrompt = process.env.T3_ACP_BOB_EXIT_ON_PROMPT === "1";
+// Bob ends every turn having shown nothing, as when its backend sends back an empty reply.
+const bobEmptyReply = process.env.T3_ACP_BOB_EMPTY_REPLY === "1";
 // An older Bob that does not advertise `session/resume`.
 const bobNoResume = process.env.T3_ACP_BOB_NO_RESUME === "1";
 // Bob reaches its next tool's permission prompt before it acts on a cancel.
@@ -790,6 +792,10 @@ const program = Effect.gen(function* () {
           process.stderr.write("bob: fatal error\n");
           process.exit(1);
         });
+      }
+
+      if (bobEmptyReply) {
+        return { stopReason: "end_turn" };
       }
 
       if (completeFirstPromptOnCancel && promptCount === 1) {

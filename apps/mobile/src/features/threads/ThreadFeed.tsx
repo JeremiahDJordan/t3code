@@ -16,7 +16,9 @@ import type {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { checkInMessageLabel } from "@t3tools/contracts";
+import { checkInMessageLabel, CommandId, MessageId as MessageIdSchema } from "@t3tools/contracts";
+import { makeQueuedMessageMetadata } from "../../lib/commandMetadata";
+import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
 import {
@@ -1369,6 +1371,8 @@ function renderFeedEntry(
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
     readonly unsettledTurnId: TurnId | null;
     readonly isWorking: boolean;
+    readonly retryTurnId: TurnId | null;
+    readonly onRetryTurn: (messageId: string) => Promise<boolean>;
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey: string) => void;
@@ -1771,6 +1775,8 @@ function renderFeedEntry(
       onCopyRow={props.onCopyWorkRow}
       onToggleRow={props.onToggleWorkRow}
       renderImage={props.renderViewedImage}
+      retryTurnId={props.retryTurnId}
+      onRetryTurn={props.onRetryTurn}
     />
   );
 }
@@ -2285,6 +2291,43 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   // One definition of "still live", shared with the fold derivation: two
   // copies of this test are what let a row and the fold beside it disagree.
   const unsettledTurnId = deriveUnsettledTurnId(props.latestTurn ?? null);
+  // A warning that its turn ended without a reply offers Retry while that turn is the latest
+  // and the thread is idle. Retry sends the message that started it again through the outbox,
+  // as the composer would; the feed is read at call time so the row renderer stays stable.
+  const retryTurnId =
+    props.activeWorkStartedAt === null && props.latestTurn && props.latestTurn.state !== "running"
+      ? props.latestTurn.turnId
+      : null;
+  const feedRef = useRef(props.feed);
+  useEffect(() => {
+    feedRef.current = props.feed;
+  }, [props.feed]);
+  const onRetryTurn = useCallback(
+    async (messageId: string) => {
+      const prompt = feedRef.current.find(
+        (entry) => entry.type === "message" && entry.message.id === messageId,
+      );
+      if (prompt?.type !== "message") {
+        Alert.alert("Could not find the message to send again", "Send it again from the composer.");
+        return false;
+      }
+      const metadata = makeQueuedMessageMetadata();
+      return enqueueThreadOutboxMessage({
+        environmentId: props.environmentId,
+        threadId: props.threadId,
+        messageId: MessageIdSchema.make(metadata.messageId),
+        commandId: CommandId.make(metadata.commandId),
+        text: prompt.message.text,
+        ...(prompt.message.context ? { context: prompt.message.context } : {}),
+        attachments: [],
+        createdAt: metadata.createdAt,
+      }).then(
+        () => true,
+        () => false,
+      );
+    },
+    [props.environmentId, props.threadId],
+  );
   // LegendList does not invalidate visible rows when only the renderItem closure changes.
   // Include turn completion so unchanged message rows reveal their footer and spacing
   // even when the final message update arrives before the turn settles.
@@ -2770,6 +2813,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             terminalAssistantMessageIds,
             unsettledTurnId,
             isWorking: props.activeWorkStartedAt !== null,
+            retryTurnId,
+            onRetryTurn,
             onCopyWorkRow,
             onToggleWorkGroup,
             onToggleWorkRow,
@@ -2815,6 +2860,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       workGroupScrollPositions,
       terminalAssistantMessageIds,
       unsettledTurnId,
+      retryTurnId,
+      onRetryTurn,
       props.activeWorkStartedAt,
       iconSubtleColor,
       screenColor,

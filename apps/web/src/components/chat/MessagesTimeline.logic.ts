@@ -343,6 +343,7 @@ function isActivityEntry(entry: TimelineEntry): entry is ActivityEntry {
     : entry.kind === "work" &&
         entry.entry.agentSpawn === undefined &&
         entry.entry.questionAnswer === undefined &&
+        entry.entry.retryMessageId === undefined &&
         entry.entry.sourceActivityKind !== "context-compaction" &&
         entry.entry.tone !== "error";
 }
@@ -755,10 +756,13 @@ function deriveTurnFolds(input: {
       ) {
         continue;
       }
-      // User input and subagent batches stay visible after their turn settles.
+      // User input, subagent batches and an offer to retry a turn that ended without a reply
+      // stay visible after their turn settles.
       if (
         entry.kind === "work" &&
-        (entry.entry.questionAnswer !== undefined || entry.entry.agentSpawn !== undefined)
+        (entry.entry.questionAnswer !== undefined ||
+          entry.entry.agentSpawn !== undefined ||
+          entry.entry.retryMessageId !== undefined)
       ) {
         continue;
       }
@@ -1221,6 +1225,7 @@ export function deriveMessagesTimelineRows(input: {
       if (
         timelineEntry.entry.agentSpawn !== undefined ||
         timelineEntry.entry.questionAnswer !== undefined ||
+        timelineEntry.entry.retryMessageId !== undefined ||
         timelineEntry.entry.tone === "error"
       ) {
         const spawn = timelineEntry.entry.agentSpawn;
@@ -1247,6 +1252,7 @@ export function deriveMessagesTimelineRows(input: {
           nextEntry.kind !== "work" ||
           nextEntry.entry.agentSpawn !== undefined ||
           nextEntry.entry.questionAnswer !== undefined ||
+          nextEntry.entry.retryMessageId !== undefined ||
           nextEntry.entry.sourceActivityKind === "context-compaction" ||
           nextEntry.entry.tone === "error" ||
           activeWorkEntryIds.has(nextEntry.id) ||

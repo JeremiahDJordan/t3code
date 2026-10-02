@@ -1771,6 +1771,60 @@ describe("buildThreadFeed", () => {
     expect(serializedToolOutputs).toBe(1);
   });
 
+  it("keeps an offer to retry a turn that ended without a reply out of the turn fold", () => {
+    const turnId = TurnId.make("empty-reply-turn");
+    const thread = makeThread({
+      id: ThreadId.make("thread-retry"),
+      projectId: ProjectId.make("project-1"),
+      title: "Empty reply",
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:08.000Z",
+        assistantMessageId: null,
+      },
+      messages: [],
+      activities: [
+        makeActivity({
+          id: EventId.make("tool-completed"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Read files",
+          createdAt: "2026-04-01T00:00:05.000Z",
+          turnId,
+          payload: { title: "Read files", itemType: "file_read", status: "completed" },
+        }),
+        makeActivity({
+          id: EventId.make("empty-reply-warning"),
+          kind: "runtime.warning",
+          tone: "info",
+          summary: "Bob ended its turn without replying.",
+          createdAt: "2026-04-01T00:00:07.000Z",
+          turnId,
+          payload: {
+            message: "Bob ended its turn without replying.",
+            retryMessageId: "retry-prompt",
+          },
+        }),
+      ],
+    });
+
+    const collapsed = deriveThreadFeedPresentation(
+      buildThreadFeed(thread),
+      thread.latestTurn,
+      new Set(),
+    );
+    expect(
+      collapsed.some(
+        (entry) =>
+          entry.type === "activity-group" &&
+          entry.activities.some((activity) => activity.workEntry.retryMessageId === "retry-prompt"),
+      ),
+    ).toBe(true);
+  });
+
   it("keeps the first and terminal assistant messages visible around settled work", () => {
     const turnId = TurnId.make("turn-1");
     const thread = makeThread({

@@ -2559,6 +2559,20 @@ const make = Effect.gen(function* () {
         }
       }
 
+      // Retry on a turn its provider ended without replying sends the message that started the
+      // turn again. Named here by id, since that message carries its client's clock.
+      let retryMessageId: MessageId | undefined;
+      const warnedTurnId = toTurnId(event.turnId);
+      if (event.type === "runtime.warning" && event.payload.retryable && warnedTurnId) {
+        const turn = yield* projectionTurnRepository.getByTurnId({
+          threadId: thread.id,
+          turnId: warnedTurnId,
+        });
+        retryMessageId = Option.isSome(turn)
+          ? (turn.value.pendingMessageId ?? undefined)
+          : undefined;
+      }
+
       let activityEvent = event;
       if (
         isCompactedThreadState &&
@@ -2621,7 +2635,13 @@ const make = Effect.gen(function* () {
               type: "thread.activity.append",
               commandId,
               threadId: thread.id,
-              activity,
+              activity:
+                retryMessageId === undefined
+                  ? activity
+                  : {
+                      ...activity,
+                      payload: { ...(activity.payload as object), retryMessageId },
+                    },
               createdAt: activity.createdAt,
             }),
           ),

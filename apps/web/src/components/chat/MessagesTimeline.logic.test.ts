@@ -3370,6 +3370,45 @@ describe("deriveMessagesTimelineRows", () => {
     });
   });
 
+  it("keeps an offer to retry a turn that ended without a reply out of the turn fold", () => {
+    const turnId = TurnId.make("empty-reply-turn");
+    const time = (second: number) => new Date(Date.UTC(2026, 8, 8, 0, 0, second)).toISOString();
+    const tool: WorkLogEntry = {
+      id: "tool-1",
+      createdAt: time(1),
+      turnId,
+      tone: "tool",
+      label: "Ran command",
+      command: "git status",
+      toolCallId: "call-1",
+      toolLifecycleStatus: "completed",
+      sourceActivityKind: "tool.completed",
+    };
+    const warning: WorkLogEntry = {
+      id: "empty-reply-warning",
+      createdAt: time(2),
+      turnId,
+      tone: "info",
+      label: "Bob ended its turn without replying.",
+      sourceActivityKind: "runtime.warning",
+      retryMessageId: "retry-prompt",
+    };
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: deriveTimelineEntries([], [], [tool, warning]),
+      latestTurn: { turnId, state: "completed", startedAt: time(0), completedAt: time(3) },
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(
+      rows.some(
+        (row) =>
+          (row.kind === "work" || row.kind === "work-live") && row.groupedEntries.includes(warning),
+      ),
+    ).toBe(true);
+  });
+
   it("keeps user input in its own row through tool grouping and turn folding", () => {
     const turnId = TurnId.make("answer-turn");
     const time = (second: number) => new Date(Date.UTC(2026, 8, 8, 0, 0, second)).toISOString();
