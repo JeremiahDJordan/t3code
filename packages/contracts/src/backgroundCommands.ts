@@ -70,6 +70,12 @@ export type ThreadBackgroundCommand = typeof ThreadBackgroundCommand.Type;
 export const ThreadBackgroundCommandsInput = Schema.Struct({ threadId: ThreadId });
 export type ThreadBackgroundCommandsInput = typeof ThreadBackgroundCommandsInput.Type;
 
+/** The environment's threads with a command running, for thread lists. */
+export const BackgroundCommandThreadsInput = Schema.Struct({});
+export type BackgroundCommandThreadsInput = typeof BackgroundCommandThreadsInput.Type;
+export const BackgroundCommandThreads = Schema.Array(ThreadId);
+export type BackgroundCommandThreads = typeof BackgroundCommandThreads.Type;
+
 export const BackgroundCommandInput = Schema.Struct({ backgroundCommandId: BackgroundCommandId });
 
 export const SetBackgroundCommandMutedInput = Schema.Struct({

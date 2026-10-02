@@ -2843,6 +2843,7 @@ const layerWsRpc = (
           checkInScheduler.cancel(input.checkInId).pipe(Effect.map((cancelled) => ({ cancelled }))),
         [WS_METHODS.subscribeThreadBackgroundCommands]: (input) =>
           backgroundCommands.stream(input.threadId),
+        [WS_METHODS.subscribeBackgroundCommandThreads]: () => backgroundCommands.runningThreads,
         [WS_METHODS.backgroundCommandStop]: (input) =>
           backgroundCommands
             .stop(input.backgroundCommandId, "user")
