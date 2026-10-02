@@ -2182,6 +2182,11 @@ export function GeneralSettingsPanel() {
     connectedEnvironments.every(
       (target) => target.serverConfig?.environment.capabilities.threadRestartContinuation === true,
     );
+  const supportsInlineSubagentSteps =
+    connectedEnvironments.length > 0 &&
+    connectedEnvironments.every(
+      (target) => target.serverConfig?.environment.capabilities.inlineSubagentSteps === true,
+    );
 
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
@@ -2506,6 +2511,41 @@ export function GeneralSettingsPanel() {
                 }}
               />
             </>
+          }
+        />
+        <SettingsRow
+          {...searchableSetting("subagent-steps-in-other-apps")}
+          serverScoped
+          settingKeys={["inlineSubagentSteps"]}
+          description="Send a finished subagent's earlier steps with its result, so T3 Code apps that can't load them, such as the App Store app, show them too. Makes threads larger in every app."
+          status={
+            !supportsInlineSubagentSteps
+              ? "All selected connected environments must support subagent steps in other apps."
+              : undefined
+          }
+          resetAction={
+            supportsInlineSubagentSteps &&
+            settings.inlineSubagentSteps !== DEFAULT_UNIFIED_SETTINGS.inlineSubagentSteps ? (
+              <SettingResetButton
+                label="subagent steps in other apps"
+                onClick={() =>
+                  updateSettings({
+                    inlineSubagentSteps: DEFAULT_UNIFIED_SETTINGS.inlineSubagentSteps,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <ScopedSwitch
+              settingKeys={["inlineSubagentSteps"]}
+              checked={settings.inlineSubagentSteps}
+              disabled={!supportsInlineSubagentSteps}
+              onCheckedChange={(checked) =>
+                updateSettings({ inlineSubagentSteps: Boolean(checked) })
+              }
+              aria-label="Subagent steps in other apps"
+            />
           }
         />
         <SettingsRow

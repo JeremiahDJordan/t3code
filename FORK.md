@@ -357,6 +357,16 @@ is how the owner keeps working when one account runs out of Bobcoins. The turns 
 switch bill the other account. An instance whose environment sets another `HOME` reads
 another database and stays separate.
 
+### Add subagent steps to results for apps that can't load them (owner, 2026-10-02)
+
+Upstream clients, such as the App Store app, read a subagent's result only from its
+`task.completed` activity's `detail`, and cannot call `provider.readTaskTranscript`. With
+**Subagent steps in other apps** (`inlineSubagentSteps`) on, ingestion reads the steps once,
+when the subagent finishes, and writes them as text after the result in `detail`; `result`
+keeps the result alone for fork clients. It is off by default because every client then loads
+the steps with each thread. The App Store app's expanded card shows only each subagent's
+first six lines (holding it copies everything); the fork's mobile card shows all of it.
+
 ### Leave the remaining nits
 
 A project-only custom mode appears in every project's Mode list (it warns and runs
@@ -401,6 +411,11 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   `ProviderService.readTaskTranscript` with its `ws.ts` handler, and in
   `ClaudeAdapter.ts` the `hasTranscript` on `task_notification` and `readTaskTranscript`.
   Losing the copy in ingestion hides **Show earlier steps** without an error.
+  `inlineSubagentSteps` in contracts `settings.ts` (setting and patch) and `environment.ts`,
+  `ServerEnvironment.ts`, its read in ingestion, web `SettingsPanels.tsx` and mobile
+  `SettingsServerControlsRouteScreen.tsx`. Losing `payload.result` in `subagentRuntime.ts`
+  shows the steps twice in **Agents**; mobile `thread-work-log.tsx` shows a member's whole
+  `detail` when the card expands.
 - Check-ins: `server.ts` (`CheckInScheduler.layer`), `OrchestrationReactor.ts`
   (starting it; without that nothing is ever delivered), `McpHttpServer.ts` (the
   toolkit), `ProviderService.ts` (the `check-ins` capability), `ServerEnvironment.ts`

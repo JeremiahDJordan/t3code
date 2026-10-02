@@ -168,6 +168,13 @@ On web and desktop, use **Agents** to follow work delegated to subagents. Open a
 finished subagent to read its result; for Claude and Bob, **Show earlier steps** above the
 result lists its prompt, tool calls and notes.
 
+On mobile, expand a subagent card to read each subagent's result. To see the earlier steps
+there too, including in the App Store app, turn on **Settings → General → Subagent steps in
+other apps** for the environment; on mobile it is under **Agent behavior**. The steps then
+follow each result that finishes from then on. They make threads larger in every app, and the
+App Store app shows only the first lines of each subagent; press and hold the card to copy all
+of it.
+
 Expand a tool call in the conversation to see its full command and output.
 Summaries shorten shell wrappers and can still describe the latest call after it
 finishes; the call's own result shows its status.

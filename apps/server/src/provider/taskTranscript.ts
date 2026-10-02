@@ -58,3 +58,32 @@ export function finishTaskTranscript(
     omittedEntries: entries.length - head.length - tail.length,
   };
 }
+
+/**
+ * A finished task's steps as plain text under an "Earlier steps" heading, for clients that show
+ * only its result's text. Each step starts with `▸`; undefined when there are none.
+ */
+export function earlierStepsText(transcript: ProviderReadTaskTranscriptResult): string | undefined {
+  if (transcript.entries.length === 0) return undefined;
+  const blocks = transcript.entries.map((entry) => {
+    switch (entry._tag) {
+      case "prompt":
+        return `▸ Prompt\n${entry.text}`;
+      case "message":
+        return `▸ Note\n${entry.text}`;
+      case "tool":
+        return [
+          `▸ ${entry.title}${entry.failed ? " (failed)" : ""}`,
+          ...(entry.input ? [`Input:\n${entry.input}`] : []),
+          ...(entry.output ? [`Output:\n${entry.output}`] : []),
+        ].join("\n");
+    }
+  });
+  const omitted = transcript.omittedEntries ?? 0;
+  if (omitted > 0) {
+    // finishTaskTranscript leaves them out between the prompt and the newest steps.
+    const at = transcript.entries[0]?._tag === "prompt" ? 1 : 0;
+    blocks.splice(at, 0, `▸ ${omitted} older ${omitted === 1 ? "step" : "steps"} not shown`);
+  }
+  return ["── Earlier steps ──", ...blocks].join("\n\n");
+}

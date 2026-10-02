@@ -1146,10 +1146,10 @@ export const ThreadAgentSpawnCard = memo(function ThreadAgentSpawnCard(props: {
                   <Text className="shrink-0 text-2xs text-foreground-muted">{member.status}</Text>
                 </View>
                 {member.detail ? (
+                  // Whole: the result, and its earlier steps when the server adds them.
                   <Text
                     selectable
                     className="pl-3 font-mono text-2xs leading-normal text-foreground-muted"
-                    numberOfLines={expanded ? 6 : 1}
                   >
                     {member.detail}
                   </Text>
