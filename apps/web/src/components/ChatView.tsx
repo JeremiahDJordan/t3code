@@ -39,6 +39,7 @@ import {
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
+import { useBackgroundCommandBannerItem, useCheckInBannerItem } from "./chat/useCheckInBannerItem";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
 import {
@@ -7462,8 +7463,19 @@ export default function ChatView(props: ChatViewProps) {
           },
         })
       : null;
+  const checkInBannerItem = useCheckInBannerItem(
+    isServerThread ? routeThreadRef : null,
+    serverConfig?.environment.capabilities.threadCheckIns === true,
+  );
+  const backgroundCommandBannerItem = useBackgroundCommandBannerItem(
+    isServerThread ? routeThreadRef : null,
+    serverConfig?.environment.capabilities.threadBackgroundCommands === true,
+  );
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
+    const checkInItems = [backgroundCommandBannerItem, checkInBannerItem].filter(
+      (item): item is ComposerBannerStackItem => item !== null,
+    );
     const backgroundWorkItems = [
       childInputBannerItem,
       goalBannerItem,
@@ -7477,6 +7489,7 @@ export default function ChatView(props: ChatViewProps) {
         ...limitRecoveryItems,
         ...usageLimitsItems,
         ...projectCloneItems,
+        ...checkInItems,
         ...systemComposerBannerItems,
         ...backgroundWorkItems,
       ];
@@ -7486,6 +7499,7 @@ export default function ChatView(props: ChatViewProps) {
       ...limitRecoveryItems,
       ...usageLimitsItems,
       ...projectCloneItems,
+      ...checkInItems,
       ...systemComposerBannerItems,
       ...backgroundWorkItems,
       {
@@ -7537,9 +7551,11 @@ export default function ChatView(props: ChatViewProps) {
     limitRecoveryBanner,
     handleRestoreThreadBranchStable,
     isRestoringThreadBranch,
+    backgroundCommandBannerItem,
     backgroundWorkBannerItem,
     childInputBannerItem,
     goalBannerItem,
+    checkInBannerItem,
     localCheckoutBranchMismatch,
     projectCloneBannerItem,
     showBranchMismatchBanner,

@@ -14,6 +14,7 @@ import {
 import { discardComposerDraft } from "../lib/discardComposerDraft";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { useRunsBackgroundCommand } from "~/state/checkIns";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
@@ -1170,7 +1171,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     : null;
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  // A background command the agent left running keeps an idle thread Waiting.
+  const runsBackgroundCommand = useRunsBackgroundCommand(thread.environmentId, thread.id);
+  const resolvedStatus = resolveSidebarThreadStatus(thread);
+  const status = resolvedStatus === "ready" && runsBackgroundCommand ? "waiting" : resolvedStatus;
   const isInFlight =
     status === "working" || status === "waiting" || status === "approval" || status === "input";
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
