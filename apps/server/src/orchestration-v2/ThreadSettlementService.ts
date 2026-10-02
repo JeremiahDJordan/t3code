@@ -15,6 +15,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -242,6 +243,15 @@ export function resolveAutoSettlementAt(input: {
     : null;
 }
 
+/**
+ * Server-owned work outside provider rosters, such as a command the server runs for an agent,
+ * that keeps its threads from settling automatically. Optional: without it no thread is held.
+ */
+export class ThreadSettlementHolds extends Context.Service<
+  ThreadSettlementHolds,
+  { readonly heldThreadIds: Effect.Effect<ReadonlySet<ThreadId>> }
+>()("t3/orchestration-v2/ThreadSettlementService/ThreadSettlementHolds") {}
+
 export class ThreadSettlementServiceV2 extends Context.Service<
   ThreadSettlementServiceV2,
   {
@@ -303,6 +313,7 @@ export const make = Effect.gen(function* () {
   // Settling a settled thread re-emits thread.settled with the same settledAt,
   // so this keeps the settle action to one run per settlement.
   const settleActionRunAt = new Map<ThreadId, number>();
+  const holds = yield* Effect.serviceOption(ThreadSettlementHolds);
 
   const sweep = Effect.fn("ThreadSettlementServiceV2.sweep")(function* (
     mergedPullRequest: PullRequestService.PullRequestMergeEvent | null,
@@ -322,7 +333,10 @@ export const make = Effect.gen(function* () {
     // the merged pull request: most threads carry no link and settle from
     // their branch lookup, which would otherwise wait for the next minute's
     // sweep on a possibly stale cached answer.
-    const candidates = threads.filter((thread) => isAutoSettlementCandidate(thread, nowMs));
+    const held = Option.isSome(holds) ? yield* holds.value.heldThreadIds : new Set<ThreadId>();
+    const candidates = threads.filter(
+      (thread) => isAutoSettlementCandidate(thread, nowMs) && !held.has(thread.id),
+    );
 
     const settleThread = Effect.fn("ThreadSettlementServiceV2.settleThread")(
       function* (thread: (typeof candidates)[number], pullRequest: SettlementPullRequest | null) {

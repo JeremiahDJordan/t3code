@@ -211,6 +211,8 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
+import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -1256,6 +1258,8 @@ const layerWsRpc = (
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
+      const checkInScheduler = yield* CheckInScheduler.CheckInScheduler;
+      const backgroundCommands = yield* BackgroundCommands.BackgroundCommands;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
@@ -2799,6 +2803,23 @@ const layerWsRpc = (
           worktreeSetupTracker
             .cancel(input.threadId)
             .pipe(Effect.map((cancelled) => ({ cancelled }))),
+        [WS_METHODS.subscribeThreadCheckIns]: (input) => checkInScheduler.stream(input.threadId),
+        [WS_METHODS.checkInCancel]: (input) =>
+          checkInScheduler
+            .cancel(input.checkInId)
+            .pipe(Effect.map((cancelled) => ({ cancelled }))),
+        [WS_METHODS.subscribeThreadBackgroundCommands]: (input) =>
+          backgroundCommands.stream(input.threadId),
+        [WS_METHODS.backgroundCommandStop]: (input) =>
+          backgroundCommands
+            .stop(input.backgroundCommandId, "user")
+            .pipe(Effect.map((stopping) => ({ stopping }))),
+        [WS_METHODS.backgroundCommandSetMuted]: (input) =>
+          backgroundCommands
+            .setMuted(input.backgroundCommandId, input.muted)
+            .pipe(Effect.map((updated) => ({ updated }))),
+        [WS_METHODS.backgroundCommandOpenTerminal]: (input) =>
+          backgroundCommands.openTerminal(input.backgroundCommandId),
         [WS_METHODS.vcsRefreshStatus]: (input) => vcsStatusBroadcaster.refreshStatus(input.cwd),
         [WS_METHODS.vcsPull]: (input) =>
           gitWorkflow.pullCurrentBranch(input.cwd).pipe(

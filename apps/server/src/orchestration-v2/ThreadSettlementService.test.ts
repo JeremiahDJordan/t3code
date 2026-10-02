@@ -743,6 +743,33 @@ describe("ThreadSettlementServiceV2 worker", () => {
     ),
   );
 
+  it.effect("keeps a thread that server-owned work holds", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const held = makeThread("running-command", {
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-08-25T00:00:00.000Z"),
+        });
+        const idle = makeThread("idle", {
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-08-25T00:00:00.000Z"),
+        });
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([held, idle]),
+          settings: { ...DEFAULT_SERVER_SETTINGS, sidebarAutoSettleAfterDays: 2 },
+        });
+        const holds = Layer.succeed(ThreadSettlementService.ThreadSettlementHolds, {
+          heldThreadIds: Effect.succeed(new Set([held.id])),
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* ThreadSettlementService.ThreadSettlementServiceV2;
+          yield* startHarness(service, fixture.activation, fixture.snapshotReads);
+          const commands = yield* Ref.get(fixture.commands);
+          expect(commands.map((command) => command.threadId)).toEqual([idle.id]);
+        }).pipe(Effect.provide(fixture.layer.pipe(Layer.provide(holds))));
+      }),
+    ),
+  );
+
   it.effect("dispatches the last activity time with the v2 snapshot guard", () =>
     Effect.scoped(
       Effect.gen(function* () {

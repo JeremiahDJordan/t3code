@@ -115,6 +115,19 @@ import {
   WorktreeSetupSubscribeInput,
 } from "./worktreeSetup.ts";
 import {
+  CancelCheckInInput,
+  CheckInError,
+  ThreadCheckIn,
+  ThreadCheckInsInput,
+} from "./checkIns.ts";
+import {
+  BackgroundCommandError,
+  BackgroundCommandInput,
+  SetBackgroundCommandMutedInput,
+  ThreadBackgroundCommand,
+  ThreadBackgroundCommandsInput,
+} from "./backgroundCommands.ts";
+import {
   GitActionProgressEvent,
   VcsSwitchRefInput,
   VcsSwitchRefResult,
@@ -555,6 +568,12 @@ export const WS_METHODS = {
   subscribeVcsStatus: "subscribeVcsStatus",
   subscribeWorktreeSetup: "subscribeWorktreeSetup",
   worktreeSetupCancel: "worktreeSetup.cancel",
+  subscribeThreadCheckIns: "subscribeThreadCheckIns",
+  checkInCancel: "checkIns.cancel",
+  subscribeThreadBackgroundCommands: "subscribeThreadBackgroundCommands",
+  backgroundCommandStop: "backgroundCommands.stop",
+  backgroundCommandSetMuted: "backgroundCommands.setMuted",
+  backgroundCommandOpenTerminal: "backgroundCommands.openTerminal",
   subscribeTerminalEvents: "subscribeTerminalEvents",
   subscribeTerminalMetadata: "subscribeTerminalMetadata",
   subscribePreviewEvents: "subscribePreviewEvents",
@@ -1316,6 +1335,54 @@ const WsWorktreeSetupCancelRpc = Rpc.make(WS_METHODS.worktreeSetupCancel, {
   error: EnvironmentAuthorizationError,
 });
 
+/** A thread's pending check-ins and waits: the whole list first, then again after every change. */
+const WsSubscribeThreadCheckInsRpc = Rpc.make(WS_METHODS.subscribeThreadCheckIns, {
+  payload: ThreadCheckInsInput,
+  success: Schema.Array(ThreadCheckIn),
+  error: EnvironmentAuthorizationError,
+  stream: true,
+});
+
+const WsCheckInCancelRpc = Rpc.make(WS_METHODS.checkInCancel, {
+  payload: CancelCheckInInput,
+  success: Schema.Struct({ cancelled: Schema.Boolean }),
+  error: Schema.Union([CheckInError, EnvironmentAuthorizationError]),
+});
+
+/**
+ * A thread's background commands that are running or whose end the agent has not been told
+ * yet: the whole list first, then again after every change.
+ */
+const WsSubscribeThreadBackgroundCommandsRpc = Rpc.make(
+  WS_METHODS.subscribeThreadBackgroundCommands,
+  {
+    payload: ThreadBackgroundCommandsInput,
+    success: Schema.Array(ThreadBackgroundCommand),
+    error: EnvironmentAuthorizationError,
+    stream: true,
+  },
+);
+
+const WsBackgroundCommandStopRpc = Rpc.make(WS_METHODS.backgroundCommandStop, {
+  payload: BackgroundCommandInput,
+  success: Schema.Struct({ stopping: Schema.Boolean }),
+  error: Schema.Union([BackgroundCommandError, EnvironmentAuthorizationError]),
+});
+
+/** Holds back or resumes a command's status updates and matching-line messages. */
+const WsBackgroundCommandSetMutedRpc = Rpc.make(WS_METHODS.backgroundCommandSetMuted, {
+  payload: SetBackgroundCommandMutedInput,
+  success: Schema.Struct({ updated: Schema.Boolean }),
+  error: Schema.Union([BackgroundCommandError, EnvironmentAuthorizationError]),
+});
+
+/** Opens (or reuses) a thread terminal attached to the command's tmux session. */
+const WsBackgroundCommandOpenTerminalRpc = Rpc.make(WS_METHODS.backgroundCommandOpenTerminal, {
+  payload: BackgroundCommandInput,
+  success: Schema.Struct({ terminalId: TrimmedNonEmptyString }),
+  error: Schema.Union([BackgroundCommandError, EnvironmentAuthorizationError]),
+});
+
 const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
   payload: GitRunStackedActionInput,
   success: GitActionProgressEvent,
@@ -1931,6 +1998,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
   WsWorktreeSetupCancelRpc,
+  WsSubscribeThreadCheckInsRpc,
+  WsCheckInCancelRpc,
+  WsSubscribeThreadBackgroundCommandsRpc,
+  WsBackgroundCommandStopRpc,
+  WsBackgroundCommandSetMutedRpc,
+  WsBackgroundCommandOpenTerminalRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,
   WsGitRunStackedActionRpc,

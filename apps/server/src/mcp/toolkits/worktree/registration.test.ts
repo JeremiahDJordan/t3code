@@ -11,6 +11,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { HttpBody, HttpClient, HttpRouter } from "effect/http";
 
+import * as BackgroundCommands from "../../../checkIns/BackgroundCommands.ts";
+import * as CheckInScheduler from "../../../checkIns/CheckInScheduler.ts";
 import * as ServerEnvironment from "../../../environment/ServerEnvironment.ts";
 import * as GitWorkflowService from "../../../git/GitWorkflowService.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -43,6 +45,8 @@ const layerStubServices = Layer.mergeAll(
   Layer.mock(GitWorkflowService.GitWorkflowService)({}),
   Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+  Layer.mock(CheckInScheduler.CheckInScheduler)({}),
+  Layer.mock(BackgroundCommands.BackgroundCommands)({}),
 );
 
 const ToolsListPayload = Schema.fromJsonString(
