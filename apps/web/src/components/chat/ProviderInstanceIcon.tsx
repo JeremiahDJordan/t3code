@@ -5,6 +5,7 @@ import { providerInstanceInitials } from "@t3tools/client-runtime/state/provider
 import { ProviderDriverKind } from "@t3tools/contracts";
 import {
   AntigravityIcon,
+  BobIcon,
   ClaudeAI,
   CursorIcon,
   GrokIcon,
@@ -28,6 +29,7 @@ const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
   [ProviderDriverKind.make("cursor")]: CursorIcon,
   [ProviderDriverKind.make("grok")]: GrokIcon,
   [ProviderDriverKind.make("antigravity")]: AntigravityIcon,
+  [ProviderDriverKind.make("bob")]: BobIcon,
   [ProviderDriverKind.make("pi")]: PiAgentIcon,
 };
 

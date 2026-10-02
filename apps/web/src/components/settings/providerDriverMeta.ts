@@ -1,6 +1,7 @@
 import {
   AcpRegistrySettings,
   AntigravitySettings,
+  BobSettings,
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
@@ -80,6 +81,21 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     value: ProviderDriverKind.make("opencode"),
     label: "OpenCode",
     settingsSchema: OpenCodeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("bob"),
+    label: "Bob",
+    settingsSchema: BobSettings,
+    badgeLabel: "Early Access",
+    environmentFields: [
+      {
+        name: "BOB_API_KEY",
+        label: "Bob API key",
+        description: "Used when the sign-in method is API key.",
+        placeholder: "Paste API key",
+        sensitive: true,
+      },
+    ],
   },
   {
     value: ProviderDriverKind.make("antigravity"),

@@ -24,6 +24,17 @@ export const ServerProviderUsageWindow = Schema.Struct({
   usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
   resetsAt: Schema.optional(IsoDateTime),
   windowDurationMins: Schema.optional(NonNegativeInt),
+  /**
+   * The window in the provider's own unit, for providers that report amounts
+   * as well as a share, such as Bob's monthly Bobcoin allowance.
+   */
+  amount: Schema.optional(
+    Schema.Struct({
+      used: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)),
+      limit: Schema.Finite.check(Schema.isGreaterThan(0)),
+      unit: TrimmedNonEmptyString,
+    }),
+  ),
 });
 export type ServerProviderUsageWindow = typeof ServerProviderUsageWindow.Type;
 
