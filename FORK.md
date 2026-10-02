@@ -348,6 +348,15 @@ would count a team's budget twice, since Bobcoin budgets belong to teams, and th
 key, the team, is not in the provider snapshot. Separate logins per instance on one
 machine are rare enough to keep the shared key.
 
+### Let a thread switch between Bob instances on one task database (owner, 2026-10-01)
+
+A Bob session is a task in Bob's task database, and any instance reading that database
+resumes it, whatever it signs in with. So Bob's continuation key is the database path,
+not the instance: a thread moves between an SSO instance and an API-key instance, which
+is how the owner keeps working when one account runs out of Bobcoins. The turns after a
+switch bill the other account. An instance whose environment sets another `HOME` reads
+another database and stays separate.
+
 ### Leave the remaining nits
 
 A project-only custom mode appears in every project's Mode list (it warns and runs
