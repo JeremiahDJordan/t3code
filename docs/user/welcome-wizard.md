@@ -47,8 +47,9 @@ terminal metadata while the terminal process can use them.
 
 ## Import your projects
 
-T3 Code finds directories that Claude Code or Codex has used. Git repositories
-are listed first, newest activity on top. When the remote is on GitHub, the
+T3 Code finds directories that Claude Code, Codex, or Bob has used. Bob tasks
+appear only once a Bob instance is enabled in **Settings → Providers**. Git
+repositories are listed first, newest activity on top. When the remote is on GitHub, the
 group shows the repository as `owner/name`. Clones with the same remote share
 one group. Directories that are not git repositories sit under "Other folders".
 
@@ -61,8 +62,10 @@ offered.
 A large or malformed history can reach the scan limit. T3 Code keeps the
 projects it found and warns when projects or conversations may be missing.
 
-Imported projects include Codex and Claude conversations active within the last
-30 days. You can continue those conversations in T3 Code.
+Imported projects include Claude, Codex, and Bob conversations active within the
+last 30 days. You can continue those conversations in T3 Code. For Bob, only
+top-level tasks that are not archived are imported, and tasks you already
+continue in a T3 Code thread are not imported again.
 
 Conversation import is best effort. T3 Code keeps the first user prompt and the
 newest remaining visible user and assistant messages, with 200 messages total.
@@ -80,3 +83,10 @@ remaining history.
 
 You can continue without configuring agents or importing projects, or return to an earlier step
 using the setup progress bar. Navigation pauses while an import is running.
+
+## Import later
+
+To import projects and conversations after setup, for example after enabling
+Bob, choose **Import projects and history…** in the command palette, or select
+**Import…** in **Settings → General → Projects & threads**. Setup opens on the
+import step for your connected computers.
