@@ -63,8 +63,10 @@ call, and **Auto-accept edits** approves file edits. **Supervised** asks before 
 acts, and so does **Auto**, since Bob has no automatic reviewer.
 
 A message you send while Bob is working follows **Settings → General → Follow-up
-behavior**. Queue holds it until Bob finishes its turn. Steer stops Bob's turn,
-including a tool call it is running, and starts again with your message.
+behavior**. Queue holds it until Bob finishes its turn. Steer lets Bob finish the
+tool calls it is running, then stops it and continues the same turn with your
+message: Bob keeps what those tool calls did and drops only the reply it was
+writing. **Stop** still stops Bob at once.
 
 If Bob ends a turn without replying, which its backend sometimes does with a long
 conversation, the thread says so and offers **Retry**, which sends your message
