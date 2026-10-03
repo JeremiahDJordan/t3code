@@ -55,6 +55,7 @@ import {
   FileSearchIcon,
   FolderGit2Icon,
   FolderIcon,
+  FolderInputIcon,
   FolderPlusIcon,
   MessageSquareDashedIcon,
   LinkIcon,
@@ -144,6 +145,7 @@ import {
   isMacPlatform,
   isWindowsPlatform,
   newProjectId,
+  randomUUID,
 } from "../lib/utils";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../threadRoutes";
@@ -2118,6 +2120,33 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:import-projects",
+    searchTerms: [
+      "import",
+      "projects",
+      "history",
+      "conversations",
+      "sessions",
+      "claude",
+      "codex",
+      "bob",
+      "onboarding",
+      "welcome",
+      "setup",
+    ],
+    title: "Import projects and history…",
+    icon: <FolderInputIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({
+        to: "/welcome",
+        search: { step: "import" },
+        state: { welcomeImportRequest: randomUUID() },
+      });
+    },
+  });
 
   const changeThemeItem: CommandPaletteSubmenuItem = {
     kind: "submenu",

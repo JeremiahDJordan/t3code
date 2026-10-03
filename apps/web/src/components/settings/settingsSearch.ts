@@ -484,6 +484,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["base directory folder browser path home"],
   },
   {
+    id: "import-projects",
+    title: "Import projects and history",
+    to: "/settings/general",
+    searchTerms: ["conversations sessions claude code codex bob onboarding welcome setup"],
+  },
+  {
     id: "unpin-confirmation",
     title: "Unpin confirmation",
     to: "/settings/general",

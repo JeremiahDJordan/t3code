@@ -54,9 +54,9 @@ vi.mock("../../state/server", () => ({
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: (value: unknown) => value }));
 vi.mock("../../onboarding/useProjectScans", () => ({
-  useProjectScans: () => [
-    {
-      environmentId: "test-env",
+  useProjectScans: (environmentIds: readonly string[]) =>
+    environmentIds.map((environmentId) => ({
+      environmentId,
       isPending: false,
       error: null,
       refresh: mocks.refresh,
@@ -73,8 +73,7 @@ vi.mock("../../onboarding/useProjectScans", () => ({
           },
         ],
       },
-    },
-  ],
+    })),
 }));
 vi.mock("../../connection/onboarding", () => ({ connectPairing: vi.fn() }));
 vi.mock("../../state/terminal", () => ({ terminalEnvironment: {} }));
@@ -162,6 +161,18 @@ it("enters the workspace after a partial import and warns after navigation finis
   expect(mocks.toast.mock.invocationCallOrder[0]).toBeGreaterThan(
     onDone.mock.invocationCallOrder[0]!,
   );
+});
+
+it("opens on import and scans the connected computers without stepping through setup", async () => {
+  const onDone = vi.fn();
+  await act(async () =>
+    root.render(<WelcomeWizard initialStep="import" localAvailable onDone={onDone} />),
+  );
+  await click("Import 1 project");
+  expect(onDone).toHaveBeenCalledWith({
+    environmentId: EnvironmentId.make("test-env"),
+    projectId: ProjectId.make("test-project"),
+  });
 });
 
 it.each([
