@@ -59,7 +59,8 @@ behavior**. Queue holds it until Bob finishes its turn. Steer stops Bob's turn,
 including a tool call it is running, and starts again with your message.
 
 If Bob ends a turn without replying, which its backend sometimes does with a long
-conversation, the thread says so.
+conversation, the thread says so and offers **Retry**, which sends your message
+again.
 
 ## Limits
 

@@ -15,11 +15,18 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Option from "effect/Option";
 import {
+  CommandId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  MessageId,
   ThreadId,
   type ProjectScript,
 } from "@t3tools/contracts";
+import {
+  type AtomCommandResult,
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import {
   projectScriptCwd,
   projectScriptRuntimeEnv,
@@ -69,6 +76,7 @@ import { useSelectedThreadWorktree } from "../../state/use-selected-thread-workt
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { resolveMergeBackTargetThreadId } from "@t3tools/client-runtime/state/thread-relationships";
 import { resolveLatestMergeBackRun } from "@t3tools/client-runtime/state/thread-workflows";
+import { resolveProviderInteractionMode } from "../../state/legacy-plan-mode";
 import { threadEnvironment } from "../../state/threads";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
@@ -946,6 +954,117 @@ function ThreadRouteContent(
     setupMessage,
     startLocalThread,
   ]);
+  // Retry on a failure row sends the failed run's message again as a new run with the settings
+  // the composer shows, saving its modes first as a send does. False when it was not sent, so
+  // the row offers it again.
+  const retryRun = useAtomCommand(threadEnvironment.startTurn, {
+    label: "retry message",
+    reportFailure: false,
+  });
+  const setRetryRuntimeMode = useAtomCommand(threadEnvironment.setRuntimeMode, {
+    reportFailure: false,
+  });
+  const setRetryInteractionMode = useAtomCommand(threadEnvironment.setInteractionMode, {
+    reportFailure: false,
+  });
+  const retryBusy = useRef(false);
+  const retryableRun = composer.selectedThreadRetryableRun;
+  // Read at call time, so the feed's rows keep a stable callback.
+  const retryTargetRef = useRef({
+    saved: selectedThread,
+    shown: selectedThreadWithDraftSettings,
+    providers: routeEnvironmentRuntime?.serverConfig?.providers,
+    run: retryableRun,
+  });
+  retryTargetRef.current = {
+    saved: selectedThread,
+    shown: selectedThreadWithDraftSettings,
+    providers: routeEnvironmentRuntime?.serverConfig?.providers,
+    run: retryableRun,
+  };
+  const handleRetryRun = useCallback(
+    async (failureItemId: string) => {
+      const { saved, shown, providers, run } = retryTargetRef.current;
+      if (
+        !saved ||
+        !shown ||
+        run === null ||
+        run.failureItemId !== failureItemId ||
+        retryBusy.current
+      ) {
+        return false;
+      }
+      retryBusy.current = true;
+      try {
+        const metadata = makeTurnCommandMetadata();
+        const reportFailure = (result: AtomCommandResult<unknown, unknown>) => {
+          if (result._tag === "Success") return false;
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            Alert.alert(
+              "Could not send the message again",
+              error instanceof Error ? error.message : "Send it again from the composer.",
+            );
+          }
+          return true;
+        };
+        const provider = providers?.find(
+          (candidate) => candidate.instanceId === shown.modelSelection.instanceId,
+        );
+        const interactionMode = resolveProviderInteractionMode(provider, shown.interactionMode);
+        if (shown.runtimeMode !== saved.runtimeMode) {
+          const saving = await setRetryRuntimeMode({
+            environmentId: saved.environmentId,
+            input: {
+              commandId: CommandId.make(`${metadata.commandId}:runtime-mode`),
+              threadId: saved.id,
+              runtimeMode: shown.runtimeMode,
+              createdAt: metadata.createdAt,
+            },
+          });
+          if (reportFailure(saving)) return false;
+        }
+        if (interactionMode !== saved.interactionMode) {
+          const saving = await setRetryInteractionMode({
+            environmentId: saved.environmentId,
+            input: {
+              commandId: CommandId.make(`${metadata.commandId}:interaction-mode`),
+              threadId: saved.id,
+              interactionMode,
+              createdAt: metadata.createdAt,
+            },
+          });
+          if (reportFailure(saving)) return false;
+        }
+        const thread = { ...shown, interactionMode };
+        const result = await retryRun({
+          environmentId: thread.environmentId,
+          input: {
+            commandId: CommandId.make(metadata.commandId),
+            creationSource: "mobile",
+            threadId: thread.id,
+            // The server refuses it once the failed run is no longer the latest.
+            manualContinuationOfRunId: run.runId,
+            message: {
+              messageId: MessageId.make(metadata.messageId),
+              role: "user",
+              attachments: [],
+              ...run.message,
+            },
+            modelSelection: thread.modelSelection,
+            runtimeMode: thread.runtimeMode,
+            interactionMode: thread.interactionMode,
+            createdAt: metadata.createdAt,
+            dispatchMode: "start",
+          },
+        });
+        return !reportFailure(result);
+      } finally {
+        retryBusy.current = false;
+      }
+    },
+    [retryRun, setRetryInteractionMode, setRetryRuntimeMode],
+  );
   const creationState = ((): ThreadDetailScreenProps["creationState"] => {
     if (selectedThreadCreation === null) {
       return awaitingBootstrapTurn ? { kind: "preparing", preparingWorktree: true } : null;
@@ -998,6 +1117,8 @@ function ThreadRouteContent(
           onDismissFeedback={composer.dismissFeedback}
           selectedThreadFeed={composer.selectedThreadFeed}
           activityRun={composer.selectedThreadActivityRun}
+          retryFailureItemId={retryableRun?.failureItemId ?? null}
+          onRetryRun={handleRetryRun}
           activeWorkStartedAt={
             creationState?.kind === "preparing" ||
             (worktreeSetup !== null && setupTurnStartedAt === null)

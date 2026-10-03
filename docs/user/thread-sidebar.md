@@ -178,6 +178,10 @@ keeps the provider's explanation. Retry after the limit resets, or switch to
 another provider instance.
 On web and desktop, press **Resume** in an empty composer to continue a limited
 or interrupted turn manually.
+When a provider fails the latest turn with an error it marks as worth retrying,
+such as ending the turn without a reply, the error offers **Retry** on web,
+desktop and mobile. Retry sends that turn's message again, without its
+attachments, using the thread's current settings.
 Queued messages stay saved while the limit blocks the thread. They run after
 the continuation finishes. If the queue was held by a restart, resume it then.
 

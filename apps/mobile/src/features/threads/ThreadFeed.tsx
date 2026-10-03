@@ -277,6 +277,10 @@ export interface ThreadFeedProps {
   readonly contentPresentation: ThreadContentPresentation;
   readonly agentLabel: string;
   readonly latestRun: ThreadFeedLatestRun | null;
+  /** The failure row that offers Retry: the latest run's, when its failure is retryable. */
+  readonly retryFailureItemId?: string | null;
+  /** Sends the failed run's message again; false when it was not sent. */
+  readonly onRetryRun?: (failureItemId: string) => Promise<boolean>;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive?: boolean;
   readonly listRef: RefObject<LegendListRef | null>;
@@ -1492,7 +1496,9 @@ function renderFeedEntry(
     | "onEditPendingMessage"
     | "threadId"
     | "workspaceRoot"
+    | "onRetryRun"
   > & {
+    readonly retryFailureItemId: string | null;
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly workRowSizing: ReturnType<typeof deriveThreadWorkLogSizing>;
@@ -1917,6 +1923,8 @@ function renderFeedEntry(
       onToggleRow={props.onToggleWorkRow}
       renderImage={props.renderViewedImage}
       renderReasoning={props.renderReasoning}
+      retryFailureItemId={props.retryFailureItemId}
+      onRetryRun={props.onRetryRun}
     />
   );
 }
@@ -2449,6 +2457,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       setupWorkingStartedAt: props.setupWorkingStartedAt,
       dispatchingMessageId: props.dispatchingMessageId,
       unsettledTurnId,
+      retryFailureItemId: props.retryFailureItemId,
       copiedRowId,
       expandedWorkGroups,
       expandedWorkRows,
@@ -2465,6 +2474,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.setupWorkingStartedAt,
       props.dispatchingMessageId,
       unsettledTurnId,
+      props.retryFailureItemId,
       copiedRowId,
       expandedWorkGroups,
       expandedWorkRows,
@@ -2933,6 +2943,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             threadTitle: props.threadTitle,
             skills: props.skills,
             workspaceRoot: props.workspaceRoot,
+            retryFailureItemId: props.retryFailureItemId ?? null,
+            onRetryRun: props.onRetryRun,
           })}
           {props.worktreeSetup && info.index === setupAnchorIndex ? (
             <WorktreeSetupCard key={props.threadId} {...props.worktreeSetup} />
@@ -2979,6 +2991,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.threadTitle,
       props.skills,
       props.workspaceRoot,
+      props.retryFailureItemId,
+      props.onRetryRun,
       renderMarkdownImage,
       renderViewedImage,
       renderReasoning,
