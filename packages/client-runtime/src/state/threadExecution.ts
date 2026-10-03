@@ -1,5 +1,8 @@
 import {
+  isRetryableRunFailure,
+  latestExecutedRun,
   latestRootProviderFailure,
+  latestRootProviderFailureItem,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
@@ -8,14 +11,17 @@ import {
   isOrchestrationV2WorkActive,
   isProviderNativeSubagentThread,
   type ModelSelection,
+  type OrchestrationMessageContext,
   type OrchestrationV2NotificationSource,
   type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2ProviderGoal,
+  type RunId,
   type ServerProviderModel,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ThreadProjection,
   orchestrationV2RunWorkStartedAt,
   type ThreadId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import {
   backgroundWorkHoldsCompletion,
@@ -285,6 +291,58 @@ export function threadRuntimeHasInterruptibleRun(
     runtime?.activeRunId !== null &&
     runtime?.activeRunId !== undefined
   );
+}
+
+export interface RetryableThreadRun {
+  readonly runId: RunId;
+  /** The failed root `error` item that offers Retry. */
+  readonly failureItemId: TurnItemId;
+  /**
+   * The message that started the run, sent again by Retry. Its attachments are not: the provider
+   * already has them, as when the prompt is recalled and resent.
+   */
+  readonly message: { readonly text: string; readonly context?: OrchestrationMessageContext };
+}
+
+/**
+ * The thread's latest run when its provider failed it in a way worth retrying, such as a turn
+ * that ended without a reply, and nothing has happened since: no run is active or about to
+ * start and nothing waits on the user. Retry sends the run's own message again, so a run that
+ * a notification or delegated work started never offers it. The server checks the same
+ * conditions when the message arrives with `manualContinuationOfRunId`.
+ */
+export function deriveRetryableThreadRun(
+  projection: OrchestrationV2ThreadProjection,
+): RetryableThreadRun | null {
+  const run = latestExecutedRun(projection.runs);
+  const failureItem = latestRootProviderFailureItem(run, projection.turnItems);
+  if (
+    run === null ||
+    failureItem === null ||
+    !isRetryableRunFailure(failureItem.failure) ||
+    projection.thread.archivedAt !== null ||
+    projection.runs.some((candidate) => candidate.status === "queued" && !candidate.queueHeld) ||
+    projection.runtimeRequests.some((request) => request.status === "pending")
+  ) {
+    return null;
+  }
+  const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+  if (
+    message === undefined ||
+    message.role !== "user" ||
+    message.notification !== undefined ||
+    message.delegatedCompletion !== undefined
+  ) {
+    return null;
+  }
+  return {
+    runId: run.id,
+    failureItemId: failureItem.id,
+    message: {
+      text: message.text,
+      ...(message.context === undefined ? {} : { context: message.context }),
+    },
+  };
 }
 
 type BackgroundWorkKind = OrchestrationV2PendingBackgroundTask["kind"];

@@ -1,4 +1,5 @@
 import {
+  ComposerContextId,
   TurnItemId,
   NodeId,
   MessageId,
@@ -7,8 +8,10 @@ import {
   ProviderSessionId,
   ProviderDriverKind,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2ProviderFailure,
   type OrchestrationV2RunStatus,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -24,6 +27,7 @@ import {
   deriveProviderSubagentStatus,
   formatModelSelectionEffort,
   formatProviderSubagentStatus,
+  deriveRetryableThreadRun,
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveThreadRuntime,
@@ -275,6 +279,161 @@ describe("thread execution presentation", () => {
     };
 
     expect(threadRuntimeHasInterruptibleRun(runtime)).toBe(true);
+  });
+});
+
+describe("deriveRetryableThreadRun", () => {
+  const failed = {
+    ...run("empty", 1, "failed"),
+    rootNodeId: NodeId.make("root"),
+    completedAt: now,
+  };
+  const failureItem = {
+    id: TurnItemId.make("empty-reply"),
+    threadId: v2Projection.thread.id,
+    runId: failed.id,
+    nodeId: failed.rootNodeId,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 3,
+    type: "error" as const,
+    status: "failed" as const,
+    title: null,
+    startedAt: now,
+    completedAt: now,
+    updatedAt: now,
+    failure: {
+      class: "provider_error" as const,
+      message: "Bob ended its turn without replying.",
+      code: "empty_reply",
+      retryable: true,
+    },
+  };
+  const context = {
+    version: 1 as const,
+    records: [
+      {
+        version: 1 as const,
+        contextId: ComposerContextId.make("terminal_1"),
+        kind: "terminal" as const,
+        label: "Terminal lines 1-2",
+        terminalId: "default",
+        terminalLabel: "Terminal",
+        lineStart: 1,
+        lineEnd: 2,
+        text: "npm test",
+      },
+    ],
+  };
+  const prompt = {
+    id: failed.userMessageId,
+    threadId: v2Projection.thread.id,
+    runId: failed.id,
+    nodeId: null,
+    role: "user" as const,
+    text: "Summarize the diff",
+    context,
+    attachments: [
+      { type: "image" as const, id: "image-1", name: "a.png", mimeType: "image/png", sizeBytes: 1 },
+    ],
+    streaming: false,
+    createdBy: "user" as const,
+    creationSource: "web" as const,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const projection = {
+    ...v2Projection,
+    runs: [failed],
+    turnItems: [failureItem],
+    messages: [prompt],
+  };
+
+  it("sends the failed run's own message again, by id, without its attachments", () => {
+    expect(deriveRetryableThreadRun(projection)).toEqual({
+      runId: failed.id,
+      failureItemId: failureItem.id,
+      message: { text: "Summarize the diff", context },
+    });
+    // A later message in the same run (a steer) is not the one that started it.
+    const steer = { ...prompt, id: MessageId.make("steer"), text: "Also the tests" };
+    expect(
+      deriveRetryableThreadRun({ ...projection, messages: [prompt, steer] })?.message.text,
+    ).toBe("Summarize the diff");
+  });
+
+  it("offers nothing for failures a resend would not fix", () => {
+    const withFailure = (failure: Partial<OrchestrationV2ProviderFailure>) =>
+      deriveRetryableThreadRun({
+        ...projection,
+        turnItems: [{ ...failureItem, failure: { ...failureItem.failure, ...failure } }],
+      });
+    expect(withFailure({ retryable: null })).toBeNull();
+    expect(withFailure({ retryable: false })).toBeNull();
+    // A usage limit resumes at its reset instead.
+    expect(withFailure({ class: "usage_limit" })).toBeNull();
+    // A subagent's failure is not the run's.
+    expect(
+      deriveRetryableThreadRun({
+        ...projection,
+        turnItems: [{ ...failureItem, nodeId: NodeId.make("child") }],
+      }),
+    ).toBeNull();
+  });
+
+  it("offers it only while the failed run is the latest and nothing else is under way", () => {
+    expect(
+      deriveRetryableThreadRun({ ...projection, runs: [failed, run("next", 2, "running")] }),
+    ).toBeNull();
+    // The queue starts on its own after an ordinary failure, but waits when held.
+    expect(
+      deriveRetryableThreadRun({ ...projection, runs: [failed, run("queued", 2, "queued")] }),
+    ).toBeNull();
+    expect(
+      deriveRetryableThreadRun({
+        ...projection,
+        runs: [failed, { ...run("held", 2, "queued"), queueHeld: true }],
+      })?.runId,
+    ).toBe(failed.id);
+    expect(
+      deriveRetryableThreadRun({
+        ...projection,
+        runtimeRequests: [
+          {
+            id: RuntimeRequestId.make("approval"),
+            nodeId: NodeId.make("root"),
+            providerTurnId: null,
+            nativeRequestRef: null,
+            kind: "command",
+            status: "pending",
+            responseCapability: { type: "message" },
+            createdAt: now,
+            resolvedAt: null,
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("offers nothing when the run's message is unknown or was not the user's", () => {
+    expect(deriveRetryableThreadRun({ ...projection, messages: [] })).toBeNull();
+    expect(
+      deriveRetryableThreadRun({
+        ...projection,
+        messages: [
+          {
+            ...prompt,
+            notification: {
+              source: { kind: "command" },
+              outcome: "completed",
+              summary: "Command finished",
+            },
+          },
+        ],
+      }),
+    ).toBeNull();
   });
 });
 

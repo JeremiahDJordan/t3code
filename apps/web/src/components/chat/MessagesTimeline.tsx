@@ -362,6 +362,8 @@ interface TimelineRowSharedState {
   onRetryWorkspacePreparation: ((runId: RunId) => void) | null;
   onWorktreeSetupWorkLocally: (() => void) | null;
   onOpenWorktreeSetupTerminal: ((terminalId: string) => void) | null;
+  /** Sends a failed run's message again; false when it was not sent. */
+  onRetryRun: ((failureItemId: string) => Promise<boolean>) | undefined;
   workGroupViewState: WorkGroupViewState;
 }
 
@@ -374,6 +376,8 @@ interface TimelineRowActivityState {
   awaitingUser: boolean;
   isPreparingWorktree: boolean;
   latestRunId: RunId | null;
+  /** The failure row that offers Retry, if any. */
+  retryFailureItemId: string | null;
   /**
    * A worktree setup whose script is still running after the agent took
    * over. The working header shows it as a chip with a popover; the stage
@@ -514,6 +518,10 @@ interface MessagesTimelineProps {
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   providerStatuses: ReadonlyArray<ServerProvider>;
   runs: ReadonlyArray<HandoffTimelineRun>;
+  /** The failure row that offers Retry: the latest run's, when its failure is retryable. */
+  retryFailureItemId?: string | null;
+  /** Sends the failed run's message again; false when it was not sent. */
+  onRetryRun?: (failureItemId: string) => Promise<boolean>;
   anchorMessageId: MessageId | null;
   onAnchorReady: (messageId: MessageId, anchorIndex: number) => void;
   onAnchorSizeChanged: (messageId: MessageId, size: number) => void;
@@ -620,6 +628,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   skills = EMPTY_TIMELINE_SKILLS,
   providerStatuses,
   runs: runsProp,
+  retryFailureItemId = null,
+  onRetryRun,
   anchorMessageId,
   onAnchorReady,
   onAnchorSizeChanged,
@@ -1339,6 +1349,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       onRetryWorkspacePreparation: onRetryWorkspacePreparation ?? null,
       onWorktreeSetupWorkLocally: onWorktreeSetupWorkLocally ?? null,
       onOpenWorktreeSetupTerminal: onOpenWorktreeSetupTerminal ?? null,
+      onRetryRun,
       workGroupViewState,
     }),
     [
@@ -1377,6 +1388,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       onRetryWorkspacePreparation,
       onWorktreeSetupWorkLocally,
       onOpenWorktreeSetupTerminal,
+      onRetryRun,
       workGroupViewState,
     ],
   );
@@ -1399,6 +1411,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       awaitingUser,
       isPreparingWorktree,
       latestRunId: latestRun?.runId ?? null,
+      retryFailureItemId,
     }),
     [
       awaitingUser,
@@ -1409,6 +1422,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       isRevertingCheckpoint,
       isWorking,
       latestRun?.runId,
+      retryFailureItemId,
     ],
   );
   const listHeader = useMemo(() => {
@@ -5376,6 +5390,40 @@ function ReasoningTraceContent({ entries }: { entries: ReadonlyArray<TimelineWor
   );
 }
 
+/**
+ * Retry on the failure of the thread's latest run, while that failure is retryable and nothing
+ * has happened since. Its own component, so only failure rows follow the thread's activity.
+ */
+function RetryRunButton({ failureItemId }: { failureItemId: string }) {
+  const { onRetryRun } = use(TimelineRowCtx);
+  const { retryFailureItemId } = use(TimelineRowActivityCtx);
+  const [sending, setSending] = useState(false);
+  if (sending || !onRetryRun || failureItemId !== retryFailureItemId) return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="xs"
+            variant="outline"
+            aria-label="Retry, send the message again"
+            onClick={() => {
+              setSending(true);
+              // Offered again when the message could not be sent.
+              void onRetryRun(failureItemId).then((sent) => {
+                if (!sent) setSending(false);
+              });
+            }}
+          />
+        }
+      >
+        Retry
+      </TooltipTrigger>
+      <TooltipPopup side="top">Send the message again</TooltipPopup>
+    </Tooltip>
+  );
+}
+
 type WorkEntryRowProps = {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
@@ -5466,11 +5514,18 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
           </span>
         }
         trailing={
-          <TimelineRowTimestamp
-            createdAt={workEntry.createdAt}
-            timestampFormat={timestampFormat}
-            alwaysVisible
-          />
+          <>
+            {/* A failed workspace preparation has its own Retry below. */}
+            {!warning &&
+            failureItem.failure.code !== ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE ? (
+              <RetryRunButton failureItemId={failureItem.id} />
+            ) : null}
+            <TimelineRowTimestamp
+              createdAt={workEntry.createdAt}
+              timestampFormat={timestampFormat}
+              alwaysVisible
+            />
+          </>
         }
       >
         {!warning ? (

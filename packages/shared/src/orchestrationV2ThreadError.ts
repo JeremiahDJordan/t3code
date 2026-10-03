@@ -10,6 +10,14 @@ export function latestRootProviderFailure(
   run: OrchestrationV2Run | null,
   turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
 ): OrchestrationV2ProviderFailure | null {
+  return latestRootProviderFailureItem(run, turnItems)?.failure ?? null;
+}
+
+/** The failed root `error` item that carries `latestRootProviderFailure`. */
+export function latestRootProviderFailureItem(
+  run: OrchestrationV2Run | null,
+  turnItems: ReadonlyArray<OrchestrationV2TurnItem>,
+): Extract<OrchestrationV2TurnItem, { type: "error" }> | null {
   if (run?.status !== "failed") return null;
   let latest: Extract<OrchestrationV2TurnItem, { type: "error" }> | null = null;
   for (const item of turnItems) {
@@ -29,7 +37,15 @@ export function latestRootProviderFailure(
       latest = item;
     }
   }
-  return latest?.failure ?? null;
+  return latest;
+}
+
+/**
+ * Whether sending a failed run's message again may succeed: its provider marked the failure
+ * retryable. A usage limit never counts, since it waits for its reset and resumes from there.
+ */
+export function isRetryableRunFailure(failure: OrchestrationV2ProviderFailure | null): boolean {
+  return failure?.retryable === true && failure.class !== "usage_limit";
 }
 
 /** A distinct session failure supersedes the turn's classification. */

@@ -4748,7 +4748,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("shared application data plane", (
 });
 
 it.layer(layerTest)("usage-limit recovery", (it) => {
-  it.effect.each(["interrupted", "usage_limit"] as const)(
+  it.effect.each(["interrupted", "usage_limit", "retryable"] as const)(
     "manually resumes an %s run ahead of its queued message only once",
     (reason) =>
       Effect.gen(function* () {
@@ -4830,6 +4830,61 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
             },
           ],
         });
+        const resume = (suffix: string) => ({
+          type: "message.dispatch" as const,
+          commandId: CommandId.make(`manual-resume:${suffix}:${reason}`),
+          threadId,
+          messageId: MessageId.make(`manual-resume:${suffix}:${reason}`),
+          manualContinuationOfRunId: source.id,
+          text: "Continue where you left off.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" as const },
+          createdBy: "user" as const,
+          creationSource: "web" as const,
+        });
+        if (reason === "retryable") {
+          // Retry sends the message of a run whose provider error is retryable, and only that.
+          const failRun = (retryable: boolean) =>
+            events.write({
+              events: [
+                {
+                  id: EventId.make(`manual-resume:error:${reason}:${retryable}`),
+                  type: "turn-item.updated",
+                  threadId,
+                  occurredAt: now,
+                  payload: {
+                    id: TurnItemId.make(`manual-resume:error:${reason}`),
+                    type: "error",
+                    threadId,
+                    runId: source.id,
+                    nodeId: source.rootNodeId,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    parentItemId: null,
+                    ordinal: 2,
+                    status: "failed",
+                    title: null,
+                    startedAt: now,
+                    completedAt: now,
+                    updatedAt: now,
+                    failure: {
+                      class: "provider_error",
+                      message: "Bob ended its turn without replying.",
+                      code: "empty_reply",
+                      retryable,
+                    },
+                  },
+                },
+              ],
+            });
+          yield* failRun(false);
+          assert.equal(
+            (yield* orchestrator.dispatch(resume("final")).pipe(Effect.exit))._tag,
+            "Failure",
+          );
+          yield* failRun(true);
+        }
         let scheduledResume: ReturnType<typeof limitRecoveryCommand> = null;
         if (reason === "usage_limit") {
           const resetAt = DateTime.formatIso(DateTime.add(now, { minutes: 1 }));
@@ -4879,18 +4934,6 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           scheduledResume = limitRecoveryCommand(armed, true, Date.parse(resetAt));
           assert.isNotNull(scheduledResume);
         }
-        const resume = (suffix: string) => ({
-          type: "message.dispatch" as const,
-          commandId: CommandId.make(`manual-resume:${suffix}:${reason}`),
-          threadId,
-          messageId: MessageId.make(`manual-resume:${suffix}:${reason}`),
-          manualContinuationOfRunId: source.id,
-          text: "Continue where you left off.",
-          attachments: [],
-          dispatchMode: { type: "start_immediately" as const },
-          createdBy: "user" as const,
-          creationSource: "web" as const,
-        });
         yield* orchestrator.dispatch(resume("first"));
         const after = yield* orchestrator.getThreadProjection(threadId);
         assert.lengthOf(after.runs, 3);

@@ -469,6 +469,10 @@ interface ThreadWorkLogProps {
   readonly renderImage: MarkdownImageRenderer;
   readonly renderReasoning: (text: string) => ReactNode;
   readonly onPressPreview: (source: FilePreviewSource) => void;
+  /** The failure row that offers Retry: the latest run's, when its failure is retryable. */
+  readonly retryFailureItemId?: string | null;
+  /** Sends the failed run's message again; false when it was not sent. */
+  readonly onRetryRun?: ((failureItemId: string) => Promise<boolean>) | undefined;
 }
 
 export function ThreadWorkLog(props: ThreadWorkLogProps) {
@@ -488,6 +492,8 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
         renderReasoning={props.renderReasoning}
         onPressPreview={props.onPressPreview}
         themeAppearance={props.themeAppearance}
+        retryFailureItemId={props.retryFailureItemId}
+        onRetryRun={props.onRetryRun}
       />
     ),
     [
@@ -502,6 +508,8 @@ export function ThreadWorkLog(props: ThreadWorkLogProps) {
       props.renderReasoning,
       props.onPressPreview,
       props.themeAppearance,
+      props.retryFailureItemId,
+      props.onRetryRun,
     ],
   );
 
@@ -831,6 +839,31 @@ function WorkspacePreparationRetryButton(props: {
   );
 }
 
+/** Retry on the failure of the thread's latest run; offered again when the message was not sent. */
+function RetryRunPill(props: {
+  readonly failureItemId: string;
+  readonly onRetryRun: (failureItemId: string) => Promise<boolean>;
+}) {
+  const [sending, setSending] = useState(false);
+  if (sending) return null;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel="Retry, send the message again"
+      className="mr-1 rounded-full border border-border bg-background px-3 py-1"
+      onPress={() => {
+        setSending(true);
+        void Haptics.selectionAsync();
+        void props.onRetryRun(props.failureItemId).then((sent) => {
+          if (!sent) setSending(false);
+        });
+      }}
+    >
+      <Text className="font-t3-medium text-xs">Retry</Text>
+    </Pressable>
+  );
+}
+
 const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   props: Omit<
     ThreadWorkLogProps,
@@ -898,6 +931,13 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
               <Text className="pr-1 font-t3-medium text-3xs text-adaptive-emerald-600-400">
                 Copied
               </Text>
+            ) : null}
+            {/* A failed workspace preparation has its own Retry below. */}
+            {!warning &&
+            props.onRetryRun &&
+            failureItem.id === props.retryFailureItemId &&
+            failureItem.failure.code !== ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE ? (
+              <RetryRunPill failureItemId={failureItem.id} onRetryRun={props.onRetryRun} />
             ) : null}
             <Text
               accessibilityLabel={timestamp.toLocaleString()}
