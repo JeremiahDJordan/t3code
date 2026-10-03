@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off
 /**
  * A stand-in for IBM Bob Shell's `bob acp`, for the Bob adapter and text generation tests.
  *
@@ -10,8 +10,10 @@
  * subagents run as a "Running subagent: …" tool call with the report in `<task_result>` tags,
  * and tasks move with `_bob/task/export` and `_bob/task/import`.
  *
- * A prompt's text picks what Bob does: "use a subagent", "run a command" and "say nothing" (an
- * empty reply). Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
+ * A prompt's text picks what Bob does: "use a subagent", "run a command", "say nothing" (an
+ * empty reply) and "work slowly", which runs a tool call until `T3_ACP_BOB_RELEASE_PATH` exists
+ * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`.
+ * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
  * `T3_ACP_BOB_RESUME_NOT_FOUND` makes every resume fail as an unknown task;
@@ -28,6 +30,7 @@ const signedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
 const licenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
 const resumeNotFound = process.env.T3_ACP_BOB_RESUME_NOT_FOUND === "1";
 const statePath = process.env.T3_ACP_BOB_STATE_PATH;
+const releasePath = process.env.T3_ACP_BOB_RELEASE_PATH;
 
 type Json = Record<string, unknown>;
 interface RpcError {
@@ -260,6 +263,33 @@ function handle(method: string, params: Json): Json {
   }
 }
 
+/** The "work slowly" prompt waiting for `session/cancel`, by session. */
+const cancellablePrompts = new Map<string, number | string>();
+
+/** Runs a tool call until the release file exists, then waits for the prompt to be cancelled. */
+function workSlowly(id: number | string, sessionId: string): void {
+  notify(sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId: "slow-1",
+    title: "sleep 60",
+    kind: "execute",
+    status: "in_progress",
+  });
+  const timer = setInterval(() => {
+    if (!releasePath || !NodeFS.existsSync(releasePath)) return;
+    clearInterval(timer);
+    if (requestLogPath) {
+      NodeFS.appendFileSync(requestLogPath, `${JSON.stringify({ method: "_mock/released" })}\n`);
+    }
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "slow-1",
+      status: "completed",
+    });
+    cancellablePrompts.set(sessionId, id);
+  }, 10);
+}
+
 const lines = NodeReadline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   if (!line.trim()) return;
@@ -269,7 +299,24 @@ lines.on("line", (line) => {
     readonly method?: string;
     readonly params?: Json;
   };
-  // Notifications, such as `session/cancel`, and responses to Bob's own requests need no answer.
+  if (message.method === "session/cancel") {
+    const sessionId = String(message.params?.sessionId);
+    const pending = cancellablePrompts.get(sessionId);
+    if (pending !== undefined) {
+      cancellablePrompts.delete(sessionId);
+      send({ id: pending, result: { stopReason: "cancelled" } });
+    }
+    return;
+  }
+  if (
+    message.method === "session/prompt" &&
+    message.id !== undefined &&
+    promptText(message.params?.prompt).includes("work slowly")
+  ) {
+    workSlowly(message.id, String(message.params?.sessionId));
+    return;
+  }
+  // Notifications and responses to Bob's own requests need no answer.
   if (message.id === undefined || message.method === undefined) return;
   try {
     loadState();
