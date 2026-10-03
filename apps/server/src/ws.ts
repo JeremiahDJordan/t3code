@@ -241,6 +241,10 @@ import {
 } from "@t3tools/shared/usageLimits";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
+import {
+  agentSessionScanForUpstreamClient,
+  settingsPatchFromUpstreamClient,
+} from "./upstreamClientCompatibility.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
@@ -538,6 +542,16 @@ function readClientConnectionOrigin(
       ? { appVersion }
       : {}),
   };
+}
+
+/**
+ * Whether the client knows Bob, which only this fork's clients announce. Other clients get the
+ * onboarding scan without Bob, and keep a project's fork settings when they write its row
+ * (`upstreamClientCompatibility`).
+ */
+function readClientSupportsBob(request: HttpServerRequest.HttpServerRequest): boolean {
+  const url = HttpServerRequest.toURL(request);
+  return Option.isSome(url) && url.value.searchParams.get("clientBobSupport") === "1";
 }
 
 // Client telemetry stays in this socket's RPC layer. It must not become a
@@ -1088,6 +1102,7 @@ const makeWsRpcLayer = (
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  clientSupportsBob: boolean,
 ) =>
   ServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -2512,7 +2527,11 @@ const makeWsRpcLayer = (
                     Effect.provide(deviceHostContext),
                   )
                 : undefined;
-              const nextPatch = { ...patch, ...(deviceHosts ? { deviceHosts } : {}) };
+              // Adapted before either branch below, so neither drops a project's fork settings.
+              const clientPatch = clientSupportsBob
+                ? patch
+                : settingsPatchFromUpstreamClient(patch, yield* serverSettings.getSettings);
+              const nextPatch = { ...clientPatch, ...(deviceHosts ? { deviceHosts } : {}) };
               const settings = yield* providerInstanceMutation === undefined
                 ? serverSettings.updateSettings(nextPatch)
                 : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
@@ -3098,9 +3117,13 @@ const makeWsRpcLayer = (
             { "rpc.aggregate": "workspace" },
           ),
         [WS_METHODS.agentSessionsScan]: () =>
-          observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
-            "rpc.aggregate": "workspace",
-          }),
+          observeRpcEffect(
+            WS_METHODS.agentSessionsScan,
+            clientSupportsBob
+              ? agentSessionScanner.scan
+              : agentSessionScanner.scan.pipe(Effect.map(agentSessionScanForUpstreamClient)),
+            { "rpc.aggregate": "workspace" },
+          ),
         [WS_METHODS.agentSessionsImport]: (input) =>
           observeRpcEffect(
             WS_METHODS.agentSessionsImport,
@@ -3819,6 +3842,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientOrigin,
               clientAnalyticsProps,
               previewAutomationBroker,
+              readClientSupportsBob(request),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
