@@ -18,6 +18,10 @@ function formatPercentage(value: number | null): string | null {
   return `${Math.round(value)}%`;
 }
 
+/**
+ * The composer's context meter: a ring filled to the share of the context window in use, or the
+ * token count when the provider reports no limit. Hovering shows the details.
+ */
 export function ContextWindowMeter(props: {
   usage: ContextWindowSnapshot;
   modelDisplayName?: string | null;
@@ -48,41 +52,49 @@ export function ContextWindowMeter(props: {
           <Button
             size="icon-sm"
             variant="ghost-muted"
-            className="size-7"
+            className="size-7 min-w-max"
             aria-label={
               usage.maxTokens !== null && usedPercentage
                 ? `Context window ${usedPercentage} used`
                 : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
             }
           >
-            <span className="relative flex size-5 items-center justify-center">
-              <svg
-                viewBox="0 0 24 24"
-                className="-rotate-90 absolute inset-0 size-full transform-gpu mx-0!"
-                aria-hidden="true"
-              >
-                <circle
-                  cx="12"
-                  cy="12"
-                  r={radius}
-                  fill="none"
-                  className="stroke-muted-foreground/24"
-                  strokeWidth="3"
-                />
-                <circle
-                  cx="12"
-                  cy="12"
-                  r={radius}
-                  fill="none"
-                  stroke={usageColor}
-                  strokeWidth="3"
-                  strokeLinecap="round"
-                  strokeDasharray={circumference}
-                  strokeDashoffset={dashOffset}
-                  className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none"
-                />
-              </svg>
-            </span>
+            {usedPercentage === null ? (
+              // Without the provider's limit there is no share to draw, and an empty ring would
+              // read as 0%. A count too wide for the button grows it, as `min-w-max` allows.
+              <span className="font-medium text-3xs tabular-nums">
+                {formatContextWindowTokens(usage.usedTokens)}
+              </span>
+            ) : (
+              <span className="relative flex size-5 items-center justify-center">
+                <svg
+                  viewBox="0 0 24 24"
+                  className="-rotate-90 absolute inset-0 size-full transform-gpu mx-0!"
+                  aria-hidden="true"
+                >
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r={radius}
+                    fill="none"
+                    className="stroke-muted-foreground/24"
+                    strokeWidth="3"
+                  />
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r={radius}
+                    fill="none"
+                    stroke={usageColor}
+                    strokeWidth="3"
+                    strokeLinecap="round"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={dashOffset}
+                    className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none"
+                  />
+                </svg>
+              </span>
+            )}
           </Button>
         }
       />
