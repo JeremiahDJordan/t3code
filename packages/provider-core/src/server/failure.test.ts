@@ -2,6 +2,9 @@ import { assert, it } from "@effect/vitest";
 import {
   NodeId,
   ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderSessionId,
+  ProviderSetupError,
   ProviderThreadId,
   ProviderTurnId,
   RunId,
@@ -17,6 +20,7 @@ import {
   MAX_PROVIDER_FAILURE_CODE_LENGTH,
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
   ContextHandoffBudgetError,
+  providerSetupDetail,
 } from "./failure.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -99,6 +103,40 @@ it("preserves actionable handoff errors wrapped by turn startup", () => {
     makeProviderFailure({ cause: Cause.fail(cause) }).message,
     new ContextHandoffBudgetError().message,
   );
+});
+
+it("shows a provider's setup text when its session cannot open", () => {
+  const cause = new ProviderAdapter.ProviderAdapterOpenSessionError({
+    driver: ProviderDriverKind.make("bob"),
+    providerSessionId: ProviderSessionId.make("provider-session:setup-error"),
+    cause: new ProviderSetupError({
+      instanceId: ProviderInstanceId.make("bob"),
+      operation: "session",
+      detail: "Your IBM sign-in expired. Run `bob` on this machine to sign in again.",
+      cause: new Error("Authentication required"),
+    }),
+  });
+  assert.equal(
+    makeProviderFailure({ cause: Cause.fail(cause) }).message,
+    "Your IBM sign-in expired. Run `bob` on this machine to sign in again.",
+  );
+});
+
+it("finds a provider's setup text however deep it is wrapped", () => {
+  const setup = new ProviderSetupError({
+    instanceId: ProviderInstanceId.make("bob"),
+    operation: "session",
+    detail: "Your IBM sign-in expired. Run `bob` on this machine to sign in again.",
+  });
+  const wrapped = new Error("Provider session manager failed.", {
+    cause: new ProviderAdapter.ProviderAdapterOpenSessionError({
+      driver: ProviderDriverKind.make("bob"),
+      providerSessionId: ProviderSessionId.make("provider-session:setup-detail"),
+      cause: setup,
+    }),
+  });
+  assert.equal(providerSetupDetail(Cause.fail(wrapped)), setup.detail);
+  assert.isUndefined(providerSetupDetail(new Error("Session expired. Sign in again.")));
 });
 
 it("does not expose defect text nested inside a known error category", () => {

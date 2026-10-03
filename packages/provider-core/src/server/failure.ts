@@ -48,6 +48,9 @@ function causeMessage(cause: unknown): string | undefined {
           return new ContextHandoffBudgetError().message;
         case "ClaudeBackgroundWorkBlocksQueryReplacementError":
           return stringField(cause, "message");
+        // Safe setup text by contract, such as how to sign in, so it beats a generic category.
+        case "ProviderSetupError":
+          return providerSetupDetail(cause) ?? message;
         case "ContextHandoffDeliveryUncertainError":
           return "T3 could not confirm whether conversation history reached the provider. Retry the turn to recover the session.";
         case "ProviderAdapterTurnStartError":
@@ -73,6 +76,31 @@ function causeMessage(cause: unknown): string | undefined {
     }
   }
   return message;
+}
+
+/**
+ * The text of a ProviderSetupError anywhere in `cause`, such as how to sign in. It is safe to show
+ * by contract, and says more than the generic error that wraps it.
+ */
+export function providerSetupDetail(cause: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 16 && cause != null && !seen.has(cause); depth++) {
+    seen.add(cause);
+    try {
+      if (Cause.isCause(cause)) {
+        cause = Cause.squash(cause);
+        continue;
+      }
+      if (typeof cause !== "object") break;
+      if ((cause as Record<string, unknown>)._tag === "ProviderSetupError") {
+        return stringField(cause, "message");
+      }
+      cause = (cause as Record<string, unknown>).cause;
+    } catch {
+      break;
+    }
+  }
+  return undefined;
 }
 
 function stringField(value: unknown, key: "message" | "code"): string | undefined {
