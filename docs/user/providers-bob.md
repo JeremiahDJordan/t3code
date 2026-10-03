@@ -45,6 +45,10 @@ Reverting a thread, or editing and resubmitting an earlier turn, rewinds Bob's
 conversation as well, as rolling back a task in Bob's IDE does: Bob continues from
 the conversation before that turn.
 
+When Bob runs a subagent, the thread shows it, and opening it shows the subagent's
+own thread. Bob does not report a subagent's steps while it works; once it finishes,
+its thread lists its notes and tool calls, then its report.
+
 T3 Code's Plan mode uses Bob's plan mode, and the plan Bob writes becomes the
 thread's proposed plan. After Bob has run, the model picker's **Mode** option also
 offers Bob's Ask mode and your custom modes (`custom_modes.yaml`); turns use Agent

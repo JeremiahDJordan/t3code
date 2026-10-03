@@ -42,6 +42,7 @@ import {
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
 import type * as IdAllocator from "../IdAllocator.ts";
+import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
 import { makeProviderFailure } from "../ProviderFailure.ts";
 import {
@@ -145,6 +146,70 @@ function bobSubagentSummary(toolCall: AcpToolCallState): string | undefined {
   return text || undefined;
 }
 
+/** The stand-in session id a subagent's steps are replayed under. */
+function bobSubagentSessionId(toolCallId: string): string {
+  return `bob-subagent:${toolCallId}`;
+}
+
+/** Whether a root-session update starts one of Bob's subagents, by the same shape as above. */
+function startsBobSubagent(update: EffectAcpSchema.SessionUpdate): boolean {
+  if (update.sessionUpdate !== "tool_call" || (update.kind ?? "other") !== "other") return false;
+  const description = asRecord(update.rawInput)?.description;
+  if (typeof description !== "string" || !description.trim()) return false;
+  const title = decodeBobTitle(update.title ?? "").trim();
+  return title !== description.trim() && title.endsWith(description.trim());
+}
+
+/**
+ * A finished subagent's steps as updates of its stand-in session, which the ACP adapter writes
+ * into the subagent's thread: its notes as messages and its tool calls as tools. The prompt is
+ * the thread's opening message already, and the report its result.
+ */
+function bobSubagentStepNotifications(
+  toolCallId: string,
+  transcript: TaskTranscript,
+): ReadonlyArray<EffectAcpSchema.SessionNotification> {
+  const sessionId = bobSubagentSessionId(toolCallId);
+  const note = (key: string, text: string): EffectAcpSchema.SessionNotification => ({
+    sessionId,
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      messageId: `${toolCallId}:${key}`,
+      content: { type: "text", text },
+    },
+  });
+  const omitted = transcript.omittedEntries ?? 0;
+  const omittedAt = transcript.entries[0]?._tag === "prompt" ? 1 : 0;
+  return transcript.entries.flatMap((entry, index) => {
+    const steps: Array<EffectAcpSchema.SessionNotification> =
+      omitted > 0 && index === omittedAt
+        ? [note("omitted", `${omitted} older ${omitted === 1 ? "step" : "steps"} not shown.`)]
+        : [];
+    switch (entry._tag) {
+      case "prompt":
+        break;
+      case "message":
+        steps.push(note(`step:${index}`, entry.text));
+        break;
+      case "tool":
+        steps.push({
+          sessionId,
+          update: {
+            sessionUpdate: "tool_call",
+            toolCallId: `${toolCallId}:step:${index}`,
+            title: entry.title,
+            kind: "other",
+            status: entry.failed ? "failed" : "completed",
+            ...(entry.input === undefined ? {} : { rawInput: entry.input }),
+            ...(entry.output === undefined ? {} : { rawOutput: entry.output }),
+          },
+        });
+        break;
+    }
+    return steps;
+  });
+}
+
 const extractBobSubagentUpdate = (
   toolCall: AcpToolCallState,
 ): AcpAdapterV2SubagentUpdate | undefined => {
@@ -164,7 +229,9 @@ const extractBobSubagentUpdate = (
     title: description,
     model: null,
     status,
-    childSessionId: null,
+    // Bob streams nothing of a subagent's run, so its steps go into the subagent's thread as
+    // this stand-in session's updates once it finishes (see `bobSubagentStepNotifications`).
+    childSessionId: bobSubagentSessionId(toolCall.toolCallId),
     result:
       status === "completed" || status === "failed" ? (bobSubagentSummary(toolCall) ?? null) : null,
   };
@@ -225,6 +292,11 @@ export interface BobAdapterV2Hooks {
   readonly readTaskUsage?: (sessionId: string) => Effect.Effect<BobTaskUsage | undefined>;
   /** Called after a turn that spent Bobcoins, with the session's workspace. */
   readonly onBobcoinsSpent?: (cwd: string) => Effect.Effect<void>;
+  /** Reads the steps of a subagent run from Bob's task database, once it finished. */
+  readonly readSubagentSteps?: (
+    parentSessionId: string,
+    toolCallId: string,
+  ) => Effect.Effect<TaskTranscript>;
 }
 
 /** What the wrapper tracks for one `bob acp` process, by the runtime the adapter holds. */
@@ -237,6 +309,8 @@ interface BobRuntimeState {
   sessionId?: string;
   /** The task's Bobcoins at the last reading, to tell whether a turn spent any. */
   lastCost?: number;
+  /** Subagents running now, by their tool call id. */
+  readonly runningSubagents: Set<string>;
   /** The adapter's update handler, which takes the usage Bob does not report itself. */
   handler?: (
     notification: EffectAcpSchema.SessionNotification,
@@ -294,7 +368,33 @@ function wrapBobRuntime(
   cwd: string,
   hooks: BobAdapterV2Hooks,
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
-  const state: BobRuntimeState = { answered: false, lastReply: "" };
+  const state: BobRuntimeState = { answered: false, lastReply: "", runningSubagents: new Set() };
+  /** Replays a finished subagent's steps into its thread, before its result arrives. */
+  const replaySubagentSteps = (
+    notification: EffectAcpSchema.SessionNotification,
+    handler: (
+      notification: EffectAcpSchema.SessionNotification,
+    ) => Effect.Effect<void, EffectAcpErrors.AcpError>,
+  ) =>
+    Effect.gen(function* () {
+      const update = notification.update;
+      if (update.sessionUpdate === "tool_call" && startsBobSubagent(update)) {
+        state.runningSubagents.add(update.toolCallId);
+        return;
+      }
+      if (
+        update.sessionUpdate !== "tool_call_update" ||
+        (update.status !== "completed" && update.status !== "failed") ||
+        !state.runningSubagents.delete(update.toolCallId) ||
+        !hooks.readSubagentSteps
+      ) {
+        return;
+      }
+      const transcript = yield* hooks.readSubagentSteps(notification.sessionId, update.toolCallId);
+      for (const step of bobSubagentStepNotifications(update.toolCallId, transcript)) {
+        yield* handler(step).pipe(Effect.ignore);
+      }
+    });
   const reportModes = runtime.getModeState.pipe(
     Effect.flatMap((modeState) =>
       modeState && hooks.onAvailableModes
@@ -349,7 +449,10 @@ function wrapBobRuntime(
               hooks.onAvailableCommands
                 ? hooks.onAvailableCommands(notification.update.availableCommands, cwd)
                 : Effect.void;
-            return commands.pipe(Effect.andThen(handler(notification)));
+            return commands.pipe(
+              Effect.andThen(replaySubagentSteps(notification, handler)),
+              Effect.andThen(handler(notification)),
+            );
           }),
         ),
       ),

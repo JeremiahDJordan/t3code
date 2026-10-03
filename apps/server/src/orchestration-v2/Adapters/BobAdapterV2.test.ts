@@ -31,6 +31,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import * as ServerConfig from "../../config.ts";
+import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import * as IdAllocator from "../IdAllocator.ts";
@@ -194,6 +195,8 @@ const openBob = (input: {
   readonly mockEnv?: Record<string, string>;
   /** Bob's task usage by reading, the first when a session opens. */
   readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
+  /** The steps Bob's task database holds for every subagent run. */
+  readonly subagentSteps?: TaskTranscript;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -246,6 +249,9 @@ const openBob = (input: {
                 spentIn.push(cwd);
               }),
           }
+        : {}),
+      ...(input.subagentSteps
+        ? { readSubagentSteps: () => Effect.succeed(input.subagentSteps!) }
         : {}),
     });
     const threadId = ThreadId.make("thread-bob-turn");
@@ -380,6 +386,7 @@ const runBobTurn = (input: {
   readonly interactionMode?: "default" | "plan";
   readonly mockEnv?: Record<string, string>;
   readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
+  readonly subagentSteps?: TaskTranscript;
 }) =>
   Effect.gen(function* () {
     const bob = yield* openBob(input);
@@ -576,6 +583,47 @@ describe("BobAdapterV2 turns", () => {
           .map((request) => request.params.sessionId),
         original,
       );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("writes a finished subagent's steps from Bob's database into its thread", () =>
+    Effect.gen(function* () {
+      const result = yield* runBobTurn({
+        text: "use a subagent",
+        subagentSteps: {
+          entries: [
+            { _tag: "prompt", text: "Count the files" },
+            { _tag: "message", text: "Listing the folder." },
+            {
+              _tag: "tool",
+              title: "List Files in .",
+              input: "ls",
+              output: "a.ts\nb.ts",
+              failed: false,
+            },
+          ],
+        },
+      });
+      const subagent = result.events.findLast((event) => event.type === "subagent.updated");
+      if (subagent?.type !== "subagent.updated") return assert.fail("no subagent");
+      const childThreadId = subagent.subagent.childThreadId;
+      const childTool = result.events.find(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.threadId === childThreadId &&
+          event.turnItem.type === "dynamic_tool",
+      );
+      assert.include(JSON.stringify(childTool), "List Files in .");
+      assert.include(JSON.stringify(childTool), "a.ts");
+      assert.isTrue(
+        result.events.some(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.threadId === childThreadId &&
+            JSON.stringify(event.message).includes("Listing the folder."),
+        ),
+      );
+      assert.include(JSON.stringify(subagent), "There are 2 files.");
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
