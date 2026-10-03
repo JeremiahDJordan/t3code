@@ -2,6 +2,7 @@ import { useAuth } from "@clerk/react";
 import { useAtomValue } from "@effect/atom-react";
 import type {
   AgentSessionProjectCandidate,
+  AgentSessionSource,
   EnvironmentId,
   ProjectId,
   ProviderInstanceId,
@@ -100,6 +101,8 @@ import { toastManager } from "../ui/toast";
 import { cn } from "../../lib/utils";
 import { formatRelativeTime } from "../../timestampFormat";
 
+/** `/welcome?step=import` reopens the wizard on project import, for bringing in history later. */
+
 type WizardStep = "connection" | "agents" | "import";
 const NO_ENVIRONMENTS: readonly EnvironmentId[] = [];
 
@@ -108,21 +111,26 @@ const ONBOARDING_STAGES = ["Connect", "Agents", "Projects"] as const;
 const SCAN_LIMIT_MESSAGE = "Scan limit reached. Some projects or conversations may be missing.";
 
 export function WelcomeWizard({
+  initialStep,
   localAvailable,
   onDone,
   resumeEnvironmentId,
 }: {
+  /** Opens on project import, for bringing in history after setup. */
+  readonly initialStep?: "import" | undefined;
   readonly localAvailable: boolean;
   readonly resumeEnvironmentId?: EnvironmentId | undefined;
   readonly onDone: (projectRef?: ScopedProjectRef) => void | Promise<void>;
 }) {
   const completeOnboarding = useCompleteOnboarding();
-  const [step, setStep] = useState<WizardStep>(resumeEnvironmentId ? "agents" : "connection");
+  const [step, setStep] = useState<WizardStep>(
+    initialStep ?? (resumeEnvironmentId ? "agents" : "connection"),
+  );
   const { environments } = useEnvironments();
   const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(null);
   const autoSelectedComputers = useRef(new Set<EnvironmentId>());
-  const [setupIds, setSetupIds] = useState<readonly EnvironmentId[]>(
-    resumeEnvironmentId ? [resumeEnvironmentId] : [],
+  const [setupIds, setSetupIds] = useState<readonly EnvironmentId[] | null>(
+    resumeEnvironmentId ? [resumeEnvironmentId] : null,
   );
   const [isImporting, setIsImporting] = useState(false);
   const finishingPromiseRef = useRef<Promise<boolean> | null>(null);
@@ -146,9 +154,26 @@ export function WelcomeWizard({
         ]),
     );
   }, [environments]);
-  const selectedIds =
-    selection ?? new Set(primaryEnvironment ? [primaryEnvironment.environmentId] : []);
-  const scans = useProjectScans(step === "import" ? setupIds : NO_ENVIRONMENTS);
+  const primaryEnvironmentId = primaryEnvironment?.environmentId;
+  const selectedIds = useMemo(
+    () => selection ?? new Set(primaryEnvironmentId ? [primaryEnvironmentId] : []),
+    [selection, primaryEnvironmentId],
+  );
+  // Opening on import skips Connect, so scan its default selection: the
+  // connected computers, or all of it while none has connected yet. Derived
+  // rather than captured at mount because environments may still be loading.
+  const defaultSetupIds = useMemo(() => {
+    const connected = environments
+      .filter(
+        (environment) =>
+          selectedIds.has(environment.environmentId) &&
+          environment.connection.phase === "connected",
+      )
+      .map((environment) => environment.environmentId);
+    return connected.length > 0 ? connected : [...selectedIds];
+  }, [environments, selectedIds]);
+  const activeSetupIds = setupIds ?? defaultSetupIds;
+  const scans = useProjectScans(step === "import" ? activeSetupIds : NO_ENVIRONMENTS);
   const isLoadingProjects =
     step === "import" &&
     scans.every((scan) => scan.data === null) &&
@@ -266,7 +291,7 @@ export function WelcomeWizard({
               }}
             />
           ) : step === "agents" ? (
-            <AgentsStep environmentIds={setupIds} onContinue={() => setStep("import")} />
+            <AgentsStep environmentIds={activeSetupIds} onContinue={() => setStep("import")} />
           ) : (
             <ImportStep
               scans={scans}
@@ -1401,7 +1426,7 @@ function ImportStep({
         <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6">
           <Spinner size="lg" tone="muted" />
           <p className="text-center text-sm text-muted-foreground">
-            Looking for projects from Claude Code and Codex…
+            Looking for projects from your coding agents…
           </p>
         </div>
         <div className="flex justify-end">
@@ -1478,7 +1503,7 @@ function ImportStep({
                   </div>
                 ) : scanCandidates.length === 0 ? (
                   <p className="py-2 text-sm text-muted-foreground">
-                    No existing Claude Code or Codex projects found.
+                    No projects found in your coding agents' history.
                   </p>
                 ) : null}
                 {scan.data?.truncated ? (
@@ -1718,14 +1743,14 @@ function ImportRowMeta({
   threadCount,
   lastActiveAt,
 }: {
-  readonly sources: ReadonlyArray<"claudeAgent" | "codex"> | null;
+  readonly sources: ReadonlyArray<AgentSessionSource> | null;
   readonly threadCount: number;
   readonly lastActiveAt: string | null;
 }) {
   const relative = lastActiveAt === null ? null : formatRelativeTime(lastActiveAt);
   const age = relative === null ? "" : relative.suffix === null ? "now" : relative.value;
   return (
-    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
+    <span className="ml-auto grid shrink-0 grid-cols-[1rem_1rem_1rem_2.5rem_2.25rem] items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
       <span className="flex size-4 items-center justify-center">
         {sources?.includes("claudeAgent") ? (
           <span role="img" aria-label="Claude Code">
@@ -1743,6 +1768,17 @@ function ImportRowMeta({
             <ProviderInstanceIcon
               driverKind={ProviderDriverKind.make("codex")}
               displayName="Codex"
+              iconClassName="size-3"
+            />
+          </span>
+        ) : null}
+      </span>
+      <span className="flex size-4 items-center justify-center">
+        {sources?.includes("bob") ? (
+          <span role="img" aria-label="Bob">
+            <ProviderInstanceIcon
+              driverKind={ProviderDriverKind.make("bob")}
+              displayName="Bob"
               iconClassName="size-3"
             />
           </span>

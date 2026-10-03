@@ -2,7 +2,12 @@ import * as Schema from "effect/Schema";
 import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
-export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex"]);
+/**
+ * Coding agents whose history the scanner knows how to read: Claude Code and
+ * Codex transcript homes, and Bob Shell's task database. Upstream clients decode
+ * a closed list, so servers leave `bob` out for them (`upstreamClientCompatibility`).
+ */
+export const AgentSessionSource = Schema.Literals(["claudeAgent", "codex", "bob"]);
 export type AgentSessionSource = typeof AgentSessionSource.Type;
 
 export const AgentSessionImportSource = Schema.Struct({
