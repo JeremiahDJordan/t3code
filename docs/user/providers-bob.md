@@ -37,7 +37,13 @@ one instance's environment variables give Bob a different `HOME`.
 
 T3 Code tells Bob to trust each project folder you open, and Bob remembers it, so
 you do not need to trust the folder in Bob first. After Bob has run in a project,
-its skills and MCP prompts appear in the composer's `/` menu.
+its skills and MCP prompts appear in the composer's `/` menu. When a thread moves
+to another folder, such as picking a branch that lives in another worktree, Bob
+moves the conversation with it (Bob 2.0.5 or later).
+
+Reverting a thread, or editing and resubmitting an earlier turn, rewinds Bob's
+conversation as well, as rolling back a task in Bob's IDE does: Bob continues from
+the conversation before that turn.
 
 T3 Code's Plan mode uses Bob's plan mode, and the plan Bob writes becomes the
 thread's proposed plan. After Bob has run, the model picker's **Mode** option also
