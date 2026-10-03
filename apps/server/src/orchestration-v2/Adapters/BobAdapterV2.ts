@@ -13,6 +13,7 @@ import {
   type BobSettings,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
+  type OrchestrationV2ProviderThread,
   type ProviderApprovalOption,
   type ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -34,9 +35,16 @@ import {
   type AcpToolCallState,
 } from "@t3tools/provider-acp/server/runtimeModel";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import { describeBobAcpSetupError, makeBobAcpRuntime } from "../../provider/acp/BobAcpSupport.ts";
+import {
+  deleteBobSession,
+  describeBobAcpSetupError,
+  makeBobAcpRuntime,
+  moveBobTask,
+  rewindBobTask,
+} from "../../provider/acp/BobAcpSupport.ts";
 import { bobBudgetResetsAt } from "../../provider/bobUsageLimits.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   AcpProviderCapabilitiesV2,
@@ -491,6 +499,143 @@ export function makeBobAcpAdapterFlavor(options: BobAdapterV2Options): AcpAdapte
   };
 }
 
+/** Bob's answer to resuming a task it does not have here: gone, or from another folder. */
+function isBobTaskNotHere(cause: unknown): boolean {
+  for (let current = cause; current !== null && typeof current === "object";) {
+    if (isAcpRequestError(current) && current.code === -32002) return true;
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return false;
+}
+
+function bobTaskId(providerThread: OrchestrationV2ProviderThread): string | undefined {
+  return providerThread.nativeThreadRef?.nativeId ?? undefined;
+}
+
+function withBobTaskId(
+  providerThread: OrchestrationV2ProviderThread,
+  nativeId: string,
+): OrchestrationV2ProviderThread {
+  return providerThread.nativeThreadRef === null
+    ? providerThread
+    : { ...providerThread, nativeThreadRef: { ...providerThread.nativeThreadRef, nativeId } };
+}
+
+/**
+ * Bob's session runtime: a reverted turn rewinds Bob's own conversation instead of starting an
+ * empty one, and a thread that moved folders, such as to a worktree, takes its task along.
+ */
+function wrapBobSession(
+  session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+  openedIn: string,
+  withShortLivedBob: <A>(
+    cwd: string,
+    use: (bob: AcpSessionRuntime.AcpSessionRuntime["Service"]) => Effect.Effect<A>,
+  ) => Effect.Effect<A | undefined>,
+): ProviderAdapter.ProviderAdapterV2SessionRuntime {
+  // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
+  let cwd = openedIn;
+  const follow = (policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined) => {
+    if (policy?.cwd) cwd = policy.cwd;
+  };
+  const deleteTask = (taskCwd: string, sessionId: string) =>
+    withShortLivedBob(taskCwd, (bob) => deleteBobSession(bob, sessionId)).pipe(Effect.asVoid);
+  return {
+    ...session,
+    ensureThread: (input) => {
+      follow(input.runtimePolicy);
+      return session.ensureThread(input);
+    },
+    startTurn: (input) => {
+      follow(input.runtimePolicy);
+      return session.startTurn(input);
+    },
+    // Bob resumes a task only in the folder it started in, so a thread that moved copies its
+    // task here with `_bob/task/export` and `_bob/task/import`, and the original goes once the
+    // copy opens, so Bob's history and Bobcoin totals count the conversation once.
+    resumeThread: (input) => {
+      follow(input.runtimePolicy);
+      return session.resumeThread(input).pipe(
+        Effect.catchIf(
+          (error) => isBobTaskNotHere(error) && bobTaskId(input.providerThread) !== undefined,
+          (error) =>
+            Effect.gen(function* () {
+              const original = bobTaskId(input.providerThread)!;
+              const target = cwd;
+              const moved = yield* withShortLivedBob(target, (bob) =>
+                moveBobTask(bob, original, target),
+              );
+              if (moved === undefined) return yield* error;
+              const resumed = yield* session
+                .resumeThread({
+                  ...input,
+                  providerThread: withBobTaskId(input.providerThread, moved),
+                })
+                .pipe(Effect.tapError(() => deleteTask(target, moved)));
+              yield* deleteTask(target, original);
+              return resumed;
+            }),
+        ),
+      );
+    },
+    // ACP has no rewind, so the generic rollback starts an empty conversation. Bob's task is cut
+    // instead at the first prompt Bob recorded once the first reverted turn began, as Bob's IDE
+    // rolls a task back, and the thread continues in the cut copy.
+    rollbackThread: (input) =>
+      Effect.gen(function* () {
+        const original = bobTaskId(input.providerThread);
+        if (original === undefined || input.target.type === "thread_start") {
+          const reset = yield* session.rollbackThread(input);
+          if (original !== undefined) yield* deleteTask(cwd, original);
+          return reset;
+        }
+        const targetOrdinal = input.target.providerTurn.ordinal;
+        const reverted = input.providerThreadTurns.filter((turn) => turn.ordinal > targetOrdinal);
+        const startedAtMs = reverted.flatMap((turn) =>
+          turn.startedAt === null ? [] : [DateTime.toEpochMillis(turn.startedAt)],
+        );
+        const kept = input.providerThreadTurns.filter((turn) => turn.ordinal <= targetOrdinal);
+        const unchanged: ProviderAdapter.ProviderAdapterV2ThreadSnapshot = {
+          providerThread: input.providerThread,
+          providerTurns: kept,
+          messages: [],
+          runtimeRequests: [],
+        };
+        // Nothing reverted reached Bob, so its conversation already ends before the cut.
+        if (reverted.length === 0 || startedAtMs.length === 0) return unchanged;
+        const taskCwd = cwd;
+        const rewound = yield* withShortLivedBob(taskCwd, (bob) =>
+          rewindBobTask(bob, original, taskCwd, { atMs: Math.min(...startedAtMs) }),
+        );
+        if (rewound === undefined || rewound._tag === "Failed") {
+          return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+            driver: BOB_PROVIDER,
+            providerThreadId: input.providerThread.id,
+            checkpointId: input.target.checkpointId,
+            cause: new Error(
+              `Bob could not rewind its conversation: ${rewound?.detail ?? "Bob did not start."}`,
+            ),
+          });
+        }
+        if (rewound._tag === "Unchanged") return unchanged;
+        // The generic rollback resets the adapter for the next turn and opens an empty session,
+        // which the rewound task replaces; an emptied task leaves that session as the thread's.
+        const reset = yield* session.rollbackThread(input);
+        if (rewound._tag === "Emptied") {
+          yield* deleteTask(taskCwd, original);
+          return reset;
+        }
+        const replacement = bobTaskId(reset.providerThread);
+        if (replacement !== undefined) yield* deleteTask(taskCwd, replacement);
+        yield* deleteTask(taskCwd, original);
+        return {
+          ...reset,
+          providerThread: withBobTaskId(reset.providerThread, rewound.sessionId),
+        };
+      }),
+  };
+}
+
 /** The services Bob's adapter takes from its context. */
 type BobAdapterV2Services =
   | "childProcessSpawner"
@@ -510,7 +655,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
     idAllocator: yield* IdAllocator.IdAllocatorV2,
     host: yield* ProviderHost.ProviderHost,
   };
-  return yield* makeAcpAdapterV2({
+  const adapter = yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: makeBobAcpAdapterFlavor(options),
     selfInvocation: options.selfInvocation,
@@ -519,4 +664,36 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
       ? {}
       : { continuationRequests: options.continuationRequests }),
   });
+  /** Runs `use` against a short-lived Bob in `cwd` that opens no session. Undefined if Bob fails. */
+  const withShortLivedBob = <A>(
+    cwd: string,
+    use: (bob: AcpSessionRuntime.AcpSessionRuntime["Service"]) => Effect.Effect<A>,
+  ) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const bob = yield* makeBobAcpRuntime({
+          bobSettings: options.settings,
+          environment: options.environment,
+          childProcessSpawner: options.childProcessSpawner,
+          cwd,
+          clientInfo: { name: "t3-code", version: "0.0.0" },
+        });
+        yield* bob.initialize();
+        return yield* use(bob);
+      }),
+    ).pipe(
+      Effect.provideService(Crypto.Crypto, options.crypto),
+      Effect.orElseSucceed(() => undefined),
+    );
+  return {
+    ...adapter,
+    openSession: (input) =>
+      adapter
+        .openSession(input)
+        .pipe(
+          Effect.map((session) =>
+            wrapBobSession(session, input.runtimePolicy.cwd ?? process.cwd(), withShortLivedBob),
+          ),
+        ),
+  } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
 });
