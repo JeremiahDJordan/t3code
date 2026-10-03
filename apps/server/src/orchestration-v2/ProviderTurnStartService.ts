@@ -43,7 +43,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { makeProviderFailure, providerSetupDetail } from "@t3tools/provider-core/server/failure";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import {
@@ -550,11 +550,12 @@ export const layer: Layer.Layer<
               failure: makeProviderFailure({
                 cause: failed.error,
                 message:
-                  nestedCause instanceof Error
+                  providerSetupDetail(failed.error) ??
+                  (nestedCause instanceof Error
                     ? nestedCause.message
                     : typeof nestedCause === "string"
                       ? nestedCause
-                      : failed.error.message,
+                      : failed.error.message),
                 class: "provider_error",
               }),
             },
