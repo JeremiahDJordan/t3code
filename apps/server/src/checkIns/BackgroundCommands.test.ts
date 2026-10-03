@@ -554,6 +554,32 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
     ),
   );
 
+  it.live("lists the threads with a command running, for thread lists", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const { commands, scheduler } = yield* makeHarness({ ...dirs, persistence });
+        const threads = yield* Stream.toQueue(commands.runningThreads, { capacity: "unbounded" });
+        expect(yield* Queue.take(threads)).toEqual([]);
+        const started = yield* commands.start({
+          threadId: THREAD_ID,
+          command: "sleep 30",
+          statusEveryMinutes: null,
+          note: "",
+          tailLines: 0,
+          notifyOn: null,
+        });
+        expect(yield* Queue.take(threads)).toEqual([THREAD_ID]);
+        yield* untilPid(NodePath.dirname(started.stdoutPath));
+        expect(yield* commands.stop(started.id, "user")).toBe(true);
+        yield* untilEnded(commands, scheduler);
+        expect(yield* Queue.take(threads)).toEqual([]);
+        stopTestTmux(dirs.home);
+      }),
+    ),
+  );
+
   it.live("attaches each fresh shell to the command once, even one showing old output", () =>
     Effect.scoped(
       Effect.gen(function* () {

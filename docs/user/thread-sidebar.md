@@ -252,7 +252,8 @@ Running commands show above the composer with **Terminal**, which opens a termin
 command; **Mute**, which holds back its status updates and matching lines until you unmute it,
 though the agent still hears when it ends; and **Stop**. Stopping a command gives the agent a
 short turn to hear about it. Closing the command's terminal leaves it running, but Ctrl-C in that
-terminal ends it. A thread with a running command does not settle on its own.
+terminal ends it. A thread with a running command shows as Waiting in the thread list and does
+not settle on its own.
 
 Background commands need tmux 3.2 or later on the machine running T3 Code, and the thread in
 Full access, since they run outside the agent's sandbox. Archiving a thread stops its commands;

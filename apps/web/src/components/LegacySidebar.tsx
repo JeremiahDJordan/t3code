@@ -1,4 +1,5 @@
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { useRunsBackgroundCommand } from "~/state/checkIns";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { Spinner } from "~/components/ui/spinner";
 import {
@@ -232,6 +233,8 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   easing: "ease-out",
 } as const;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
+/** Stands in for a running background command where the status pill reads background work. */
+const BACKGROUND_COMMAND_WORK = [{ taskId: "t3-background-command", kind: "command" }] as const;
 const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
   repository: "Group by repository",
   repository_path: "Group by repository path",
@@ -465,10 +468,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     [discoveredPorts, navigateToThread, openPreview, threadRef],
   );
   const isThreadRunning = !threadRuntimeCanArchive(thread.runtime);
+  // A background command the agent left running shows as Waiting, as provider background work does.
+  const runsBackgroundCommand = useRunsBackgroundCommand(thread.environmentId, thread.id);
   const threadStatus = resolveThreadStatusPill({
     thread: {
       ...thread,
       lastVisitedAt,
+      ...(runsBackgroundCommand ? { pendingBackgroundTasks: BACKGROUND_COMMAND_WORK } : {}),
     },
   });
   const linkedPullRequestStatus = useLinkedThreadPullRequest(

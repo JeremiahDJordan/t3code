@@ -26,6 +26,11 @@ export function createCheckInEnvironmentAtoms<R, E>(
       label: "environment-data:background-commands:thread",
       tag: WS_METHODS.subscribeThreadBackgroundCommands,
     }),
+    /** The environment's threads with a command running, for thread lists. */
+    backgroundCommandThreads: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
+      label: "environment-data:background-commands:threads",
+      tag: WS_METHODS.subscribeBackgroundCommandThreads,
+    }),
     stopBackgroundCommand: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:background-commands:stop",
       tag: WS_METHODS.backgroundCommandStop,

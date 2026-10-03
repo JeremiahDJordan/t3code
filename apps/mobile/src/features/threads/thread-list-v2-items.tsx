@@ -10,6 +10,7 @@ import {
 import { RowPressable } from "../../components/RowPressable";
 import { CustomSnoozeSheet } from "./CustomSnoozeSheet";
 import { appAtomRegistry } from "../../state/atom-registry";
+import { useRunsBackgroundCommand } from "../../state/checkIns";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import type { ThreadMoveDestination } from "./threadOrder";
 import type {
@@ -574,7 +575,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const selected = props.selected === true;
   const rowAppearance = getThreadListV2RowAppearance(theme, sidebarPane, selected);
 
-  const status = resolveThreadListV2Status(thread);
+  // A background command the agent left running keeps an idle thread Waiting.
+  const runsBackgroundCommand = useRunsBackgroundCommand(thread.environmentId, thread.id);
+  const resolvedStatus = resolveThreadListV2Status(thread);
+  const status = resolvedStatus === "ready" && runsBackgroundCommand ? "waiting" : resolvedStatus;
   // "Done" marks a completion the user has not opened yet — same emerald
   // label as the web sidebar, sourced from the server-side visited watermark
   // so checking a thread on any device clears it everywhere.

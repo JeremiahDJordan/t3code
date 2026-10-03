@@ -10,6 +10,7 @@ import {
 import { releaseComposerDraftUploads } from "../lib/composerDraftUploads";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
+import { useRunsBackgroundCommand } from "~/state/checkIns";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
@@ -1231,7 +1232,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
-  const status = resolveSidebarThreadStatus(thread);
+  // A background command the agent left running keeps an idle thread Waiting.
+  const runsBackgroundCommand = useRunsBackgroundCommand(thread.environmentId, thread.id);
+  const resolvedStatus = resolveSidebarThreadStatus(thread);
+  const status = resolvedStatus === "ready" && runsBackgroundCommand ? "waiting" : resolvedStatus;
   const isInFlight =
     status === "working" || status === "waiting" || status === "approval" || status === "input";
   // A woken thread reappears at its original position (the sort is

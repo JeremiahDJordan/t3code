@@ -3266,6 +3266,12 @@ const makeWsRpcLayer = (
             backgroundCommands.stream(input.threadId),
             { "rpc.aggregate": "orchestration" },
           ),
+        [WS_METHODS.subscribeBackgroundCommandThreads]: () =>
+          observeRpcStream(
+            WS_METHODS.subscribeBackgroundCommandThreads,
+            backgroundCommands.runningThreads,
+            { "rpc.aggregate": "orchestration" },
+          ),
         [WS_METHODS.backgroundCommandStop]: (input) =>
           observeRpcEffect(
             WS_METHODS.backgroundCommandStop,
