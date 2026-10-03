@@ -11,8 +11,9 @@
  * and tasks move with `_bob/task/export` and `_bob/task/import`.
  *
  * A prompt's text picks what Bob does: "use a subagent", "run a command", "say nothing" (an
- * empty reply) and "work slowly", which runs a tool call until `T3_ACP_BOB_RELEASE_PATH` exists
- * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`.
+ * empty reply), "work slowly", which runs a tool call until `T3_ACP_BOB_RELEASE_PATH` exists
+ * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`, and
+ * "finish later", whose tool call runs until that file exists and which then replies.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
@@ -290,6 +291,60 @@ function workSlowly(id: number | string, sessionId: string): void {
   }, 10);
 }
 
+/**
+ * Runs a quick tool call to its end, then a subagent and a tool call until the release file
+ * exists, then ends both, replies and ends the prompt.
+ */
+function finishLater(id: number | string, sessionId: string): void {
+  notify(sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId: "quick-before",
+    title: "ls",
+    kind: "execute",
+    status: "in_progress",
+  });
+  notify(sessionId, {
+    sessionUpdate: "tool_call_update",
+    toolCallId: "quick-before",
+    status: "completed",
+  });
+  notify(sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId: "subagent-later",
+    title: "Running subagent: Count the files",
+    kind: "other",
+    status: "in_progress",
+    rawInput: { description: "Count the files" },
+  });
+  notify(sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId: "slow-later",
+    title: "sleep 60",
+    kind: "execute",
+    status: "in_progress",
+  });
+  const timer = setInterval(() => {
+    if (!releasePath || !NodeFS.existsSync(releasePath)) return;
+    clearInterval(timer);
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "slow-later",
+      status: "completed",
+    });
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "subagent-later",
+      status: "completed",
+      rawOutput: { result: "<task_result>There are 2 files.</task_result>" },
+    });
+    notify(sessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "Finished after the restart." },
+    });
+    send({ id, result: { stopReason: "end_turn" } });
+  }, 10);
+}
+
 const lines = NodeReadline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   if (!line.trim()) return;
@@ -314,6 +369,14 @@ lines.on("line", (line) => {
     promptText(message.params?.prompt).includes("work slowly")
   ) {
     workSlowly(message.id, String(message.params?.sessionId));
+    return;
+  }
+  if (
+    message.method === "session/prompt" &&
+    message.id !== undefined &&
+    promptText(message.params?.prompt).includes("finish later")
+  ) {
+    finishLater(message.id, String(message.params?.sessionId));
     return;
   }
   // Notifications and responses to Bob's own requests need no answer.

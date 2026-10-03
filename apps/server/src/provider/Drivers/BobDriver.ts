@@ -8,11 +8,19 @@
  *
  * @module provider/Drivers/BobDriver
  */
-import { BobSettings, ProviderDriverKind } from "@t3tools/contracts";
+import {
+  BobSettings,
+  ProviderDriverKind,
+  ProviderThreadId,
+  type ServerSettings,
+  ThreadId,
+} from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
@@ -25,7 +33,16 @@ import * as IdAllocator from "../../orchestration-v2/IdAllocator.ts";
 import * as ProviderContinuationRequests from "../../orchestration-v2/ProviderContinuationRequests.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeBobTextGeneration } from "../../textGeneration/BobTextGeneration.ts";
+import * as ProcessRunner from "../../processRunner.ts";
+import { ServerActivation } from "../../serverActivation.ts";
+import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import {
+  bobRelayHasTurn,
+  makeBobRelayHost,
+  makeBobRelays,
+  readBobRelayMeta,
+} from "../acp/BobRelay.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import {
   buildInitialBobProviderSnapshot,
@@ -33,6 +50,7 @@ import {
   enrichBobSnapshot,
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
+  withBobSessionHostStatus,
 } from "../Layers/BobProvider.ts";
 import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
 import { readBobSubagentTranscript } from "../Layers/bobSubagentTranscript.ts";
@@ -63,12 +81,44 @@ import {
 } from "../providerUpdateSettings.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
+const decodeBobSettingsOption = Schema.decodeUnknownOption(BobSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("bob");
 const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
   provider: DRIVER_KIND,
   packageName: null,
 });
+
+/**
+ * The Bob instances set to run Bob in tmux: those whose relays are theirs to take back. The
+ * built-in instance takes its settings from `providers.bob` unless `providerInstances` has it.
+ */
+function tmuxBobInstanceIds(settings: ServerSettings): ReadonlySet<string> {
+  const instances: Record<string, { readonly driver: string; readonly config?: unknown }> = {
+    ...(!Object.hasOwn(settings.providerInstances, DRIVER_KIND)
+      ? { [DRIVER_KIND]: { driver: DRIVER_KIND, config: settings.providers.bob } }
+      : {}),
+    ...settings.providerInstances,
+  };
+  return new Set(
+    Object.entries(instances).flatMap(([instanceId, instance]) =>
+      instance.driver === DRIVER_KIND &&
+      Option.exists(
+        decodeBobSettingsOption(instance.config ?? {}),
+        (config) => config.sessionHost === "tmux",
+      )
+        ? [instanceId]
+        : [],
+    ),
+  );
+}
+
+/**
+ * The tmux instances whose relays this process already looked through. Only the first build of
+ * an instance after T3 starts finds relays a T3 before it left; a rebuild after a settings change
+ * would find its own sessions' relays.
+ */
+const instancesWithScannedRelays = new Set<string>();
 
 export type BobDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
@@ -123,6 +173,26 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       });
       const effectiveConfig = { ...config, enabled } satisfies BobSettings;
       const textGeneration = yield* makeBobTextGeneration(effectiveConfig, processEnv);
+      // An instance that runs Bob in tmux uses T3's private tmux server, as background commands do.
+      const relayHost =
+        effectiveConfig.sessionHost === "tmux"
+          ? yield* Effect.gen(function* () {
+              const tmux = yield* TmuxServer.make.pipe(
+                Effect.provideServiceEffect(ProcessRunner.ProcessRunner, ProcessRunner.make()),
+              );
+              return yield* makeBobRelayHost({ tmux, stateDir: serverConfig.stateDir });
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderDriverError({
+                    driver: DRIVER_KIND,
+                    instanceId,
+                    detail: `Could not prepare Bob's tmux sessions: ${cause.message}`,
+                    cause,
+                  }),
+              ),
+            )
+          : undefined;
 
       const checkProvider = checkBobProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.flatMap((snapshot) =>
@@ -134,6 +204,13 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
                   ...(plan ? { auth: { ...snapshot.auth, label: plan } } : {}),
                   usageLimits,
                 })),
+              )
+            : Effect.succeed(snapshot),
+        ),
+        Effect.flatMap((snapshot) =>
+          relayHost
+            ? relayHost.available.pipe(
+                Effect.map((tmuxAvailable) => withBobSessionHostStatus(snapshot, tmuxAvailable)),
               )
             : Effect.succeed(snapshot),
         ),
@@ -195,7 +272,69 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         setWorkspaceUsageLimits,
       });
       const driverScope = yield* Effect.scope;
+      // Bob's relays from before this start: those no instance runs any more stop, this
+      // instance's idle ones stop, and each still running a prompt gets a run to finish it in.
+      const adoptable = new Map<string, string>();
+      const scanned = yield* Deferred.make<void>();
+      if (relayHost === undefined || instancesWithScannedRelays.has(instanceId)) {
+        yield* Deferred.succeed(scanned, undefined);
+      } else {
+        instancesWithScannedRelays.add(instanceId);
+        // Startup recovery cancels every run it finds, so the runs that finish Bob's prompts wait
+        // until the server is live.
+        const activation = yield* ServerActivation;
+        yield* Effect.gen(function* () {
+          const keeps = tmuxBobInstanceIds(yield* serverSettings.getSettings);
+          const owners: Array<{ readonly threadId: string; readonly providerThreadId: string }> =
+            [];
+          for (const { relayId, state } of yield* relayHost.scan) {
+            const meta = readBobRelayMeta(state);
+            if (meta === undefined || !keeps.has(meta.instanceId)) {
+              yield* relayHost.kill(relayId);
+              continue;
+            }
+            if (meta.instanceId !== instanceId) continue;
+            if (!bobRelayHasTurn(state) || meta.sessionId === undefined) {
+              yield* relayHost.kill(relayId);
+              continue;
+            }
+            adoptable.set(meta.sessionId, relayId);
+            if (meta.threadId !== undefined && meta.providerThreadId !== undefined) {
+              owners.push({ threadId: meta.threadId, providerThreadId: meta.providerThreadId });
+            }
+          }
+          yield* Deferred.succeed(scanned, undefined);
+          yield* activation ?? Effect.void;
+          for (const owner of owners) {
+            yield* continuationRequests.offer({
+              threadId: ThreadId.make(owner.threadId),
+              providerThreadId: ProviderThreadId.make(owner.providerThreadId),
+              driver: DRIVER_KIND,
+              detail: null,
+              notification: {
+                source: { kind: "background_task" },
+                outcome: "updated",
+                summary: "Bob kept working while T3 Code restarted",
+              },
+            });
+          }
+        }).pipe(
+          Effect.ignore,
+          Effect.ensuring(Deferred.succeed(scanned, undefined)),
+          Effect.forkIn(driverScope),
+        );
+      }
       const orchestrationAdapter = makeBobAdapterV2({
+        ...(relayHost
+          ? {
+              relays: makeBobRelays({
+                host: relayHost,
+                instanceId,
+                adoptable,
+                ready: Deferred.await(scanned),
+              }),
+            }
+          : {}),
         instanceId,
         settings: effectiveConfig,
         environment: processEnv,
