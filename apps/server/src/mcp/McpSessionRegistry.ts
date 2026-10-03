@@ -39,6 +39,12 @@ export interface McpSessionRegistryShape {
    * credential even when it goes a long time without touching an MCP tool.
    */
   readonly touch: (threadId: ThreadId) => Effect.Effect<void>;
+  /**
+   * Accepts the token whose SHA-256 hex digest is `tokenHash` wherever `rawToken` is accepted,
+   * and revokes it with `rawToken`'s credential. For a provider process that outlived the
+   * server that issued its token; false when `rawToken` is not a live credential.
+   */
+  readonly alias: (rawToken: string, tokenHash: string) => Effect.Effect<boolean>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
@@ -197,6 +203,21 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     },
   );
 
+  const alias: McpSessionRegistryShape["alias"] = Effect.fn("McpSessionRegistry.alias")(
+    function* (rawToken, tokenHash) {
+      const issuedHash = yield* hashToken(rawToken);
+      const timestamp = yield* currentTimeMillis;
+      return yield* SynchronizedRef.modify(state, ({ records }) => {
+        const current = pruneDead(records, timestamp);
+        const record = current.get(issuedHash);
+        if (!record) return [false, { records: current }] as const;
+        const next = new Map(current);
+        next.set(tokenHash, { tokenHash, scope: record.scope, lastAliveAt: timestamp });
+        return [true, { records: next }] as const;
+      });
+    },
+  );
+
   const revokeWhere = (predicate: (record: CredentialRecord) => boolean) =>
     SynchronizedRef.update(state, ({ records }) => ({
       records: new Map(Array.from(records).filter(([, record]) => !predicate(record))),
@@ -206,6 +227,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     issue,
     resolve,
     touch,
+    alias,
     revokeProviderSession: Effect.fn("McpSessionRegistry.revokeProviderSession")(
       function* (providerSessionId) {
         yield* revokeWhere((record) => record.scope.thread.providerSessionId === providerSessionId);
@@ -246,6 +268,15 @@ export const issueActiveMcpCredential = (
         .revokeThread(request.threadId)
         .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
     : Effect.undefined;
+
+/** `alias` on the running server's registry, for an `Authorization` header it issued. */
+export const aliasActiveMcpCredential = (
+  authorizationHeader: string,
+  tokenHash: string,
+): Effect.Effect<boolean> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.alias(authorizationHeader.replace(/^Bearer\s+/, ""), tokenHash)
+    : Effect.succeed(false);
 
 /**
  * Refreshes the liveness of a thread's MCP credential. Called on every provider
