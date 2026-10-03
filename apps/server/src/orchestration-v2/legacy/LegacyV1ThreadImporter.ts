@@ -32,6 +32,7 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as EventSink from "../EventSink.ts";
 import { makeKeyedSerialExecutor } from "../KeyedSerialExecutor.ts";
 import { randomUuidV4 } from "../RandomUuid.ts";
+import { relinkMigratedBobThreads } from "./bobThreadRelink.ts";
 
 const IMPORT_EVENT_PREFIX = "migration:v1";
 const TRANSCRIPT_EVENT_BATCH_SIZE = 100;
@@ -652,6 +653,11 @@ const make = Effect.gen(function* () {
       importedThreadCount += 1;
       importedMessageCount += previews.length;
     }
+    // This fork: migrated Bob threads continue their Bob task.
+    yield* relinkMigratedBobThreads.pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.provideService(EventSink.EventSinkV2, eventSink),
+    );
     return { importedThreadCount, importedMessageCount };
   });
 
