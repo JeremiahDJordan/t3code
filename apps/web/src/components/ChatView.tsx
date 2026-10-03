@@ -103,12 +103,14 @@ import {
   deriveProviderSubagentStatus,
   deriveReportedModelSelection,
   formatModelSelectionEffort,
+  deriveRetryableThreadRun,
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveLatestThreadRun,
   deriveThreadRuntime,
   presentPendingBackgroundWork,
   presentProviderGoal,
+  type RetryableThreadRun,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
@@ -2267,6 +2269,14 @@ export default function ChatView(props: ChatViewProps) {
       ? run.id
       : null;
   }, [isServerThread, serverProjection, serverRuntime?.lastErrorClass]);
+  // A run its provider failed in a way worth retrying offers Retry on its failure row.
+  const retryableRun = useMemo(
+    () =>
+      isServerThread && serverProjection !== null
+        ? deriveRetryableThreadRun(serverProjection)
+        : null,
+    [isServerThread, serverProjection],
+  );
   const parentSubagentThreadId =
     activeThread?.lineage.relationshipToParent === "subagent"
       ? activeThread.lineage.parentThreadId
@@ -8569,6 +8579,36 @@ export default function ChatView(props: ChatViewProps) {
     void sendStandaloneCommand("/compact", "Failed to compact context.");
   };
 
+  /** Starts a run that continues `runId` with `message`; the server refuses it once that run is not the latest. */
+  const startManualContinuation = async (
+    threadId: ThreadId,
+    runId: RunId,
+    message: RetryableThreadRun["message"],
+    /** The model the composer shows, which the new run uses. */
+    modelSelection?: ModelSelection,
+  ) => {
+    const settingsResult = await persistThreadSettingsForNextTurn({
+      threadId,
+      createdAt: new Date().toISOString(),
+      ...(localCheckoutBranchMismatch ? { branch: localCheckoutBranchMismatch.currentBranch } : {}),
+      runtimeMode,
+      interactionMode,
+    });
+    if (settingsResult._tag === "Failure") return settingsResult;
+    return startThreadTurn({
+      environmentId,
+      input: {
+        threadId,
+        manualContinuationOfRunId: runId,
+        message: { messageId: newMessageId(), role: "user", attachments: [], ...message },
+        ...(modelSelection ? { modelSelection } : {}),
+        runtimeMode,
+        interactionMode,
+        dispatchMode: "start",
+      },
+    });
+  };
+
   const onResume = async () => {
     if (
       !activeThread ||
@@ -8592,35 +8632,12 @@ export default function ChatView(props: ChatViewProps) {
         if (resumableRunId === null) {
           return resumeThreadQueue({ environmentId, input: { threadId } });
         }
-        const createdAt = new Date().toISOString();
-        const settingsResult = await persistThreadSettingsForNextTurn({
+        const turnResult = await startManualContinuation(
           threadId,
-          createdAt,
-          ...(localCheckoutBranchMismatch
-            ? { branch: localCheckoutBranchMismatch.currentBranch }
-            : {}),
-          runtimeMode,
-          interactionMode,
-        });
-        if (settingsResult._tag === "Failure") return settingsResult;
-        const modelSelection = composerRef.current?.getSendContext().selectedModelSelection;
-        const turnResult = await startThreadTurn({
-          environmentId,
-          input: {
-            threadId,
-            manualContinuationOfRunId: resumableRunId,
-            ...(modelSelection ? { modelSelection } : {}),
-            message: {
-              messageId: newMessageId(),
-              role: "user",
-              text: "Continue where you left off.",
-              attachments: [],
-            },
-            runtimeMode,
-            interactionMode,
-            dispatchMode: "start",
-          },
-        });
+          resumableRunId,
+          { text: "Continue where you left off." },
+          composerRef.current?.getSendContext().selectedModelSelection,
+        );
         if (turnResult._tag === "Failure" || !hasHeldQueuedRuns) return turnResult;
         clearUsageLimitsFor(routeThreadKey);
         return resumeThreadQueue({ environmentId, input: { threadId } });
@@ -8638,6 +8655,56 @@ export default function ChatView(props: ChatViewProps) {
         clearUsageLimitsFor(routeThreadKey);
         if (currentRouteThreadKeyRef.current === routeThreadKey) scrollToEnd();
       }
+    } finally {
+      sendInFlightRef.current = false;
+      setResumingThreadKeys((current) => {
+        const next = new Set(current);
+        next.delete(routeThreadKey);
+        return next;
+      });
+    }
+  };
+
+  // Retry on a failure row sends the failed run's message again as a new run with the thread's
+  // current settings. False when it was not sent, so the row offers it again.
+  const onRetryRun = async (failureItemId: string): Promise<boolean> => {
+    if (
+      !activeThread ||
+      retryableRun === null ||
+      retryableRun.failureItemId !== failureItemId ||
+      isSendBusy ||
+      isResuming ||
+      isConnecting ||
+      isRevertingCheckpoint ||
+      threadDetailLoading ||
+      activeEnvironmentUnavailable ||
+      sendInFlightRef.current
+    ) {
+      return false;
+    }
+    const threadId = activeThread.id;
+    sendInFlightRef.current = true;
+    setResumingThreadKeys((current) => new Set(current).add(routeThreadKey));
+    setThreadError(threadId, null);
+    try {
+      const result = await startManualContinuation(
+        threadId,
+        retryableRun.runId,
+        retryableRun.message,
+        composerRef.current?.getSendContext().selectedModelSelection,
+      );
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            threadId,
+            error instanceof Error ? error.message : "Could not send the message again.",
+          );
+        }
+        return false;
+      }
+      if (currentRouteThreadKeyRef.current === routeThreadKey) scrollToEnd();
+      return true;
     } finally {
       sendInFlightRef.current = false;
       setResumingThreadKeys((current) => {
@@ -10832,6 +10899,7 @@ export default function ChatView(props: ChatViewProps) {
     void onRevertToTurnCountRef.current(targetTurnCount, messageId);
   };
   const onRevertTimelineTurnStable = useStableCallback(onRevertTimelineTurn);
+  const onRetryTimelineRunStable = useStableCallback(onRetryRun);
 
   const pendingSidebarFileDrops = useSidebarPendingFileDropStore((state) => state.pending);
   const consumePendingFileDrop = useSidebarPendingFileDropStore(
@@ -11351,6 +11419,10 @@ export default function ChatView(props: ChatViewProps) {
                   )?.serverConfig?.providers ?? EMPTY_PROVIDERS
                 }
                 runs={paintOnlyDisplayedTimeline ? [] : (serverProjection?.runs ?? [])}
+                retryFailureItemId={
+                  paintOnlyDisplayedTimeline ? null : (retryableRun?.failureItemId ?? null)
+                }
+                onRetryRun={onRetryTimelineRunStable}
                 latestRun={paintOnlyDisplayedTimeline ? null : activeActivityRun}
                 runningRunId={paintOnlyDisplayedTimeline ? null : activeRunningTurnId}
                 turnDiffSummaries={
