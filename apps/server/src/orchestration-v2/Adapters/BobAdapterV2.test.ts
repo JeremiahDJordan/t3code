@@ -5,11 +5,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   BobSettings,
+  CheckpointId,
   MessageId,
   NodeId,
   ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
+  type OrchestrationV2ProviderThread,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -32,6 +34,7 @@ import * as ServerConfig from "../../config.ts";
 import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import * as IdAllocator from "../IdAllocator.ts";
+import * as ProviderAdapter from "../ProviderAdapter.ts";
 import { type ProviderAdapterV2Event, ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import {
   BOB_EMPTY_REPLY_MESSAGE,
@@ -178,20 +181,18 @@ const sessionLayer = Layer.mergeAll(
   ),
 );
 
-interface BobTurnResult {
-  readonly events: ReadonlyArray<ProviderAdapterV2Event>;
-  /** The JSON-RPC methods T3 sent the mock Bob, in order. */
-  readonly methods: ReadonlyArray<string>;
-  readonly commands: ReadonlyArray<{ readonly names: ReadonlyArray<string>; readonly cwd: string }>;
-  readonly modes: ReadonlyArray<{ readonly ids: ReadonlyArray<string>; readonly cwd: string }>;
+interface BobRequest {
+  readonly method: string;
+  readonly params: Record<string, unknown>;
 }
 
-/** Runs one turn through the V2 adapter against the mock Bob, until the turn ends. */
-const runBobTurn = (input: {
-  readonly text: string;
-  readonly interactionMode?: "default" | "plan";
+/**
+ * Opens the V2 adapter against the mock Bob, which records every request and keeps its tasks in a
+ * file every mock Bob shares, as real Bobs share their task database.
+ */
+const openBob = (input: {
   readonly mockEnv?: Record<string, string>;
-  /** Bob's task usage by reading, the first when the session opens. */
+  /** Bob's task usage by reading, the first when a session opens. */
   readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
 }) =>
   Effect.gen(function* () {
@@ -207,13 +208,17 @@ const runBobTurn = (input: {
     const binaryPath = writeFakeCli({
       directory: path.join(tempDir, "bin"),
       name: "bob",
-      env: { T3_ACP_REQUEST_LOG_PATH: requestLogPath, ...input.mockEnv },
+      env: {
+        T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        T3_ACP_BOB_STATE_PATH: path.join(tempDir, "bob-state.json"),
+        ...input.mockEnv,
+      },
       source: execScriptSource({ scriptPath: mockPath }),
     });
     const commands: Array<{ names: ReadonlyArray<string>; cwd: string }> = [];
+    const modes: Array<{ ids: ReadonlyArray<string>; cwd: string }> = [];
     const spentIn: Array<string> = [];
     let usageReading = 0;
-    const modes: Array<{ ids: ReadonlyArray<string>; cwd: string }> = [];
     const instanceId = ProviderInstanceId.make("bob-turn-test");
     const adapter = makeBobAdapterV2({
       instanceId,
@@ -243,78 +248,157 @@ const runBobTurn = (input: {
           }
         : {}),
     });
-    const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-      runtimeMode: "full-access",
-      interactionMode: input.interactionMode ?? "default",
-      cwd: workspace,
-    });
     const threadId = ThreadId.make("thread-bob-turn");
     const modelSelection = { instanceId, model: "bob-default" } as const;
-    const session = yield* adapter.openSession({
-      threadId,
-      providerSessionId: ProviderSessionId.make("provider-session-bob-turn"),
-      modelSelection,
-      runtimePolicy,
-    });
-    const providerThread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
-    const now = yield* DateTime.now;
-    const collected = yield* session.events.pipe(
-      Stream.takeUntil((event) => event.type === "turn.terminal"),
-      Stream.runCollect,
-      Effect.forkScoped,
-    );
-    yield* session.startTurn({
-      appThread: {
-        createdBy: "user",
-        creationSource: "web",
-        id: threadId,
-        projectId: ProjectId.make("project-bob-turn"),
-        title: "Bob turn",
-        providerInstanceId: instanceId,
+    const policyFor = (cwd: string, interactionMode: "default" | "plan" = "default") =>
+      ProviderAdapterV2RuntimePolicy.make({ runtimeMode: "full-access", interactionMode, cwd });
+    let sessions = 0;
+    let turns = 0;
+    /** Opens a session in `cwd`, as a turn after a server start or a folder change does. */
+    const openSession = (cwd: string) =>
+      adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make(`provider-session-bob-${++sessions}`),
         modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: input.interactionMode ?? "default",
-        branch: null,
-        worktreePath: workspace,
-        activeProviderThreadId: providerThread.id,
-        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
-        forkedFrom: null,
-        createdAt: now,
-        updatedAt: now,
-        archivedAt: null,
-        settledOverride: null,
-        settledAt: null,
-        lastVisitedAt: null,
-        deletedAt: null,
-      },
-      threadId,
-      runId: RunId.make("run-bob-turn"),
-      runOrdinal: 1,
-      providerTurnOrdinal: 1,
-      attemptId: RunAttemptId.make("attempt-bob-turn"),
-      rootNodeId: NodeId.make("node-bob-turn"),
-      providerThread,
-      message: {
-        createdBy: "user",
-        creationSource: "web",
-        messageId: MessageId.make("message-bob-turn"),
-        text: input.text,
-        attachments: [],
-      },
-      modelSelection,
-      runtimePolicy,
-    });
-    const events = Array.from(yield* Fiber.join(collected));
-    const methods = NodeFS.readFileSync(requestLogPath, "utf8")
-      .trim()
-      .split("\n")
-      .flatMap((line) => {
-        const message = JSON.parse(line) as { readonly method?: string };
-        return message.method ? [message.method] : [];
+        runtimePolicy: policyFor(cwd),
       });
-    return { events, methods, commands, modes, workspace, spentIn } satisfies BobTurnResult & {
-      readonly workspace: string;
-      readonly spentIn: ReadonlyArray<string>;
+    /** Runs one turn on `session` until it ends, and returns its events. */
+    const runTurn = (
+      session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
+      providerThread: OrchestrationV2ProviderThread,
+      text: string,
+      options: { readonly cwd?: string; readonly interactionMode?: "default" | "plan" } = {},
+    ) =>
+      Effect.gen(function* () {
+        const turn = ++turns;
+        const cwd = options.cwd ?? workspace;
+        const runtimePolicy = policyFor(cwd, options.interactionMode);
+        const now = yield* DateTime.now;
+        const collected = yield* session.events.pipe(
+          Stream.takeUntil((event) => event.type === "turn.terminal"),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* session.startTurn({
+          appThread: {
+            createdBy: "user",
+            creationSource: "web",
+            id: threadId,
+            projectId: ProjectId.make("project-bob-turn"),
+            title: "Bob turn",
+            providerInstanceId: instanceId,
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: options.interactionMode ?? "default",
+            branch: null,
+            worktreePath: cwd,
+            activeProviderThreadId: providerThread.id,
+            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+            archivedAt: null,
+            settledOverride: null,
+            settledAt: null,
+            lastVisitedAt: null,
+            deletedAt: null,
+          },
+          threadId,
+          runId: RunId.make(`run-bob-${turn}`),
+          runOrdinal: turn,
+          providerTurnOrdinal: turn,
+          attemptId: RunAttemptId.make(`attempt-bob-${turn}`),
+          rootNodeId: NodeId.make(`node-bob-${turn}`),
+          providerThread,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make(`message-bob-${turn}`),
+            text,
+            attachments: [],
+          },
+          modelSelection,
+          runtimePolicy,
+        });
+        return Array.from(yield* Fiber.join(collected));
+      });
+    /** When the mock Bobs stamped each prompt they received, in order. */
+    const promptTimestamps = (): ReadonlyArray<number> => {
+      const state = JSON.parse(
+        NodeFS.readFileSync(path.join(tempDir, "bob-state.json"), "utf8"),
+      ) as {
+        readonly tasks: Record<
+          string,
+          {
+            readonly messages: ReadonlyArray<{
+              readonly role: string;
+              readonly data: { readonly _meta?: { readonly timestamp?: number } };
+            }>;
+          }
+        >;
+      };
+      return Object.values(state.tasks)
+        .flatMap((task) => task.messages)
+        .flatMap((message) =>
+          message.role === "user" && message.data._meta?.timestamp !== undefined
+            ? [message.data._meta.timestamp]
+            : [],
+        )
+        .toSorted((a, b) => a - b);
+    };
+    /** The requests T3 sent every mock Bob, in order. */
+    const requests = (): ReadonlyArray<BobRequest> =>
+      NodeFS.readFileSync(requestLogPath, "utf8")
+        .trim()
+        .split("\n")
+        .flatMap((line) => {
+          const message = JSON.parse(line) as {
+            readonly method?: string;
+            readonly params?: Record<string, unknown>;
+          };
+          return message.method ? [{ method: message.method, params: message.params ?? {} }] : [];
+        });
+    return {
+      threadId,
+      modelSelection,
+      workspace,
+      tempDir,
+      commands,
+      modes,
+      spentIn,
+      policyFor,
+      openSession,
+      runTurn,
+      requests,
+      promptTimestamps,
+    };
+  });
+
+/** Runs one turn through the V2 adapter against the mock Bob, until the turn ends. */
+const runBobTurn = (input: {
+  readonly text: string;
+  readonly interactionMode?: "default" | "plan";
+  readonly mockEnv?: Record<string, string>;
+  readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
+}) =>
+  Effect.gen(function* () {
+    const bob = yield* openBob(input);
+    const session = yield* bob.openSession(bob.workspace);
+    const providerThread = yield* session.ensureThread({
+      threadId: bob.threadId,
+      modelSelection: bob.modelSelection,
+      runtimePolicy: bob.policyFor(bob.workspace, input.interactionMode),
+    });
+    const events = yield* bob.runTurn(session, providerThread, input.text, {
+      ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+    });
+    return {
+      events,
+      methods: bob.requests().map((request) => request.method),
+      commands: bob.commands,
+      modes: bob.modes,
+      workspace: bob.workspace,
+      spentIn: bob.spentIn,
     };
   });
 
@@ -395,6 +479,103 @@ describe("BobAdapterV2 turns", () => {
         { usedTokens: 1_200, maxTokens: 200_000, cost: { amount: 1.42, currency: "Bobcoins" } },
       );
       assert.deepEqual(result.spentIn, [result.workspace]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("rewinds Bob's conversation to before a reverted turn", () =>
+    Effect.gen(function* () {
+      const bob = yield* openBob({});
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      const providerTurnsOf = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+        events.flatMap((event) =>
+          event.type === "provider_turn.updated" ? [event.providerTurn] : [],
+        );
+      const first = providerTurnsOf(yield* bob.runTurn(session, providerThread, "first")).at(-1)!;
+      const secondEvents = yield* bob.runTurn(session, providerThread, "second");
+      // The reverted turn began when Bob stamped its prompt; the test clock cannot say when.
+      const second = {
+        ...providerTurnsOf(secondEvents).at(-1)!,
+        startedAt: DateTime.makeUnsafe(bob.promptTimestamps()[1]!),
+      };
+      // The thread as orchestration keeps it, bound to Bob's task once a turn ran.
+      const boundThread = secondEvents.findLast(
+        (event) => event.type === "provider_thread.updated",
+      );
+      assert.isDefined(boundThread);
+      if (boundThread?.type !== "provider_thread.updated") return;
+      const original = boundThread.providerThread.nativeThreadRef?.nativeId;
+      assert.isDefined(original);
+      const rolledBack = yield* session.rollbackThread({
+        providerThread: boundThread.providerThread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint-first"),
+          appRunOrdinal: 1,
+          providerTurn: first,
+        },
+        providerThreadTurns: [first, second],
+      });
+      const rewound = rolledBack.providerThread.nativeThreadRef?.nativeId;
+      assert.match(rewound ?? "", /^mock-imported-/);
+      const exported = bob.requests().find((request) => request.method === "_bob/task/import");
+      // Only the first turn's prompt and reply go into the rewound task.
+      const kept = JSON.stringify(exported?.params.snapshot);
+      assert.include(kept, "first");
+      assert.notInclude(kept, "second");
+      const deleted = bob
+        .requests()
+        .filter((request) => request.method === "session/delete")
+        .map((request) => request.params.sessionId);
+      assert.include(deleted, original);
+      // The next turn continues the rewound task.
+      yield* bob.runTurn(session, rolledBack.providerThread, "third");
+      const resumed = bob
+        .requests()
+        .filter((request) => request.method === "session/resume")
+        .map((request) => request.params.sessionId);
+      assert.include(resumed, rewound);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("takes a thread's task along when it moves to another folder", () =>
+    Effect.gen(function* () {
+      const bob = yield* openBob({});
+      const first = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* first.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      const firstEvents = yield* bob.runTurn(first, providerThread, "first");
+      const boundThread = firstEvents.findLast((event) => event.type === "provider_thread.updated");
+      if (boundThread?.type !== "provider_thread.updated") return assert.fail("no bound thread");
+      const original = boundThread.providerThread.nativeThreadRef?.nativeId;
+      assert.isDefined(original);
+      const fileSystem = yield* FileSystem.FileSystem;
+      const worktree = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-bob-v2-worktree-" });
+      const moved = yield* bob.openSession(worktree);
+      const resumed = yield* moved.resumeThread({
+        providerThread: boundThread.providerThread,
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(worktree),
+      });
+      const copy = resumed.nativeThreadRef?.nativeId;
+      assert.match(copy ?? "", /^mock-imported-/);
+      const imported = bob.requests().find((request) => request.method === "_bob/task/import");
+      assert.equal(imported?.params.cwd, worktree);
+      assert.include(
+        bob
+          .requests()
+          .filter((request) => request.method === "session/delete")
+          .map((request) => request.params.sessionId),
+        original,
+      );
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
