@@ -198,6 +198,8 @@ const openBob = (input: {
   readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
   /** The steps Bob's task database holds for every subagent run. */
   readonly subagentSteps?: TaskTranscript;
+  /** The Bob mode the thread picked in the model picker. */
+  readonly mode?: string;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -256,7 +258,11 @@ const openBob = (input: {
         : {}),
     });
     const threadId = ThreadId.make("thread-bob-turn");
-    const modelSelection = { instanceId, model: "bob-default" } as const;
+    const modelSelection = {
+      instanceId,
+      model: "bob-default",
+      ...(input.mode ? { options: [{ id: "_t3/session-mode", value: input.mode }] } : {}),
+    };
     const policyFor = (cwd: string, interactionMode: "default" | "plan" = "default") =>
       ProviderAdapterV2RuntimePolicy.make({ runtimeMode: "full-access", interactionMode, cwd });
     let sessions = 0;
@@ -388,6 +394,7 @@ const runBobTurn = (input: {
   readonly mockEnv?: Record<string, string>;
   readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
   readonly subagentSteps?: TaskTranscript;
+  readonly mode?: string;
 }) =>
   Effect.gen(function* () {
     const bob = yield* openBob(input);
@@ -454,6 +461,24 @@ describe("BobAdapterV2 turns", () => {
         makeProviderFailure({ cause: unlicensed }).message,
         "Run bob with --accept-license to accept the license. Run `bob` once in a terminal to accept it.",
       );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("says when Bob lacks the mode a turn picked, which then runs in Agent mode", () =>
+    Effect.gen(function* () {
+      const notices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+        events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [event.turnItem.message]
+            : [],
+        );
+      const missing = yield* runBobTurn({ text: "hello", mode: "architect" });
+      assert.equal(terminalOf(missing.events)?.status, "completed");
+      assert.deepEqual(notices(missing.events), [
+        'Bob has no "architect" mode in this project, so this turn runs in Agent mode.',
+      ]);
+      const offered = yield* runBobTurn({ text: "hello", mode: "ask" });
+      assert.deepEqual(notices(offered.events), []);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
