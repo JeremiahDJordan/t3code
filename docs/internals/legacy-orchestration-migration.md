@@ -30,6 +30,12 @@ session and sends a legacy handoff built only from user and assistant messages. 
 the newest transcript suffix within a 32,000-character budget, including section labels and the
 import notice. This budget is separate from portable provider handoffs.
 
+This fork gives each migrated Bob thread a provider thread on the Bob task its V1 runtime row's
+resume cursor names, after every shell reconcile
+([`bobThreadRelink.ts`](../../apps/server/src/orchestration-v2/legacy/bobThreadRelink.ts)). The
+first continuation then resumes that task and still receives the legacy handoff. The step keys off
+threads without an active provider thread, so it needs no migration id or ledger.
+
 ## Client and server cutover
 
 Clients and servers must agree on `ORCHESTRATION_PROTOCOL_VERSION` (currently 2). The client

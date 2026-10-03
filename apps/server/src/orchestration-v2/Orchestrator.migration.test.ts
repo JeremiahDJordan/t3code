@@ -13,6 +13,7 @@ it("reissues imported context until a V2 run completes", () => {
     shouldPrepareLegacyImportHandoff({
       historyOrigin: "v1_import",
       hasCompletedRun: false,
+      hasNativeThread: false,
       legacyImportItemCount: 2,
     }),
   );
@@ -20,6 +21,7 @@ it("reissues imported context until a V2 run completes", () => {
     shouldPrepareLegacyImportHandoff({
       historyOrigin: "v1_import",
       hasCompletedRun: true,
+      hasNativeThread: false,
       legacyImportItemCount: 2,
     }),
   );
@@ -27,6 +29,7 @@ it("reissues imported context until a V2 run completes", () => {
     shouldPrepareLegacyImportHandoff({
       historyOrigin: undefined,
       hasCompletedRun: false,
+      hasNativeThread: false,
       legacyImportItemCount: 2,
     }),
   );
@@ -34,7 +37,17 @@ it("reissues imported context until a V2 run completes", () => {
     shouldPrepareLegacyImportHandoff({
       historyOrigin: "v1_import",
       hasCompletedRun: false,
+      hasNativeThread: false,
       legacyImportItemCount: 0,
+    }),
+  );
+  // A migrated thread re-linked to its native thread resumes what the provider already has.
+  assert.isFalse(
+    shouldPrepareLegacyImportHandoff({
+      historyOrigin: "v1_import",
+      hasCompletedRun: false,
+      hasNativeThread: true,
+      legacyImportItemCount: 2,
     }),
   );
 });

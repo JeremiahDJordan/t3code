@@ -769,13 +769,18 @@ function visibleDeltaRunOrdinals(
   };
 }
 
+/** A provider thread that already names a native thread resumes history it has seen. */
 export function shouldPrepareLegacyImportHandoff(input: {
   readonly hasCompletedRun: boolean;
+  readonly hasNativeThread: boolean;
   readonly historyOrigin: OrchestrationV2AppThread["historyOrigin"];
   readonly legacyImportItemCount: number;
 }): boolean {
   return (
-    input.historyOrigin === "v1_import" && !input.hasCompletedRun && input.legacyImportItemCount > 0
+    input.historyOrigin === "v1_import" &&
+    !input.hasCompletedRun &&
+    !input.hasNativeThread &&
+    input.legacyImportItemCount > 0
   );
 }
 
@@ -5283,6 +5288,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
           historyOrigin: projection.thread.historyOrigin,
           hasCompletedRun: latestCompletedRun !== undefined,
+          hasNativeThread: (activeProviderThread?.nativeThreadRef ?? null) !== null,
           legacyImportItemCount: legacyImportItems.length,
         })
           ? yield* contextHandoffService
