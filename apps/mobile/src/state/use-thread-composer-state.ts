@@ -7,6 +7,7 @@ import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/shell";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import {
   deriveProviderSubagentStatus,
+  deriveRetryableThreadRun,
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveThreadRuntime,
@@ -361,6 +362,14 @@ export function useThreadComposerState() {
         ? deriveThreadActivityRun(selectedThreadProjection.projection)
         : (selectedThreadShell?.latestRun ?? null),
     [selectedThreadProjection, selectedThreadShell?.latestRun],
+  );
+  // A run its provider failed in a way worth retrying offers Retry on its failure row.
+  const selectedThreadRetryableRun = useMemo(
+    () =>
+      selectedThreadProjection
+        ? deriveRetryableThreadRun(selectedThreadProjection.projection)
+        : null,
+    [selectedThreadProjection],
   );
 
   const isCompacting = useMemo(() => {
@@ -1045,6 +1054,7 @@ export function useThreadComposerState() {
     dismissFeedback,
     selectedThreadFeed,
     selectedThreadActivityRun,
+    selectedThreadRetryableRun,
     selectedThreadQueueCount,
     selectedThreadQueuedMessages,
     dispatchingQueuedMessageId,

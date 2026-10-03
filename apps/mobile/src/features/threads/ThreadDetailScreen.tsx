@@ -179,6 +179,10 @@ export interface ThreadDetailScreenProps {
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
   readonly pendingHandoff?: HandoffEndpoints | null;
   readonly activityRun: ThreadFeedLatestRun | null;
+  /** The failure row that offers Retry: the latest run's, when its failure is retryable. */
+  readonly retryFailureItemId?: string | null;
+  /** Sends the failed run's message again; false when it was not sent. */
+  readonly onRetryRun?: (failureItemId: string) => Promise<boolean>;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive?: boolean;
   readonly providerSubagentStatus?: ProviderSubagentStatus | null;
@@ -1109,6 +1113,8 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
               latestRun={props.activityRun}
+              retryFailureItemId={props.retryFailureItemId ?? null}
+              {...(props.onRetryRun ? { onRetryRun: props.onRetryRun } : {})}
               activeWorkStartedAt={props.activeWorkStartedAt}
               runlessWorkActive={props.runlessWorkActive ?? false}
               listRef={listRef}
