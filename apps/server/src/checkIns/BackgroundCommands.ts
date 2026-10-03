@@ -102,6 +102,8 @@ export class BackgroundCommands extends Context.Service<
       threadId: ThreadId,
     ) => Effect.Effect<ReadonlyArray<ThreadBackgroundCommand>, BackgroundCommandError>;
     readonly stream: (threadId: ThreadId) => Stream.Stream<ReadonlyArray<ThreadBackgroundCommand>>;
+    /** The threads with a command running: the list first, then again after every change. */
+    readonly runningThreads: Stream.Stream<ReadonlyArray<ThreadId>>;
     readonly watch: () => Effect.Effect<void, never, Scope.Scope>;
     /** Checks every running command once; the timer does this on its own. */
     readonly pollNow: Effect.Effect<void>;
@@ -615,6 +617,36 @@ const make = Effect.gen(function* () {
       { bufferSize: 1, strategy: "sliding" },
     );
 
+  const runningThreads: BackgroundCommands["Service"]["runningThreads"] = Stream.callback<
+    ReadonlyArray<ThreadId>
+  >(
+    (mailbox) =>
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(changes);
+        const current = () =>
+          repository.listActive.pipe(
+            Effect.map((rows) =>
+              Array.from(
+                new Set(rows.filter((row) => row.status === "running").map((row) => row.threadId)),
+              ).toSorted(),
+            ),
+            Effect.tap((threadIds) => Effect.sync(() => Queue.offerUnsafe(mailbox, threadIds))),
+            Effect.ignore,
+          );
+        yield* current();
+        yield* Stream.fromSubscription(subscription).pipe(
+          Stream.runForEach(current),
+          Effect.forkScoped,
+        );
+      }),
+    { bufferSize: 1, strategy: "sliding" },
+  ).pipe(
+    Stream.changesWith(
+      (previous, next) =>
+        previous.length === next.length && previous.every((id, index) => id === next[index]),
+    ),
+  );
+
   /** Removes a job's output folder, only when it really is one of T3's job folders. */
   const removeJobDir = (row: BackgroundCommandRow) =>
     Effect.gen(function* () {
@@ -717,6 +749,7 @@ const make = Effect.gen(function* () {
     openTerminal,
     list,
     stream,
+    runningThreads,
     watch,
     pollNow: poll,
   });

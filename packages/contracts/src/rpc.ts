@@ -123,6 +123,8 @@ import {
 import {
   BackgroundCommandError,
   BackgroundCommandInput,
+  BackgroundCommandThreads,
+  BackgroundCommandThreadsInput,
   SetBackgroundCommandMutedInput,
   ThreadBackgroundCommand,
   ThreadBackgroundCommandsInput,
@@ -571,6 +573,7 @@ export const WS_METHODS = {
   subscribeThreadCheckIns: "subscribeThreadCheckIns",
   checkInCancel: "checkIns.cancel",
   subscribeThreadBackgroundCommands: "subscribeThreadBackgroundCommands",
+  subscribeBackgroundCommandThreads: "subscribeBackgroundCommandThreads",
   backgroundCommandStop: "backgroundCommands.stop",
   backgroundCommandSetMuted: "backgroundCommands.setMuted",
   backgroundCommandOpenTerminal: "backgroundCommands.openTerminal",
@@ -1363,6 +1366,17 @@ const WsSubscribeThreadBackgroundCommandsRpc = Rpc.make(
   },
 );
 
+/** The threads with a command running: the whole list first, then again after every change. */
+const WsSubscribeBackgroundCommandThreadsRpc = Rpc.make(
+  WS_METHODS.subscribeBackgroundCommandThreads,
+  {
+    payload: BackgroundCommandThreadsInput,
+    success: BackgroundCommandThreads,
+    error: EnvironmentAuthorizationError,
+    stream: true,
+  },
+);
+
 const WsBackgroundCommandStopRpc = Rpc.make(WS_METHODS.backgroundCommandStop, {
   payload: BackgroundCommandInput,
   success: Schema.Struct({ stopping: Schema.Boolean }),
@@ -2001,6 +2015,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeThreadCheckInsRpc,
   WsCheckInCancelRpc,
   WsSubscribeThreadBackgroundCommandsRpc,
+  WsSubscribeBackgroundCommandThreadsRpc,
   WsBackgroundCommandStopRpc,
   WsBackgroundCommandSetMutedRpc,
   WsBackgroundCommandOpenTerminalRpc,

@@ -154,6 +154,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.subscribeThreadCheckIns]: "orchestration",
   [WS_METHODS.checkInCancel]: "orchestration",
   [WS_METHODS.subscribeThreadBackgroundCommands]: "orchestration",
+  [WS_METHODS.subscribeBackgroundCommandThreads]: "orchestration",
   [WS_METHODS.backgroundCommandStop]: "orchestration",
   [WS_METHODS.backgroundCommandSetMuted]: "orchestration",
   [WS_METHODS.backgroundCommandOpenTerminal]: "orchestration",
