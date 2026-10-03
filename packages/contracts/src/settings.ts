@@ -764,6 +764,17 @@ const BOB_AUTH_METHODS = [
 export const BobAuthMethod = Schema.Literals(BOB_AUTH_METHODS.map((method) => method.value));
 export type BobAuthMethod = typeof BobAuthMethod.Type;
 
+/**
+ * Where an instance runs `bob acp`: in T3's own process tree, or in T3's tmux server, where Bob
+ * and the commands it runs keep going when T3 stops or restarts.
+ */
+const BOB_SESSION_HOSTS = [
+  { value: "server", label: "With T3 Code" },
+  { value: "tmux", label: "In tmux" },
+] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
+export const BobSessionHost = Schema.Literals(BOB_SESSION_HOSTS.map((host) => host.value));
+export type BobSessionHost = typeof BobSessionHost.Type;
+
 export const BobSettings = makeProviderSettingsSchema(
   {
     // Off by default like Cursor and Grok. Users opt in from Settings.
@@ -784,6 +795,19 @@ export const BobSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    sessionHost: BobSessionHost.pipe(
+      Schema.withDecodingDefault(Effect.succeed("server" as const)),
+      Schema.annotateKey({
+        title: "Where Bob runs",
+        description:
+          "In tmux, Bob and the commands it runs keep going when T3 Code stops or restarts, and T3 Code finishes the turn that was running when it starts again. Needs tmux 3.2 or later.",
+        providerSettingsForm: {
+          control: "select",
+          options: BOB_SESSION_HOSTS,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
     binaryPath: makeBinaryPathSetting("bob").pipe(
       Schema.annotateKey({
         title: "Binary path",
@@ -797,7 +821,7 @@ export const BobSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["authMethod", "binaryPath"],
+    order: ["authMethod", "sessionHost", "binaryPath"],
   },
 );
 export type BobSettings = typeof BobSettings.Type;
@@ -1609,6 +1633,7 @@ const GrokSettingsPatch = Schema.Struct({
 const BobSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   authMethod: Schema.optionalKey(BobAuthMethod),
+  sessionHost: Schema.optionalKey(BobSessionHost),
   binaryPath: Schema.optionalKey(TrimmedString),
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });

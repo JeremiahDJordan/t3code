@@ -72,6 +72,21 @@ If Bob ends a turn without replying, which its backend sometimes does with a lon
 conversation, the thread says so and offers **Retry**, which sends your message
 again.
 
+## Keep Bob running when T3 Code restarts
+
+An instance can run Bob in tmux, so quitting, updating or restarting T3 Code does not stop Bob
+or the commands it runs, such as a long test suite. Set **Where Bob runs** to **In tmux** on an
+instance in **Settings → Providers**, or add a second Bob instance for it with **Add
+provider**. It needs tmux 3.2 or later on the machine running T3 Code.
+
+When T3 Code starts again, the turn that was running shows as cancelled, and the thread starts
+a new one that picks Bob up where it is: it shows Bob's tool calls from before again, then the
+rest of Bob's work. Bob's T3 Code tools, such as check-ins, do not work until that turn ends;
+the thread's next message starts a fresh Bob on the same conversation. T3 Code stops an idle
+Bob when it stops, and a Bob that no T3 Code comes back to stops after a day. Under a systemd
+service, T3 Code starts tmux in its own scope, so restarting the service leaves Bob running;
+that needs your user's systemd instance, and a service without one needs `KillMode=process`.
+
 ## Usage
 
 **Usage → Limits** and `/usage-limits` in the composer show your Bob team's
