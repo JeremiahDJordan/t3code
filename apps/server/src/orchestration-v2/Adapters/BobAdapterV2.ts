@@ -25,7 +25,9 @@ import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Arr from "effect/Array";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -41,6 +43,11 @@ import {
   type AcpToolCallState,
 } from "@t3tools/provider-acp/server/runtimeModel";
 import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
+import {
+  type BobRelayLink,
+  type BobRelays,
+  nativeBobToolCallId,
+} from "../../provider/acp/BobRelay.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   deleteBobSession,
@@ -50,6 +57,7 @@ import {
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
 import { bobBudgetResetsAt } from "../../provider/bobUsageLimits.ts";
+import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
@@ -365,17 +373,38 @@ interface BobRuntimeState {
   readonly steers: Array<string>;
   /** Whether the running prompt was cancelled for the waiting steers. */
   steerCancelled: boolean;
+  /** The user stopped the running prompt, which sends Bob nothing more in this turn. */
+  stopped: boolean;
   /** The adapter's update handler, which takes the usage Bob does not report itself. */
   handler?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   captureProposedPlan?: (input: { readonly planMarkdown: string }) => Effect.Effect<void>;
+  /** What the next prompt's turn is, from the session wrapper. */
+  nextTurn?: BobTurnContext | undefined;
 }
 
 const bobRuntimeStates = new WeakMap<object, BobRuntimeState>();
 
-/** Steers a Bob session's running prompt with a message; false when no prompt is with Bob. */
-type BobSteer = (text: string) => Effect.Effect<boolean>;
+/** What a Bob session's next prompt does with a prompt Bob kept going while T3 restarted. */
+interface BobTurnContext {
+  /** A run T3 started to finish the prompt Bob kept going while T3 restarted: never prompts Bob. */
+  readonly adoptOnly: boolean;
+  /** Its message only asks Bob to go on, which a prompt Bob kept going already does. */
+  readonly skipTextAfterAdoption: boolean;
+}
+
+/** How Bob's session wrapper reaches the runtime of a Bob session, by Bob's task id. */
+interface BobSessionControl {
+  /** Steers the running prompt with a message; false when no prompt is with Bob. */
+  readonly steer: (text: string) => Effect.Effect<boolean>;
+  readonly prepareTurn: (turn: BobTurnContext) => Effect.Effect<void>;
+  /** Tells a relay whose thread its Bob works for, so a T3 that restarts mid-turn finds it. */
+  readonly describe: (owner: {
+    readonly threadId: string;
+    readonly providerThreadId: string;
+  }) => Effect.Effect<void>;
+}
 
 function observeBobUpdate(state: BobRuntimeState, update: EffectAcpSchema.SessionUpdate): void {
   switch (update.sessionUpdate) {
@@ -432,7 +461,13 @@ function wrapBobRuntime(
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   cwd: string,
   hooks: BobAdapterV2Hooks,
-  steerers: Map<string, BobSteer>,
+  sessions: Map<string, BobSessionControl>,
+  /** For an instance that runs Bob in tmux, the relay this Bob runs under. */
+  link?: BobRelayLink,
+  /** Done once the runtime has recorded that its Bob exited. */
+  terminated?: Deferred.Deferred<void>,
+  /** The `Authorization` header of the MCP credential this T3 issued the session. */
+  mcpAuthorization?: string,
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
   const state: BobRuntimeState = {
     answered: false,
@@ -442,6 +477,7 @@ function wrapBobRuntime(
     prompting: false,
     steers: [],
     steerCancelled: false,
+    stopped: false,
   };
   /**
    * Cancels the running prompt for waiting steers once Bob runs no tool call, so a tool call Bob
@@ -459,15 +495,69 @@ function wrapBobRuntime(
       return Effect.void;
     }
     state.steerCancelled = true;
-    return runtime.cancel.pipe(Effect.ignore, Effect.forkDetach, Effect.asVoid);
+    // A tool call Bob started meanwhile holds the steer again, and its end tries once more.
+    return Effect.suspend(() => {
+      if (state.openTools.size === 0) return runtime.cancel.pipe(Effect.ignore);
+      state.steerCancelled = false;
+      return Effect.void;
+    }).pipe(Effect.forkDetach, Effect.asVoid);
   });
-  /** Steers the running prompt with `text`; false when no prompt is with Bob. */
-  const steer: BobSteer = (text) =>
+  /** Keeps the waiting steers in the relay, so a T3 that takes Bob's prompt over sends them. */
+  const saveSteers = link
+    ? Effect.suspend(() => link.setMeta({ steers: [...state.steers] }))
+    : Effect.void;
+  /** Sends the waiting steers as Bob's next prompt until none wait; the relay drops them then. */
+  const promptSteers = (payload: Parameters<typeof runtime.prompt>[0], steers: Array<string>) =>
     Effect.suspend(() => {
-      if (!state.prompting) return Effect.succeed(false);
-      state.steers.push(text);
-      return interruptForSteer.pipe(Effect.as(true));
+      state.openTools.clear();
+      state.steerCancelled = false;
+      return runtime.prompt({ ...payload, prompt: [{ type: "text", text: steers.join("\n\n") }] });
     });
+  const sendSteers = (
+    payload: Parameters<typeof runtime.prompt>[0],
+    last: EffectAcpSchema.PromptResponse,
+  ) =>
+    Effect.gen(function* () {
+      let result = last;
+      for (let steers = state.steers.splice(0); steers.length > 0;) {
+        result = yield* promptSteers(payload, steers);
+        steers = state.steers.splice(0);
+      }
+      return result;
+    });
+  const control: BobSessionControl = {
+    steer: (text) =>
+      Effect.suspend(() => {
+        if (!state.prompting) return Effect.succeed(false);
+        state.steers.push(text);
+        return saveSteers.pipe(Effect.andThen(interruptForSteer), Effect.as(true));
+      }),
+    prepareTurn: (turn) =>
+      Effect.sync(() => {
+        state.nextTurn = turn;
+      }),
+    describe: (owner) => (link ? link.setMeta(owner) : Effect.void),
+  };
+  /**
+   * After a prompt that took over one Bob kept going while T3 restarted: stops that Bob, which
+   * holds the MCP credential of the T3 before. It ends before the turn does, so the adapter knows
+   * to start a Bob with this T3's for the next turn.
+   */
+  const retireIfAdopted = link
+    ? link.adopted.pipe(
+        Effect.flatMap((adopted) =>
+          adopted
+            ? link.retire.pipe(
+                Effect.andThen(
+                  terminated
+                    ? Deferred.await(terminated).pipe(Effect.timeout("5 seconds"), Effect.ignore)
+                    : Effect.void,
+                ),
+              )
+            : Effect.void,
+        ),
+      )
+    : Effect.void;
   /** Replays a finished subagent's steps into its thread, before its result arrives. */
   const replaySubagentSteps = (
     notification: EffectAcpSchema.SessionNotification,
@@ -489,7 +579,11 @@ function wrapBobRuntime(
       ) {
         return;
       }
-      const transcript = yield* hooks.readSubagentSteps(notification.sessionId, update.toolCallId);
+      // Bob's task database knows the subagent by the id Bob gave it, before any renaming.
+      const transcript = yield* hooks.readSubagentSteps(
+        notification.sessionId,
+        nativeBobToolCallId(update.toolCallId),
+      );
       for (const step of bobSubagentStepNotifications(update.toolCallId, transcript)) {
         yield* handler(step).pipe(Effect.ignore);
       }
@@ -505,7 +599,16 @@ function wrapBobRuntime(
   const opened = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) =>
     Effect.gen(function* () {
       state.sessionId = started.sessionId;
-      steerers.set(started.sessionId, steer);
+      sessions.set(started.sessionId, control);
+      if (link) {
+        yield* link.setMeta({ sessionId: started.sessionId });
+        // A Bob kept running while T3 restarted calls T3's tools with the token the T3 before
+        // gave it, which this T3 accepts as its own credential for the session.
+        const keptHash = (yield* link.kept)?.mcpTokenHash;
+        if (keptHash !== undefined && mcpAuthorization !== undefined) {
+          yield* aliasActiveMcpCredential(mcpAuthorization, keptHash);
+        }
+      }
       const usage = hooks.readTaskUsage ? yield* hooks.readTaskUsage(started.sessionId) : undefined;
       state.lastCost = usage?.bobcoins ?? 0;
     }).pipe(Effect.andThen(reportModes));
@@ -533,7 +636,8 @@ function wrapBobRuntime(
     // Stop cancels at once, and the steers waiting on the prompt go with it.
     cancel: Effect.sync(() => {
       state.steers.length = 0;
-    }).pipe(Effect.andThen(runtime.cancel)),
+      state.stopped = true;
+    }).pipe(Effect.andThen(saveSteers), Effect.andThen(runtime.cancel)),
     start: () => runtime.start().pipe(Effect.tap(opened)),
     // Bob advertises `session/load` but replays every message through it; resume restores the
     // task without the replay.
@@ -567,17 +671,36 @@ function wrapBobRuntime(
         state.answered = false;
         state.lastReply = "";
         state.prompting = true;
-        let result = yield* runtime.prompt(payload, options);
-        // Steers continue the turn as Bob's next prompt, whether or not Bob ended the one before.
-        for (let steers = state.steers.splice(0); steers.length > 0;) {
-          state.openTools.clear();
-          state.steerCancelled = false;
-          result = yield* runtime.prompt({
-            ...payload,
-            prompt: [{ type: "text", text: steers.join("\n\n") }],
-          });
-          steers = state.steers.splice(0);
+        state.stopped = false;
+        const turn = state.nextTurn;
+        state.nextTurn = undefined;
+        if (link) yield* link.turnStarted;
+        let result: EffectAcpSchema.PromptResponse;
+        if (link && (yield* link.adopt)) {
+          // Bob kept a prompt going while T3 restarted. This prompt takes it over: the relay
+          // shows the rest of it in this run, then hands over its reply. Steers that were
+          // waiting on Bob's tool calls wait again, for the calls Bob still runs however the
+          // relay replays them. In the order they were sent, they go first, then the turn's own
+          // message unless it only asks Bob to go on, then steers sent since; after a Stop,
+          // none of them.
+          for (const id of yield* link.openTools) state.openTools.add(id);
+          const restored = [...((yield* link.kept)?.steers ?? [])];
+          state.steers.push(...restored);
+          result = yield* runtime.prompt(payload, options);
+          const earlier = state.steers.splice(0, restored.length);
+          if (earlier.length > 0) result = yield* promptSteers(payload, earlier);
+          if (turn?.skipTextAfterAdoption !== true && !state.stopped) {
+            result = yield* runtime.prompt(payload);
+          }
+        } else if (turn?.adoptOnly === true) {
+          // The prompt this run was to finish ended with the Bob that ran it; nothing to say.
+          state.answered = true;
+          result = { stopReason: "end_turn" };
+        } else {
+          result = yield* runtime.prompt(payload, options);
         }
+        // Steers continue the turn as Bob's next prompt, whether or not Bob ended the one before.
+        result = yield* sendSteers(payload, result);
         if (result.stopReason !== "end_turn") return result;
         // Bob's backend can answer a long conversation with an empty reply, and Bob then ends
         // the turn having shown nothing. Without a word the thread looks ignored.
@@ -607,7 +730,9 @@ function wrapBobRuntime(
             state.openTools.clear();
           }),
         ),
+        Effect.ensuring(link ? link.turnSettled : Effect.void),
         Effect.ensuring(reportUsage),
+        Effect.ensuring(retireIfAdopted),
       ),
   };
   bobRuntimeStates.set(wrapped, state);
@@ -615,6 +740,8 @@ function wrapBobRuntime(
 }
 
 export interface BobAdapterV2Options extends BobAdapterV2Hooks {
+  /** For an instance that runs Bob in tmux: the relays its Bob sessions run under. */
+  readonly relays?: BobRelays;
   readonly instanceId: ProviderInstanceId;
   readonly settings: BobSettings;
   /** The environment `bob` runs with, the instance's variables over the server's. */
@@ -631,20 +758,53 @@ export interface BobAdapterV2Options extends BobAdapterV2Hooks {
 
 export function makeBobAcpAdapterFlavor(
   options: BobAdapterV2Options,
-  steerers: Map<string, BobSteer> = new Map(),
+  sessions: Map<string, BobSessionControl> = new Map(),
 ): AcpAdapterV2Flavor {
   return {
     driver: BOB_PROVIDER,
     runtimeHarness: "Bob",
     capabilities: BobProviderCapabilitiesV2,
     makeRuntime: ({ runtimePolicy, ...input }) =>
-      makeBobAcpRuntime({
-        ...input,
-        childProcessSpawner: options.childProcessSpawner,
-        bobSettings: options.settings,
-        environment: options.environment,
-        runtimeMode: runtimePolicy.runtimeMode,
-      }).pipe(Effect.map((runtime) => wrapBobRuntime(runtime, input.cwd, options, steerers))),
+      Effect.gen(function* () {
+        // In tmux, Bob runs under a relay that keeps it going while T3 restarts. A new relay
+        // keeps the digest of the MCP token its Bob gets, for a T3 that takes Bob over.
+        const mcpAuthorization = input.processEnvironment?.["T3_ACP_MCP_AUTHORIZATION"];
+        const mcpTokenHash =
+          options.relays && mcpAuthorization
+            ? yield* options.crypto
+                .digest(
+                  "SHA-256",
+                  new TextEncoder().encode(mcpAuthorization.replace(/^Bearer\s+/, "")),
+                )
+                .pipe(Effect.map(Hex.encode), Effect.orDie)
+            : undefined;
+        const link = options.relays?.linkFor({
+          cwd: input.cwd,
+          resumeSessionId: input.resumeSessionId,
+          mcpTokenHash,
+        });
+        const terminated = yield* Deferred.make<void>();
+        const runtime = yield* makeBobAcpRuntime({
+          ...input,
+          onTermination: (error) =>
+            input
+              .onTermination(error)
+              .pipe(Effect.ensuring(Deferred.succeed(terminated, undefined))),
+          childProcessSpawner: link?.spawner ?? options.childProcessSpawner,
+          bobSettings: options.settings,
+          environment: options.environment,
+          runtimeMode: runtimePolicy.runtimeMode,
+        });
+        return wrapBobRuntime(
+          runtime,
+          input.cwd,
+          options,
+          sessions,
+          link,
+          terminated,
+          mcpAuthorization,
+        );
+      }),
     preferResumeSession: true,
     // Every turn starts in Agent unless the thread picked another mode, so a mode left over in a
     // resumed task never lingers. Plan turns switch to Bob's plan mode after this.
@@ -777,7 +937,7 @@ function wrapBobSession(
     readonly missing: (input: ProviderAdapter.ProviderAdapterV2TurnInput) => string | undefined;
     readonly noticeItemId: (nativeItemId: string) => TurnItemId;
   },
-  steerers: ReadonlyMap<string, BobSteer>,
+  sessions: ReadonlyMap<string, BobSessionControl>,
   resolveAttachmentPath: ProviderHost.ProviderHost["Service"]["resolveAttachmentPath"],
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
@@ -838,6 +998,26 @@ function wrapBobSession(
     ...session,
     events: session.events.pipe(
       Stream.mapArray((events) => Arr.flatMap(events, withMissingModeNotice)),
+      Stream.tap((event) => {
+        // Once Bob's task exists, its relay learns whose it is.
+        const nativeId =
+          event.type === "provider_thread.updated"
+            ? event.providerThread.nativeThreadRef?.nativeId
+            : undefined;
+        if (
+          event.type !== "provider_thread.updated" ||
+          nativeId == null ||
+          event.providerThread.appThreadId === null
+        ) {
+          return Effect.void;
+        }
+        return (
+          sessions.get(nativeId)?.describe({
+            threadId: event.providerThread.appThreadId,
+            providerThreadId: event.providerThread.id,
+          }) ?? Effect.void
+        );
+      }),
     ),
     ensureThread: (input) => {
       follow(input.runtimePolicy);
@@ -846,7 +1026,7 @@ function wrapBobSession(
     steerTurn: (input) =>
       Effect.gen(function* () {
         const taskId = bobTaskId(input.providerThread);
-        const steer = taskId === undefined ? undefined : steerers.get(taskId);
+        const steer = taskId === undefined ? undefined : sessions.get(taskId)?.steer;
         const text = providerMessageTextWithAttachmentPaths({
           text: input.message.text,
           attachments: input.message.attachments,
@@ -866,7 +1046,19 @@ function wrapBobSession(
       follow(input.runtimePolicy);
       const mode = modes.missing(input);
       if (mode !== undefined) missingModes.set(input.attemptId, { input, mode });
-      return session.startTurn(input).pipe(
+      const taskId = bobTaskId(input.providerThread);
+      // A wake T3 starts for a prompt Bob kept going while T3 restarted carries no request of its
+      // own, and upstream's restart continuation only asks Bob to go on.
+      const isWake =
+        input.message.createdBy === "agent" && input.message.creationSource === "provider";
+      const prepare =
+        taskId === undefined
+          ? Effect.void
+          : (sessions.get(taskId)?.prepareTurn({
+              adoptOnly: isWake,
+              skipTextAfterAdoption: isWake || input.restartContinuationOfRunId !== undefined,
+            }) ?? Effect.void);
+      return prepare.pipe(Effect.andThen(session.startTurn(input))).pipe(
         Effect.mapError(explainSetup),
         Effect.tapError(() => Effect.sync(() => missingModes.delete(input.attemptId))),
       );
@@ -979,8 +1171,8 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
   };
   // The modes Bob offered in each folder, custom modes included.
   const offeredModes = new Map<string, ReadonlySet<string>>();
-  // How to steer each Bob session's running prompt, by Bob's task id.
-  const steerers = new Map<string, BobSteer>();
+  // Each Bob session's runtime, by Bob's task id.
+  const sessions = new Map<string, BobSessionControl>();
   const adapter = yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: makeBobAcpAdapterFlavor(
@@ -991,7 +1183,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
           return options.onAvailableModes?.(modes, cwd) ?? Effect.void;
         },
       },
-      steerers,
+      sessions,
     ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
@@ -1051,7 +1243,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
             withShortLivedBob,
             explainSetup,
             modes,
-            steerers,
+            sessions,
             options.host.resolveAttachmentPath,
           ),
         ),

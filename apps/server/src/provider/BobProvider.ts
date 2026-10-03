@@ -29,6 +29,7 @@ import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import type { AcpSessionMode } from "@t3tools/provider-acp/server/runtimeModel";
+import { BOB_TMUX_MISSING_MESSAGE } from "./acp/BobRelay.ts";
 import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
 import {
   BOB_API_KEY_ALIAS_ENV,
@@ -254,6 +255,17 @@ export const checkBobProviderStatus = Effect.fn("checkBobProviderStatus")(functi
 
 /** The workspaces whose commands Bob's snapshot keeps, the registry's limit too. */
 const MAX_BOB_WORKSPACES = 16;
+
+/** An instance set to run Bob in tmux cannot run Bob without tmux, which its status says. */
+export function withBobSessionHostStatus<A extends ServerProviderDraft>(
+  snapshot: A,
+  tmuxAvailable: boolean,
+): A {
+  if (tmuxAvailable || (snapshot.status !== "ready" && snapshot.status !== "warning")) {
+    return snapshot;
+  }
+  return { ...snapshot, status: "error", message: BOB_TMUX_MISSING_MESSAGE };
+}
 
 /**
  * The model option that picks the Bob mode a thread's turns run in. The ACP adapter routes this

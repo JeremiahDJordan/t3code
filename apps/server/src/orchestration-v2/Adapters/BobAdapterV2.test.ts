@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - fixtures read and search the mock Bob's protocol log.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -6,6 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   BobSettings,
   CheckpointId,
+  EnvironmentId,
   MessageId,
   NodeId,
   ProjectId,
@@ -21,6 +24,7 @@ import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -29,6 +33,8 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
 import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -36,13 +42,25 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 
 import * as ServerConfig from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
 import { execScriptSource, writeFakeCli } from "@t3tools/provider-testing/fakeCli";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import * as ProcessRunner from "../../processRunner.ts";
+import {
+  bobRelayHasTurn,
+  type BobRelays,
+  detachBobRelayLinks,
+  makeBobRelayHost,
+  makeBobRelays,
+  readBobRelayMeta,
+} from "../../provider/acp/BobRelay.ts";
+import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import {
   type ProviderAdapterV2Event,
   ProviderAdapterV2RuntimePolicy,
@@ -55,6 +73,28 @@ import {
 } from "./BobAdapterV2.ts";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
+
+/** The server's MCP credential registry, as a running server holds it. */
+const mcpRegistryLayer = McpSessionRegistry.layer.pipe(
+  Layer.provide(
+    Layer.succeed(
+      HttpServer.HttpServer,
+      HttpServer.HttpServer.of({
+        address: NetAddress.inetAddressFromIpStringUnsafe("127.0.0.1", 43123),
+        serve: (() => Effect.void) as HttpServer.HttpServer["Service"]["serve"],
+      }),
+    ),
+  ),
+  Layer.provide(
+    Layer.succeed(
+      ServerEnvironment.ServerEnvironment,
+      ServerEnvironment.ServerEnvironment.of({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-bob-test")),
+        getDescriptor: Effect.die("unused"),
+      }),
+    ),
+  ),
+);
 
 const flavor = makeBobAcpAdapterFlavor({
   instanceId: ProviderInstanceId.make("bob-test"),
@@ -253,6 +293,10 @@ const openBob = (input: {
   readonly subagentSteps?: TaskTranscript;
   /** The Bob mode the thread picked in the model picker. */
   readonly mode?: string;
+  /** Runs Bob under relays in tmux. */
+  readonly relays?: BobRelays;
+  /** Collects the tool call ids subagent steps are read for. */
+  readonly subagentStepReads?: Array<string>;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -281,6 +325,7 @@ const openBob = (input: {
     let usageReading = 0;
     const instanceId = ProviderInstanceId.make("bob-turn-test");
     const adapter = yield* makeBobAdapterV2({
+      ...(input.relays ? { relays: input.relays } : {}),
       instanceId,
       settings: decodeBobSettings({ enabled: true, binaryPath }),
       environment: process.env,
@@ -303,7 +348,13 @@ const openBob = (input: {
           }
         : {}),
       ...(input.subagentSteps
-        ? { readSubagentSteps: () => Effect.succeed(input.subagentSteps!) }
+        ? {
+            readSubagentSteps: (_parentSessionId: string, toolCallId: string) =>
+              Effect.sync(() => {
+                input.subagentStepReads?.push(toolCallId);
+                return input.subagentSteps!;
+              }),
+          }
         : {}),
     });
     const threadId = ThreadId.make("thread-bob-turn");
@@ -317,12 +368,13 @@ const openBob = (input: {
     let sessions = 0;
     let turns = 0;
     /** Opens a session in `cwd`, as a turn after a server start or a folder change does. */
-    const openSession = (cwd: string) =>
+    const openSession = (cwd: string, options: { readonly bobTaskId?: string } = {}) =>
       adapter.openSession({
         threadId,
         providerSessionId: ProviderSessionId.make(`provider-session-bob-${++sessions}`),
         modelSelection,
         runtimePolicy: policyFor(cwd),
+        ...(options.bobTaskId === undefined ? {} : { initialNativeThreadId: options.bobTaskId }),
       });
     /** Runs one turn on `session` until it ends, and returns its events. */
     const runTurn = (
@@ -332,11 +384,16 @@ const openBob = (input: {
       options: {
         readonly cwd?: string;
         readonly interactionMode?: "default" | "plan";
-        /** Runs once the turn started, with its events as they arrive. */
+        /**
+         * Runs once the turn started, with its events as they arrive. "stop" returns the events so
+         * far without waiting for the turn to end, as when T3 stops mid-turn.
+         */
         readonly whileRunning?: (turn: {
           readonly runId: RunId;
           readonly nextEvent: Effect.Effect<ProviderAdapterV2Event>;
-        }) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>;
+        }) => Effect.Effect<void | "stop", ProviderAdapter.ProviderAdapterV2Error>;
+        /** The message is a wake T3 started for the provider, not a user's. */
+        readonly wake?: boolean;
       } = {},
     ) =>
       Effect.gen(function* () {
@@ -385,8 +442,8 @@ const openBob = (input: {
           rootNodeId: NodeId.make(`node-bob-${turn}`),
           providerThread,
           message: {
-            createdBy: "user",
-            creationSource: "web",
+            createdBy: options.wake === true ? "agent" : "user",
+            creationSource: options.wake === true ? "provider" : "web",
             messageId: MessageId.make(`message-bob-${turn}`),
             text,
             attachments: [],
@@ -395,10 +452,14 @@ const openBob = (input: {
           runtimePolicy,
         });
         if (options.whileRunning) {
-          yield* options.whileRunning({
+          const outcome = yield* options.whileRunning({
             runId: RunId.make(`run-bob-${turn}`),
             nextEvent: Queue.take(arrivals),
           });
+          if (outcome === "stop") {
+            yield* Fiber.interrupt(collected);
+            return seen;
+          }
         }
         yield* Fiber.join(collected);
         return seen;
@@ -821,6 +882,404 @@ describe("BobAdapterV2 turns", () => {
       const subagent = result.events.findLast((event) => event.type === "subagent.updated");
       assert.isDefined(subagent);
       assert.include(JSON.stringify(subagent), "There are 2 files.");
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+});
+
+const tmuxInstalled = NodeChildProcess.spawnSync("tmux", ["-V"]).status === 0;
+
+describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
+  it.live(
+    "finishes the turn Bob kept going while T3 restarted, in the run that takes it over",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const tmux = yield* TmuxServer.make.pipe(
+          Effect.provideServiceEffect(ProcessRunner.ProcessRunner, ProcessRunner.make()),
+        );
+        yield* Effect.addFinalizer(() => tmux.run(["kill-server"]).pipe(Effect.ignore));
+        const host = yield* makeBobRelayHost({ tmux, stateDir: config.stateDir });
+        const instanceId = "bob-turn-test";
+
+        // The T3 before: starts a turn, and stops while Bob's tool call runs. Its Bob calls T3's
+        // tools with the token it issued the session.
+        const before = yield* openBob({
+          relays: makeBobRelays({ host, instanceId, adoptable: new Map(), ready: Effect.void }),
+        });
+        const tokenBefore = "token-the-t3-before-issued";
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        yield* mcpSessions.set({
+          environmentId: EnvironmentId.make("environment-bob-test"),
+          threadId: before.threadId,
+          providerSessionId: "mcp-before",
+          providerInstanceId: ProviderInstanceId.make(instanceId),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: `Bearer ${tokenBefore}`,
+          browserToolsAvailable: false,
+        });
+        yield* Effect.addFinalizer(() => mcpSessions.clear(before.threadId));
+        const bound = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const session = yield* before.openSession(before.workspace);
+            const providerThread = yield* session.ensureThread({
+              threadId: before.threadId,
+              modelSelection: before.modelSelection,
+              runtimePolicy: before.policyFor(before.workspace),
+            });
+            let thread = providerThread;
+            yield* before.runTurn(session, providerThread, "finish later", {
+              whileRunning: ({ nextEvent }) =>
+                Effect.gen(function* () {
+                  for (;;) {
+                    const event = yield* nextEvent;
+                    // The thread's own, not a subagent's child thread.
+                    if (
+                      event.type === "provider_thread.updated" &&
+                      event.providerThread.id === providerThread.id
+                    ) {
+                      thread = event.providerThread;
+                    }
+                    if (
+                      event.type === "turn_item.updated" &&
+                      event.turnItem.nativeItemRef?.nativeId?.includes("slow-later") === true
+                    ) {
+                      break;
+                    }
+                  }
+                  // T3 is told to stop: it lets go of the relay running the turn.
+                  detachBobRelayLinks();
+                  return "stop" as const;
+                }),
+            });
+            return thread;
+          }),
+        );
+        const taskId = bound.nativeThreadRef?.nativeId ?? undefined;
+        assert.isDefined(taskId);
+
+        // The T3 after: finds the relay with Bob's prompt, and a wake run takes it over.
+        const relay = (yield* host.scan).find(
+          (found) => readBobRelayMeta(found.state)?.sessionId === taskId,
+        );
+        assert.isDefined(relay);
+        if (relay === undefined || taskId === undefined) return;
+        assert.isTrue(bobRelayHasTurn(relay.state));
+        assert.equal(readBobRelayMeta(relay.state)?.providerThreadId, bound.id);
+        assert.equal(
+          readBobRelayMeta(relay.state)?.mcpTokenHash,
+          NodeCrypto.createHash("sha256").update(tokenBefore).digest("hex"),
+        );
+        // The T3 after issues the session its own credential.
+        const registry = Context.get(
+          yield* Layer.build(mcpRegistryLayer),
+          McpSessionRegistry.McpSessionRegistry,
+        );
+        const issued = yield* registry.issue({
+          threadId: before.threadId,
+          providerInstanceId: ProviderInstanceId.make(instanceId),
+        });
+        yield* mcpSessions.set(issued.config);
+        const subagentStepReads: Array<string> = [];
+        const after = yield* openBob({
+          relays: makeBobRelays({
+            host,
+            instanceId,
+            adoptable: new Map([[taskId, relay.relayId]]),
+            ready: Effect.void,
+          }),
+          subagentSteps: { entries: [{ _tag: "message", text: "Listing the folder." }] },
+          subagentStepReads,
+        });
+        const session = yield* after.openSession(after.workspace, { bobTaskId: taskId });
+        const events = yield* after.runTurn(session, bound, "Continue where you left off.", {
+          wake: true,
+          whileRunning: ({ nextEvent }) =>
+            Effect.gen(function* () {
+              // The tool calls show again in this run, under new ids: the one still running, and
+              // the one that ended before the restart, as ended.
+              let quickStatus: string | undefined;
+              for (;;) {
+                const event = yield* nextEvent;
+                if (event.type !== "turn_item.updated") continue;
+                const nativeId = event.turnItem.nativeItemRef?.nativeId ?? "";
+                if (nativeId.includes("quick-before~adopted-")) quickStatus = event.turnItem.status;
+                if (nativeId.includes("slow-later~adopted-")) break;
+              }
+              assert.equal(quickStatus, "completed");
+              before.release();
+            }),
+        });
+        assert.equal(terminalOf(events)?.status, "completed");
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "message.updated" &&
+              JSON.stringify(event.message).includes("Finished after the restart."),
+          ),
+        );
+        // Bob's task database knows the subagent by the id Bob gave it.
+        assert.deepEqual(subagentStepReads, ["subagent-later"]);
+        // Bob's token from the T3 before reaches T3's tools as this session's credential.
+        assert.equal((yield* registry.resolve(tokenBefore))?.thread?.threadId, before.threadId);
+        // Bob only ever had the one prompt, which the wake took over rather than prompting again.
+        const prompts = before.requests().filter((request) => request.method === "session/prompt");
+        assert.lengthOf(prompts, 1);
+        assert.include(JSON.stringify(prompts[0]?.params), "finish later");
+
+        // The Bob that finished it is gone by the time the run ends, so a message sent right
+        // after runs in a fresh Bob.
+        const latest = events.findLast(
+          (event) =>
+            event.type === "provider_thread.updated" && event.providerThread.id === bound.id,
+        );
+        const followUp = yield* after.runTurn(
+          session,
+          latest?.type === "provider_thread.updated" ? latest.providerThread : bound,
+          "hello",
+        );
+        assert.equal(terminalOf(followUp)?.status, "completed");
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.live("sends a steer that waited on Bob's tool call when T3 restarted, in order", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const tmux = yield* TmuxServer.make.pipe(
+        Effect.provideServiceEffect(ProcessRunner.ProcessRunner, ProcessRunner.make()),
+      );
+      yield* Effect.addFinalizer(() => tmux.run(["kill-server"]).pipe(Effect.ignore));
+      const host = yield* makeBobRelayHost({ tmux, stateDir: config.stateDir });
+      const instanceId = "bob-turn-test";
+      const steer = "Look at the tests instead.";
+
+      // The T3 before: a steer waits on Bob's running tool call when T3 stops, after one that
+      // ended.
+      const before = yield* openBob({
+        relays: makeBobRelays({ host, instanceId, adoptable: new Map(), ready: Effect.void }),
+      });
+      const bound = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* before.openSession(before.workspace);
+          const providerThread = yield* session.ensureThread({
+            threadId: before.threadId,
+            modelSelection: before.modelSelection,
+            runtimePolicy: before.policyFor(before.workspace),
+          });
+          let thread = providerThread;
+          yield* before.runTurn(session, providerThread, "finish later", {
+            whileRunning: ({ runId, nextEvent }) =>
+              Effect.gen(function* () {
+                let providerTurnId: ProviderTurnId | undefined;
+                for (;;) {
+                  const event = yield* nextEvent;
+                  if (
+                    event.type === "provider_thread.updated" &&
+                    event.providerThread.id === providerThread.id
+                  ) {
+                    thread = event.providerThread;
+                  }
+                  if (event.type === "provider_turn.updated") {
+                    providerTurnId = event.providerTurn.id;
+                  }
+                  if (
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.nativeItemRef?.nativeId?.includes("slow-later") === true
+                  ) {
+                    break;
+                  }
+                }
+                yield* session.steerTurn({
+                  threadId: before.threadId,
+                  runId,
+                  providerThread: thread,
+                  providerTurnId: providerTurnId!,
+                  message: {
+                    messageId: MessageId.make("message-bob-steer"),
+                    text: steer,
+                    attachments: [],
+                    createdBy: "user",
+                    creationSource: "web",
+                  },
+                });
+                detachBobRelayLinks();
+                return "stop" as const;
+              }),
+          });
+          return thread;
+        }),
+      );
+      const taskId = bound.nativeThreadRef?.nativeId ?? undefined;
+      const relay = (yield* host.scan).find(
+        (found) => readBobRelayMeta(found.state)?.sessionId === taskId,
+      );
+      assert.isDefined(relay);
+      if (relay === undefined || taskId === undefined) return;
+      assert.deepEqual(readBobRelayMeta(relay.state)?.steers, [steer]);
+
+      // The T3 after: the user's next message takes the prompt over, and another steer follows
+      // it while Bob still runs the tool call. The first steer waits for that call, though the
+      // relay replays the ended one first; Bob gets the three in the order they were sent.
+      const after = yield* openBob({
+        relays: makeBobRelays({
+          host,
+          instanceId,
+          adoptable: new Map([[taskId, relay.relayId]]),
+          ready: Effect.void,
+        }),
+      });
+      const session = yield* after.openSession(after.workspace, { bobTaskId: taskId });
+      const laterSteer = "Actually, skip the docs.";
+      const events = yield* after.runTurn(session, bound, "Use the docs instead.", {
+        whileRunning: ({ runId, nextEvent }) =>
+          Effect.gen(function* () {
+            let thread = bound;
+            let providerTurnId: ProviderTurnId | undefined;
+            for (;;) {
+              const event = yield* nextEvent;
+              if (
+                event.type === "provider_thread.updated" &&
+                event.providerThread.id === bound.id
+              ) {
+                thread = event.providerThread;
+              }
+              if (event.type === "provider_turn.updated") providerTurnId = event.providerTurn.id;
+              if (
+                event.type === "turn_item.updated" &&
+                (event.turnItem.nativeItemRef?.nativeId ?? "").includes("slow-later~adopted-")
+              ) {
+                break;
+              }
+            }
+            yield* session.steerTurn({
+              threadId: after.threadId,
+              runId,
+              providerThread: thread,
+              providerTurnId: providerTurnId!,
+              message: {
+                messageId: MessageId.make("message-bob-later-steer"),
+                text: laterSteer,
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+            });
+            before.release();
+          }),
+      });
+      assert.equal(terminalOf(events)?.status, "completed");
+      const methods = before.requests().map((request) => request.method);
+      // The steer cancels the prompt only once the running tool call ended.
+      assert.isAbove(methods.indexOf("session/cancel"), methods.indexOf("_mock/released"));
+      const prompts = before.requests().filter((request) => request.method === "session/prompt");
+      assert.include(JSON.stringify(prompts.at(-3)?.params), steer);
+      assert.include(JSON.stringify(prompts.at(-2)?.params), "Use the docs instead.");
+      assert.include(JSON.stringify(prompts.at(-1)?.params), laterSteer);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.live("sends Bob nothing more after Stop while a message takes its prompt over", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const tmux = yield* TmuxServer.make.pipe(
+        Effect.provideServiceEffect(ProcessRunner.ProcessRunner, ProcessRunner.make()),
+      );
+      yield* Effect.addFinalizer(() => tmux.run(["kill-server"]).pipe(Effect.ignore));
+      const host = yield* makeBobRelayHost({ tmux, stateDir: config.stateDir });
+      const instanceId = "bob-turn-test";
+
+      // The T3 before stops while Bob runs a tool call.
+      const before = yield* openBob({
+        relays: makeBobRelays({ host, instanceId, adoptable: new Map(), ready: Effect.void }),
+      });
+      const bound = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* before.openSession(before.workspace);
+          const providerThread = yield* session.ensureThread({
+            threadId: before.threadId,
+            modelSelection: before.modelSelection,
+            runtimePolicy: before.policyFor(before.workspace),
+          });
+          let thread = providerThread;
+          yield* before.runTurn(session, providerThread, "work slowly", {
+            whileRunning: ({ nextEvent }) =>
+              Effect.gen(function* () {
+                for (;;) {
+                  const event = yield* nextEvent;
+                  if (
+                    event.type === "provider_thread.updated" &&
+                    event.providerThread.id === providerThread.id
+                  ) {
+                    thread = event.providerThread;
+                  }
+                  if (
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.nativeItemRef?.nativeId?.includes("slow-1") === true
+                  ) {
+                    break;
+                  }
+                }
+                detachBobRelayLinks();
+                return "stop" as const;
+              }),
+          });
+          return thread;
+        }),
+      );
+      const taskId = bound.nativeThreadRef?.nativeId ?? undefined;
+      const relay = (yield* host.scan).find(
+        (found) => readBobRelayMeta(found.state)?.sessionId === taskId,
+      );
+      assert.isDefined(relay);
+      if (relay === undefined || taskId === undefined) return;
+
+      // The T3 after: the user's message takes the prompt over, then the user presses Stop.
+      const after = yield* openBob({
+        relays: makeBobRelays({
+          host,
+          instanceId,
+          adoptable: new Map([[taskId, relay.relayId]]),
+          ready: Effect.void,
+        }),
+      });
+      const session = yield* after.openSession(after.workspace, { bobTaskId: taskId });
+      const message = "Use the docs instead.";
+      const events = yield* after.runTurn(session, bound, message, {
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            let thread = bound;
+            let providerTurnId: ProviderTurnId | undefined;
+            for (;;) {
+              const event = yield* nextEvent;
+              if (
+                event.type === "provider_thread.updated" &&
+                event.providerThread.id === bound.id
+              ) {
+                thread = event.providerThread;
+              }
+              if (event.type === "provider_turn.updated") providerTurnId = event.providerTurn.id;
+              if (
+                event.type === "turn_item.updated" &&
+                (event.turnItem.nativeItemRef?.nativeId ?? "").includes("slow-1~adopted-")
+              ) {
+                // The mock answers a cancel once its tool call ended.
+                if (event.turnItem.status === "completed") break;
+                before.release();
+              }
+            }
+            yield* session.interruptTurn({
+              providerThread: thread,
+              providerTurnId: providerTurnId!,
+            });
+          }),
+      });
+      assert.equal(terminalOf(events)?.status, "interrupted");
+      const requests = before.requests();
+      const cancelAt = requests.findIndex((request) => request.method === "session/cancel");
+      assert.isAbove(cancelAt, -1);
+      assert.notInclude(
+        JSON.stringify(requests.slice(cancelAt + 1).filter((r) => r.method === "session/prompt")),
+        message,
+      );
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 });
