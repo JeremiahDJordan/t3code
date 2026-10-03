@@ -35,6 +35,7 @@ import {
   makeBobUsageLimitsRefresh,
 } from "../Layers/BobProvider.ts";
 import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
+import { readBobSubagentTranscript } from "../Layers/bobSubagentTranscript.ts";
 import {
   readBobConfiguredModel,
   readBobPinnedTeams,
@@ -223,6 +224,8 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
             Effect.provideService(Path.Path, path),
             Effect.orElseSucceed(() => undefined),
           ),
+        readSubagentSteps: (parentSessionId, toolCallId) =>
+          readBobSubagentTranscript(taskDatabasePath, parentSessionId, toolCallId),
         onBobcoinsSpent: (cwd) =>
           refreshUsageLimits(cwd, true).pipe(Effect.forkIn(driverScope), Effect.asVoid),
         continuationRequests,
