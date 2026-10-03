@@ -50,6 +50,7 @@ import {
 } from "../../provider/acp/BobAcpSupport.ts";
 import type * as IdAllocator from "../IdAllocator.ts";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
+import { providerMessageTextWithAttachmentPaths } from "../AttachmentPrompt.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
 import { makeProviderFailure } from "../ProviderFailure.ts";
 import {
@@ -83,6 +84,12 @@ const BobProviderCapabilitiesV2 = {
     ...AcpProviderCapabilitiesV2.subagents,
     supportsSubagents: true,
     emitsSubagentLifecycle: true,
+  },
+  // Bob takes one prompt at a time, so a steer lets the running tool calls finish, cancels the
+  // prompt and continues the turn with the message as Bob's next prompt.
+  turns: {
+    ...AcpProviderCapabilitiesV2.turns,
+    supportsActiveSteering: true,
   },
 } satisfies OrchestrationV2ProviderCapabilities;
 
@@ -318,6 +325,14 @@ interface BobRuntimeState {
   lastCost?: number;
   /** Subagents running now, by their tool call id. */
   readonly runningSubagents: Set<string>;
+  /** Tool calls Bob is running in the current prompt, which a steer lets finish. */
+  readonly openTools: Set<string>;
+  /** Whether a prompt is with Bob, which a steer can interrupt. */
+  prompting: boolean;
+  /** Messages to steer the running prompt with, sent together as Bob's next prompt. */
+  readonly steers: Array<string>;
+  /** Whether the running prompt was cancelled for the waiting steers. */
+  steerCancelled: boolean;
   /** The adapter's update handler, which takes the usage Bob does not report itself. */
   handler?: (
     notification: EffectAcpSchema.SessionNotification,
@@ -326,6 +341,9 @@ interface BobRuntimeState {
 }
 
 const bobRuntimeStates = new WeakMap<object, BobRuntimeState>();
+
+/** Steers a Bob session's running prompt with a message; false when no prompt is with Bob. */
+type BobSteer = (text: string) => Effect.Effect<boolean>;
 
 function observeBobUpdate(state: BobRuntimeState, update: EffectAcpSchema.SessionUpdate): void {
   switch (update.sessionUpdate) {
@@ -354,8 +372,16 @@ function observeBobUpdate(state: BobRuntimeState, update: EffectAcpSchema.Sessio
     case "tool_call":
       state.answered = true;
       state.lastReply = "";
+      if (update.status !== "completed" && update.status !== "failed") {
+        state.openTools.add(update.toolCallId);
+      }
       return;
     case "tool_call_update":
+      state.answered = true;
+      if (update.status === "completed" || update.status === "failed") {
+        state.openTools.delete(update.toolCallId);
+      }
+      return;
     case "plan":
     case "plan_update":
       state.answered = true;
@@ -374,8 +400,42 @@ function wrapBobRuntime(
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   cwd: string,
   hooks: BobAdapterV2Hooks,
+  steerers: Map<string, BobSteer>,
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
-  const state: BobRuntimeState = { answered: false, lastReply: "", runningSubagents: new Set() };
+  const state: BobRuntimeState = {
+    answered: false,
+    lastReply: "",
+    runningSubagents: new Set(),
+    openTools: new Set(),
+    prompting: false,
+    steers: [],
+    steerCancelled: false,
+  };
+  /**
+   * Cancels the running prompt for waiting steers once Bob runs no tool call, so a tool call Bob
+   * started finishes rather than being cancelled. Bob records tool results before it asks the
+   * model again, so the steer continues from them; what it loses is the reply in progress. The
+   * cancel runs apart from Bob's updates, since it waits for the prompt to end.
+   */
+  const interruptForSteer = Effect.suspend(() => {
+    if (
+      state.steers.length === 0 ||
+      !state.prompting ||
+      state.steerCancelled ||
+      state.openTools.size > 0
+    ) {
+      return Effect.void;
+    }
+    state.steerCancelled = true;
+    return runtime.cancel.pipe(Effect.ignore, Effect.forkDetach, Effect.asVoid);
+  });
+  /** Steers the running prompt with `text`; false when no prompt is with Bob. */
+  const steer: BobSteer = (text) =>
+    Effect.suspend(() => {
+      if (!state.prompting) return Effect.succeed(false);
+      state.steers.push(text);
+      return interruptForSteer.pipe(Effect.as(true));
+    });
   /** Replays a finished subagent's steps into its thread, before its result arrives. */
   const replaySubagentSteps = (
     notification: EffectAcpSchema.SessionNotification,
@@ -413,6 +473,7 @@ function wrapBobRuntime(
   const opened = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) =>
     Effect.gen(function* () {
       state.sessionId = started.sessionId;
+      steerers.set(started.sessionId, steer);
       const usage = hooks.readTaskUsage ? yield* hooks.readTaskUsage(started.sessionId) : undefined;
       state.lastCost = usage?.bobcoins ?? 0;
     }).pipe(Effect.andThen(reportModes));
@@ -437,6 +498,10 @@ function wrapBobRuntime(
   });
   const wrapped: AcpSessionRuntime.AcpSessionRuntime["Service"] = {
     ...runtime,
+    // Stop cancels at once, and the steers waiting on the prompt go with it.
+    cancel: Effect.sync(() => {
+      state.steers.length = 0;
+    }).pipe(Effect.andThen(runtime.cancel)),
     start: () => runtime.start().pipe(Effect.tap(opened)),
     // Bob advertises `session/load` but replays every message through it; resume restores the
     // task without the replay.
@@ -459,6 +524,8 @@ function wrapBobRuntime(
             return commands.pipe(
               Effect.andThen(replaySubagentSteps(notification, handler)),
               Effect.andThen(handler(notification)),
+              // The last running tool call finishing lets a waiting steer interrupt the prompt.
+              Effect.andThen(interruptForSteer),
             );
           }),
         ),
@@ -467,7 +534,18 @@ function wrapBobRuntime(
       Effect.gen(function* () {
         state.answered = false;
         state.lastReply = "";
-        const result = yield* runtime.prompt(payload, options).pipe(Effect.ensuring(reportUsage));
+        state.prompting = true;
+        let result = yield* runtime.prompt(payload, options);
+        // Steers continue the turn as Bob's next prompt, whether or not Bob ended the one before.
+        for (let steers = state.steers.splice(0); steers.length > 0;) {
+          state.openTools.clear();
+          state.steerCancelled = false;
+          result = yield* runtime.prompt({
+            ...payload,
+            prompt: [{ type: "text", text: steers.join("\n\n") }],
+          });
+          steers = state.steers.splice(0);
+        }
         if (result.stopReason !== "end_turn") return result;
         // Bob's backend can answer a long conversation with an empty reply, and Bob then ends
         // the turn having shown nothing. Without a word the thread looks ignored.
@@ -489,7 +567,16 @@ function wrapBobRuntime(
           yield* state.captureProposedPlan({ planMarkdown });
         }
         return result;
-      }),
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            state.prompting = false;
+            state.steerCancelled = false;
+            state.openTools.clear();
+          }),
+        ),
+        Effect.ensuring(reportUsage),
+      ),
   };
   bobRuntimeStates.set(wrapped, state);
   return wrapped;
@@ -510,7 +597,10 @@ export interface BobAdapterV2Options extends BobAdapterV2Hooks {
   readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
 }
 
-export function makeBobAcpAdapterFlavor(options: BobAdapterV2Options): AcpAdapterV2Flavor {
+export function makeBobAcpAdapterFlavor(
+  options: BobAdapterV2Options,
+  steerers: Map<string, BobSteer> = new Map(),
+): AcpAdapterV2Flavor {
   return {
     driver: BOB_PROVIDER,
     runtimeHarness: "Bob",
@@ -522,7 +612,7 @@ export function makeBobAcpAdapterFlavor(options: BobAdapterV2Options): AcpAdapte
         bobSettings: options.settings,
         environment: options.environment,
         runtimeMode: runtimePolicy.runtimeMode,
-      }).pipe(Effect.map((runtime) => wrapBobRuntime(runtime, input.cwd, options))),
+      }).pipe(Effect.map((runtime) => wrapBobRuntime(runtime, input.cwd, options, steerers))),
     preferResumeSession: true,
     // Every turn starts in Agent unless the thread picked another mode, so a mode left over in a
     // resumed task never lingers. Plan turns switch to Bob's plan mode after this.
@@ -638,6 +728,8 @@ function wrapBobSession(
     readonly missing: (input: ProviderAdapter.ProviderAdapterV2TurnInput) => string | undefined;
     readonly noticeItemId: (nativeItemId: string) => TurnItemId;
   },
+  steerers: ReadonlyMap<string, BobSteer>,
+  attachmentsDir: string,
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
   let cwd = openedIn;
@@ -702,6 +794,25 @@ function wrapBobSession(
       follow(input.runtimePolicy);
       return session.ensureThread(input).pipe(Effect.mapError(explainSetup));
     },
+    steerTurn: (input) =>
+      Effect.gen(function* () {
+        const taskId = bobTaskId(input.providerThread);
+        const steer = taskId === undefined ? undefined : steerers.get(taskId);
+        const text = providerMessageTextWithAttachmentPaths({
+          text: input.message.text,
+          attachments: input.message.attachments,
+          attachmentsDir,
+        });
+        // Too late once Bob's prompt ended; the message then follows the turn instead.
+        if (steer === undefined || !(yield* steer(text))) {
+          return yield* new ProviderAdapter.ProviderAdapterSteerRunError({
+            driver: BOB_PROVIDER,
+            providerThreadId: input.providerThread.id,
+            providerTurnId: input.providerTurnId,
+            cause: new Error("Bob is not running a prompt to steer."),
+          });
+        }
+      }),
     startTurn: (input) => {
       follow(input.runtimePolicy);
       const mode = modes.missing(input);
@@ -803,15 +914,20 @@ export function makeBobAdapterV2(
 ): ProviderAdapter.ProviderAdapterV2Shape {
   // The modes Bob offered in each folder, custom modes included.
   const offeredModes = new Map<string, ReadonlySet<string>>();
+  // How to steer each Bob session's running prompt, by Bob's task id.
+  const steerers = new Map<string, BobSteer>();
   const adapter = makeAcpAdapterV2({
     instanceId: options.instanceId,
-    flavor: makeBobAcpAdapterFlavor({
-      ...options,
-      onAvailableModes: (modes, cwd) => {
-        offeredModes.set(cwd, new Set(modes.map((mode) => mode.id)));
-        return options.onAvailableModes?.(modes, cwd) ?? Effect.void;
+    flavor: makeBobAcpAdapterFlavor(
+      {
+        ...options,
+        onAvailableModes: (modes, cwd) => {
+          offeredModes.set(cwd, new Set(modes.map((mode) => mode.id)));
+          return options.onAvailableModes?.(modes, cwd) ?? Effect.void;
+        },
       },
-    }),
+      steerers,
+    ),
     crypto: options.crypto,
     fileSystem: options.fileSystem,
     idAllocator: options.idAllocator,
@@ -874,6 +990,8 @@ export function makeBobAdapterV2(
             withShortLivedBob,
             explainSetup,
             modes,
+            steerers,
+            options.serverConfig.attachmentsDir,
           ),
         ),
       ),

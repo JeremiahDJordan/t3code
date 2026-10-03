@@ -12,6 +12,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   type OrchestrationV2ProviderThread,
+  type ProviderTurnId,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -24,6 +25,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -217,6 +219,7 @@ const openBob = (input: {
       env: {
         T3_ACP_REQUEST_LOG_PATH: requestLogPath,
         T3_ACP_BOB_STATE_PATH: path.join(tempDir, "bob-state.json"),
+        T3_ACP_BOB_RELEASE_PATH: path.join(tempDir, "release"),
         ...input.mockEnv,
       },
       source: execScriptSource({ scriptPath: mockPath }),
@@ -280,16 +283,28 @@ const openBob = (input: {
       session: ProviderAdapter.ProviderAdapterV2SessionRuntime,
       providerThread: OrchestrationV2ProviderThread,
       text: string,
-      options: { readonly cwd?: string; readonly interactionMode?: "default" | "plan" } = {},
+      options: {
+        readonly cwd?: string;
+        readonly interactionMode?: "default" | "plan";
+        /** Runs once the turn started, with its events as they arrive. */
+        readonly whileRunning?: (turn: {
+          readonly runId: RunId;
+          readonly nextEvent: Effect.Effect<ProviderAdapterV2Event>;
+        }) => Effect.Effect<void, ProviderAdapter.ProviderAdapterV2Error>;
+      } = {},
     ) =>
       Effect.gen(function* () {
         const turn = ++turns;
         const cwd = options.cwd ?? workspace;
         const runtimePolicy = policyFor(cwd, options.interactionMode);
         const now = yield* DateTime.now;
+        const seen: Array<ProviderAdapterV2Event> = [];
+        const arrivals = yield* Queue.unbounded<ProviderAdapterV2Event>();
         const collected = yield* session.events.pipe(
           Stream.takeUntil((event) => event.type === "turn.terminal"),
-          Stream.runCollect,
+          Stream.runForEach((event) =>
+            Effect.sync(() => seen.push(event)).pipe(Effect.andThen(Queue.offer(arrivals, event))),
+          ),
           Effect.forkScoped,
         );
         yield* session.startTurn({
@@ -333,7 +348,14 @@ const openBob = (input: {
           modelSelection,
           runtimePolicy,
         });
-        return Array.from(yield* Fiber.join(collected));
+        if (options.whileRunning) {
+          yield* options.whileRunning({
+            runId: RunId.make(`run-bob-${turn}`),
+            nextEvent: Queue.take(arrivals),
+          });
+        }
+        yield* Fiber.join(collected);
+        return seen;
       });
     /** When the mock Bobs stamped each prompt they received, in order. */
     const promptTimestamps = (): ReadonlyArray<number> => {
@@ -384,6 +406,8 @@ const openBob = (input: {
       runTurn,
       requests,
       promptTimestamps,
+      /** Lets the mock Bob's "work slowly" tool call finish. */
+      release: () => NodeFS.writeFileSync(path.join(tempDir, "release"), ""),
     };
   });
 
@@ -479,6 +503,65 @@ describe("BobAdapterV2 turns", () => {
       ]);
       const offered = yield* runBobTurn({ text: "hello", mode: "ask" });
       assert.deepEqual(notices(offered.events), []);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("steers Bob once its running tool call finishes, in the same turn", () =>
+    Effect.gen(function* () {
+      const bob = yield* openBob({});
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      const events = yield* bob.runTurn(session, providerThread, "work slowly", {
+        whileRunning: ({ runId, nextEvent }) =>
+          Effect.gen(function* () {
+            let bound = providerThread;
+            let providerTurnId: ProviderTurnId | undefined;
+            // Steer while Bob's tool call runs.
+            for (;;) {
+              const event = yield* nextEvent;
+              if (event.type === "provider_thread.updated") bound = event.providerThread;
+              if (event.type === "provider_turn.updated") providerTurnId = event.providerTurn.id;
+              if (
+                event.type === "turn_item.updated" &&
+                event.turnItem.nativeItemRef?.nativeId?.includes("slow-1") === true
+              ) {
+                break;
+              }
+            }
+            yield* session.steerTurn({
+              threadId: bob.threadId,
+              runId,
+              providerThread: bound,
+              providerTurnId: providerTurnId!,
+              message: {
+                messageId: MessageId.make("message-bob-steer"),
+                text: "Look at the tests instead.",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+            });
+            bob.release();
+          }),
+      });
+      assert.equal(terminalOf(events)?.status, "completed");
+      const methods = bob.requests().map((request) => request.method);
+      // The cancel waits for the tool call, and the steer follows as the turn's next prompt.
+      assert.isBelow(methods.indexOf("_mock/released"), methods.indexOf("session/cancel"));
+      assert.isBelow(methods.indexOf("session/cancel"), methods.lastIndexOf("session/prompt"));
+      const prompts = bob.requests().filter((request) => request.method === "session/prompt");
+      assert.include(JSON.stringify(prompts.at(-1)?.params), "Look at the tests instead.");
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "message.updated" &&
+            JSON.stringify(event.message).includes("Hello from Bob."),
+        ),
+      );
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
