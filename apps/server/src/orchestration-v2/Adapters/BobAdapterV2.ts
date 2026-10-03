@@ -18,14 +18,18 @@ import {
   type ProviderApprovalOption,
   type ProviderInstanceId,
   ProviderSetupError,
+  type RunAttemptId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
+import * as Arr from "effect/Array";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -36,6 +40,7 @@ import {
   type AcpSessionMode,
   type AcpToolCallState,
 } from "@t3tools/provider-acp/server/runtimeModel";
+import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   deleteBobSession,
@@ -677,23 +682,83 @@ function wrapBobSession(
   explainSetup: (
     error: ProviderAdapter.ProviderAdapterV2Error,
   ) => ProviderAdapter.ProviderAdapterV2Error,
+  modes: {
+    /** The mode a turn picked that Bob does not offer in its folder, which runs Agent instead. */
+    readonly missing: (input: ProviderAdapter.ProviderAdapterV2TurnInput) => string | undefined;
+    readonly noticeItemId: (nativeItemId: string) => TurnItemId;
+  },
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
   let cwd = openedIn;
   const follow = (policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined) => {
     if (policy?.cwd) cwd = policy.cwd;
   };
+  // A turn whose picked mode Bob lacks says so once the turn exists, as the generic adapter
+  // runs it in Agent mode without a word. Keyed by run attempt until its provider turn appears.
+  const missingModes = new Map<
+    RunAttemptId,
+    { readonly input: ProviderAdapter.ProviderAdapterV2TurnInput; readonly mode: string }
+  >();
+  const withMissingModeNotice = (
+    event: ProviderAdapter.ProviderAdapterV2Event,
+  ): Arr.NonEmptyReadonlyArray<ProviderAdapter.ProviderAdapterV2Event> => {
+    if (event.type !== "provider_turn.updated" || event.providerTurn.runAttemptId === null) {
+      return [event];
+    }
+    const pending = missingModes.get(event.providerTurn.runAttemptId);
+    if (pending === undefined) return [event];
+    missingModes.delete(event.providerTurn.runAttemptId);
+    const { providerTurn } = event;
+    const nativeItemId = `${providerTurn.id}:bob-missing-mode`;
+    const at = providerTurn.startedAt ?? DateTime.nowUnsafe();
+    const message = `Bob has no "${pending.mode}" mode in this project, so this turn runs in Agent mode.`;
+    return [
+      event,
+      {
+        type: "turn_item.updated",
+        driver: BOB_PROVIDER,
+        turnItem: {
+          id: modes.noticeItemId(nativeItemId),
+          threadId: pending.input.threadId,
+          runId: pending.input.runId,
+          nodeId: providerTurn.nodeId,
+          providerThreadId: providerTurn.providerThreadId,
+          providerTurnId: providerTurn.id,
+          nativeItemRef: { driver: BOB_PROVIDER, nativeId: nativeItemId, strength: "weak" },
+          parentItemId: null,
+          // The generic adapter numbers a turn's items from `ordinal * 100 + 1`, so this one
+          // comes first.
+          ordinal: providerTurn.ordinal * 100,
+          type: "system_notice",
+          status: "completed",
+          title: message,
+          message,
+          startedAt: at,
+          completedAt: at,
+          updatedAt: at,
+        },
+      },
+    ];
+  };
   const deleteTask = (taskCwd: string, sessionId: string) =>
     withShortLivedBob(taskCwd, (bob) => deleteBobSession(bob, sessionId)).pipe(Effect.asVoid);
   return {
     ...session,
+    events: session.events.pipe(
+      Stream.mapArray((events) => Arr.flatMap(events, withMissingModeNotice)),
+    ),
     ensureThread: (input) => {
       follow(input.runtimePolicy);
       return session.ensureThread(input).pipe(Effect.mapError(explainSetup));
     },
     startTurn: (input) => {
       follow(input.runtimePolicy);
-      return session.startTurn(input).pipe(Effect.mapError(explainSetup));
+      const mode = modes.missing(input);
+      if (mode !== undefined) missingModes.set(input.attemptId, { input, mode });
+      return session.startTurn(input).pipe(
+        Effect.mapError(explainSetup),
+        Effect.tapError(() => Effect.sync(() => missingModes.delete(input.attemptId))),
+      );
     },
     // Bob resumes a task only in the folder it started in, so a thread that moved copies its
     // task here with `_bob/task/export` and `_bob/task/import`, and the original goes once the
@@ -801,9 +866,17 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
     idAllocator: yield* IdAllocator.IdAllocatorV2,
     host: yield* ProviderHost.ProviderHost,
   };
+  // The modes Bob offered in each folder, custom modes included.
+  const offeredModes = new Map<string, ReadonlySet<string>>();
   const adapter = yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
-    flavor: makeBobAcpAdapterFlavor(options),
+    flavor: makeBobAcpAdapterFlavor({
+      ...options,
+      onAvailableModes: (modes, cwd) => {
+        offeredModes.set(cwd, new Set(modes.map((mode) => mode.id)));
+        return options.onAvailableModes?.(modes, cwd) ?? Effect.void;
+      },
+    }),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.continuationRequests === undefined
@@ -833,6 +906,23 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
     );
   const explainSetup = (error: ProviderAdapter.ProviderAdapterV2Error) =>
     withBobSetupDetail(error, options.instanceId, options.settings.authMethod);
+  const modes = {
+    missing: (input: ProviderAdapter.ProviderAdapterV2TurnInput) => {
+      const picked = input.modelSelection.options?.find(
+        (option) => option.id === ACP_SESSION_MODE_OPTION_ID,
+      )?.value;
+      // Plan mode replaces the picked mode anyway.
+      if (typeof picked !== "string" || input.runtimePolicy.interactionMode === "plan") {
+        return undefined;
+      }
+      const offered = input.runtimePolicy.cwd
+        ? offeredModes.get(input.runtimePolicy.cwd)
+        : undefined;
+      return offered === undefined || offered.has(picked) ? undefined : picked;
+    },
+    noticeItemId: (nativeItemId: string) =>
+      options.idAllocator.derive.turnItemFromProviderItem({ driver: BOB_PROVIDER, nativeItemId }),
+  };
   return {
     ...adapter,
     openSession: (input) =>
@@ -844,6 +934,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
             input.runtimePolicy.cwd ?? process.cwd(),
             withShortLivedBob,
             explainSetup,
+            modes,
           ),
         ),
       ),
