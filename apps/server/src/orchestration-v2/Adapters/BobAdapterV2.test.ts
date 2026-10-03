@@ -36,6 +36,7 @@ import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
+import { makeProviderFailure } from "../ProviderFailure.ts";
 import { type ProviderAdapterV2Event, ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
 import {
   BOB_EMPTY_REPLY_MESSAGE,
@@ -438,6 +439,22 @@ describe("BobAdapterV2 turns", () => {
           cwd: result.workspace,
         });
       }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("says how to sign in, or accept Bob's license, when Bob refuses the session", () =>
+    Effect.gen(function* () {
+      const signedOut = yield* Effect.flip(
+        runBobTurn({ text: "hello", mockEnv: { T3_ACP_BOB_SIGNED_OUT: "1" } }),
+      );
+      assert.equal(makeProviderFailure({ cause: signedOut }).message, BOB_SSO_SIGN_IN_MESSAGE);
+      const unlicensed = yield* Effect.flip(
+        runBobTurn({ text: "hello", mockEnv: { T3_ACP_BOB_LICENSE_REQUIRED: "1" } }),
+      );
+      assert.equal(
+        makeProviderFailure({ cause: unlicensed }).message,
+        "Run bob with --accept-license to accept the license. Run `bob` once in a terminal to accept it.",
+      );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
   it.effect("fails a turn Bob ends without replying as retryable", () =>

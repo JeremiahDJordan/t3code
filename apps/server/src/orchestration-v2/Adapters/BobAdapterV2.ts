@@ -10,12 +10,14 @@
  * @module orchestration-v2/Adapters/BobAdapterV2
  */
 import {
+  type BobAuthMethod,
   type BobSettings,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderThread,
   type ProviderApprovalOption,
   type ProviderInstanceId,
+  ProviderSetupError,
 } from "@t3tools/contracts";
 import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
@@ -562,6 +564,43 @@ function isBobTaskNotHere(cause: unknown): boolean {
   return false;
 }
 
+/**
+ * `error` carrying Bob's setup text, such as how to sign in or accept its license, as the safe
+ * detail the thread's failure shows. Bob refuses a session that way while it opens, before any
+ * prompt, so the flavor's `promptFailure` never sees it.
+ */
+function withBobSetupDetail(
+  error: ProviderAdapter.ProviderAdapterV2Error,
+  instanceId: ProviderInstanceId,
+  authMethod: BobAuthMethod,
+): ProviderAdapter.ProviderAdapterV2Error {
+  let detail: string | undefined;
+  for (let current: unknown = error.cause; current !== null && typeof current === "object";) {
+    detail = describeBobAcpSetupError(current, authMethod);
+    if (detail !== undefined) break;
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  if (detail === undefined) return error;
+  const cause = new ProviderSetupError({
+    instanceId,
+    operation: "session",
+    detail,
+    cause: error.cause,
+  });
+  switch (error._tag) {
+    case "ProviderAdapterOpenSessionError":
+      return new ProviderAdapter.ProviderAdapterOpenSessionError({ ...error, cause });
+    case "ProviderAdapterEnsureThreadError":
+      return new ProviderAdapter.ProviderAdapterEnsureThreadError({ ...error, cause });
+    case "ProviderAdapterResumeThreadError":
+      return new ProviderAdapter.ProviderAdapterResumeThreadError({ ...error, cause });
+    case "ProviderAdapterTurnStartError":
+      return new ProviderAdapter.ProviderAdapterTurnStartError({ ...error, cause });
+    default:
+      return error;
+  }
+}
+
 function bobTaskId(providerThread: OrchestrationV2ProviderThread): string | undefined {
   return providerThread.nativeThreadRef?.nativeId ?? undefined;
 }
@@ -586,6 +625,9 @@ function wrapBobSession(
     cwd: string,
     use: (bob: AcpSessionRuntime.AcpSessionRuntime["Service"]) => Effect.Effect<A>,
   ) => Effect.Effect<A | undefined>,
+  explainSetup: (
+    error: ProviderAdapter.ProviderAdapterV2Error,
+  ) => ProviderAdapter.ProviderAdapterV2Error,
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
   let cwd = openedIn;
@@ -598,11 +640,11 @@ function wrapBobSession(
     ...session,
     ensureThread: (input) => {
       follow(input.runtimePolicy);
-      return session.ensureThread(input);
+      return session.ensureThread(input).pipe(Effect.mapError(explainSetup));
     },
     startTurn: (input) => {
       follow(input.runtimePolicy);
-      return session.startTurn(input);
+      return session.startTurn(input).pipe(Effect.mapError(explainSetup));
     },
     // Bob resumes a task only in the folder it started in, so a thread that moved copies its
     // task here with `_bob/task/export` and `_bob/task/import`, and the original goes once the
@@ -630,6 +672,7 @@ function wrapBobSession(
               return resumed;
             }),
         ),
+        Effect.mapError(explainSetup),
       );
     },
     // ACP has no rewind, so the generic rollback starts an empty conversation. Bob's task is cut
@@ -727,15 +770,21 @@ export function makeBobAdapterV2(
       Effect.provideService(Crypto.Crypto, options.crypto),
       Effect.orElseSucceed(() => undefined),
     );
+  const explainSetup = (error: ProviderAdapter.ProviderAdapterV2Error) =>
+    withBobSetupDetail(error, options.instanceId, options.settings.authMethod);
   return {
     ...adapter,
     openSession: (input) =>
-      adapter
-        .openSession(input)
-        .pipe(
-          Effect.map((session) =>
-            wrapBobSession(session, input.runtimePolicy.cwd ?? process.cwd(), withShortLivedBob),
+      adapter.openSession(input).pipe(
+        Effect.mapError(explainSetup),
+        Effect.map((session) =>
+          wrapBobSession(
+            session,
+            input.runtimePolicy.cwd ?? process.cwd(),
+            withShortLivedBob,
+            explainSetup,
           ),
         ),
+      ),
   };
 }
