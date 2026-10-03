@@ -76,6 +76,16 @@ describe("V2 client presentation", () => {
     expect(shell.source).toBe(v2ThreadShell);
   });
 
+  it("presents no runtime for an imported thread that has not run", () => {
+    const shell = presentThreadShell(environmentId, {
+      ...v2ThreadShell,
+      activeProviderThreadId: ProviderThreadId.make("provider-thread-imported"),
+      latestRunId: null,
+      status: "idle",
+    });
+    expect(shell.runtime).toBeNull();
+  });
+
   it("preserves active ordering and both pull-request sources", () => {
     const linkedPullRequest = {
       projectId: v2ThreadShell.projectId,

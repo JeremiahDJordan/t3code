@@ -39,7 +39,8 @@ T3 Code tells Bob to trust each project folder you open, and Bob remembers it, s
 you do not need to trust the folder in Bob first. After Bob has run in a project,
 its skills and MCP prompts appear in the composer's `/` menu. When a thread moves
 to another folder, such as picking a branch that lives in another worktree, Bob
-moves the conversation with it (Bob 2.0.5 or later).
+moves the conversation with it (Bob 2.0.5 or later). A Bob thread from before T3 Code's
+[thread migration](./thread-migration.md) continues its Bob task.
 
 Reverting a thread, or editing and resubmitting an earlier turn, rewinds Bob's
 conversation as well, as rolling back a task in Bob's IDE does: Bob continues from
@@ -48,6 +49,9 @@ the conversation before that turn.
 When Bob runs a subagent, the thread shows it, and opening it shows the subagent's
 own thread. Bob does not report a subagent's steps while it works; once it finishes,
 its thread lists its notes and tool calls, then its report.
+
+To bring in Bob tasks you ran outside T3 Code, see [Import your
+projects](./welcome-wizard.md#import-your-projects).
 
 T3 Code's Plan mode uses Bob's plan mode, and the plan Bob writes becomes the
 thread's proposed plan. After Bob has run, the model picker's **Mode** option also
