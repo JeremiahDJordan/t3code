@@ -14,7 +14,9 @@
  * empty reply). Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
- * `T3_ACP_BOB_RESUME_NOT_FOUND` makes every resume fail as an unknown task.
+ * `T3_ACP_BOB_RESUME_NOT_FOUND` makes every resume fail as an unknown task;
+ * `T3_ACP_BOB_STATE_PATH` keeps the tasks in a file, so every mock Bob shares them as real Bobs
+ * share their task database.
  */
 import * as NodeFS from "node:fs";
 import * as NodeReadline from "node:readline";
@@ -25,6 +27,7 @@ const failPrompt = process.env.T3_ACP_FAIL_PROMPT === "1";
 const signedOut = process.env.T3_ACP_BOB_SIGNED_OUT === "1";
 const licenseRequired = process.env.T3_ACP_BOB_LICENSE_REQUIRED === "1";
 const resumeNotFound = process.env.T3_ACP_BOB_RESUME_NOT_FOUND === "1";
+const statePath = process.env.T3_ACP_BOB_STATE_PATH;
 
 type Json = Record<string, unknown>;
 interface RpcError {
@@ -48,8 +51,25 @@ const availableModes = [
 let currentModeId = "agent";
 const modes = () => ({ currentModeId, availableModes });
 
-const tasks = new Map<string, { readonly cwd: string; readonly messages: Array<Json> }>();
+let tasks = new Map<string, { readonly cwd: string; readonly messages: Array<Json> }>();
 let nextTaskNumber = 1;
+function loadState(): void {
+  if (!statePath || !NodeFS.existsSync(statePath)) return;
+  const state = JSON.parse(NodeFS.readFileSync(statePath, "utf8")) as {
+    readonly nextTaskNumber: number;
+    readonly tasks: Record<string, { readonly cwd: string; readonly messages: Array<Json> }>;
+  };
+  nextTaskNumber = state.nextTaskNumber;
+  tasks = new Map(Object.entries(state.tasks));
+}
+function saveState(): void {
+  if (!statePath) return;
+  NodeFS.writeFileSync(
+    statePath,
+    JSON.stringify({ nextTaskNumber, tasks: Object.fromEntries(tasks) }),
+    "utf8",
+  );
+}
 function newTask(cwd: string, prefix = "mock-session-"): string {
   const id = `${prefix}${nextTaskNumber++}`;
   tasks.set(id, { cwd, messages: [] });
@@ -115,7 +135,19 @@ function runPrompt(params: Json): Json {
   const sessionId = String(params.sessionId);
   const text = promptText(params.prompt);
   const task = tasks.get(sessionId);
-  task?.messages.push({ role: "user", data: { content: text, _meta: { timestamp: Date.now() } } });
+  // Bob's prompts are seconds apart; the mock's can share a millisecond, so each stamp follows
+  // the task's last one.
+  const previous = Math.max(
+    0,
+    ...(task?.messages ?? []).map((message) => {
+      const meta = (message.data as Json | undefined)?._meta as
+        | { readonly timestamp?: number }
+        | undefined;
+      return meta?.timestamp ?? 0;
+    }),
+  );
+  const timestamp = Math.max(Date.now(), previous + 1);
+  task?.messages.push({ role: "user", data: { content: text, _meta: { timestamp } } });
   if (failPrompt) {
     throw new Refusal({
       code: -32603,
@@ -240,7 +272,10 @@ lines.on("line", (line) => {
   // Notifications, such as `session/cancel`, and responses to Bob's own requests need no answer.
   if (message.id === undefined || message.method === undefined) return;
   try {
-    send({ id: message.id, result: handle(message.method, message.params ?? {}) });
+    loadState();
+    const result = handle(message.method, message.params ?? {});
+    saveState();
+    send({ id: message.id, result });
   } catch (cause) {
     if (!(cause instanceof Refusal)) throw cause;
     send({ id: message.id, error: cause.error });
