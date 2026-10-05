@@ -38,6 +38,7 @@ import { ServerActivation } from "../../serverActivation.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
 import {
+  type AdoptableBobRelay,
   bobRelayHasTurn,
   makeBobRelayHost,
   makeBobRelays,
@@ -274,7 +275,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       const driverScope = yield* Effect.scope;
       // Bob's relays from before this start: those no instance runs any more stop, this
       // instance's idle ones stop, and each still running a prompt gets a run to finish it in.
-      const adoptable = new Map<string, string>();
+      const adoptable = new Map<string, AdoptableBobRelay>();
       const scanned = yield* Deferred.make<void>();
       if (relayHost === undefined || instancesWithScannedRelays.has(instanceId)) {
         yield* Deferred.succeed(scanned, undefined);
@@ -298,7 +299,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
               yield* relayHost.kill(relayId);
               continue;
             }
-            adoptable.set(meta.sessionId, relayId);
+            adoptable.set(meta.sessionId, { relayId, autoApprove: meta.autoApprove === true });
             if (meta.threadId !== undefined && meta.providerThreadId !== undefined) {
               owners.push({ threadId: meta.threadId, providerThreadId: meta.providerThreadId });
             }

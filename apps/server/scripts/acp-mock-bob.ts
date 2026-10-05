@@ -15,7 +15,10 @@
  * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`, and
  * "finish later", whose tool call runs until that file exists (also logged) and which then
  * replies, and
- * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins.
+ * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins, and
+ * "ask about <kinds>", which asks permission for a tool of each kind named (edit, delete, execute,
+ * search, fetch, other, read) as Bob asks, logs each answer as `_mock/permission` and replies with
+ * them.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
@@ -362,6 +365,90 @@ function finishLater(id: number | string, sessionId: string): void {
   }, 10);
 }
 
+/** Bob's requests to T3 waiting for their answers, by id. */
+const awaitingAnswers = new Map<string, (answer: Json) => void>();
+let nextRequestNumber = 1;
+function request(method: string, params: Json): Promise<Json> {
+  const id = `bob-request-${nextRequestNumber++}`;
+  send({ id, method, params });
+  return new Promise((resolve) => awaitingAnswers.set(id, resolve));
+}
+
+// Bob's options for every permission request.
+const permissionOptions = [
+  { optionId: "allow", name: "Allow once", kind: "allow_once" },
+  { optionId: "allow_always", name: "Always allow", kind: "allow_always" },
+  { optionId: "reject", name: "Reject", kind: "reject_once" },
+  { optionId: "reject_always", name: "Always reject", kind: "reject_always" },
+];
+
+/** A tool of each kind as Bob asks about it: its title, input and any edit it previews. */
+function askedTool(kind: string, cwd: string): Json {
+  switch (kind) {
+    case "edit":
+      return {
+        title: "Write notes.md",
+        rawInput: { path: "notes.md", content: "Notes" },
+        content: [{ type: "diff", path: `${cwd}/notes.md`, oldText: null, newText: "Notes" }],
+      };
+    case "delete":
+      return { title: "Delete old.txt", rawInput: { path: "old.txt" } };
+    case "execute":
+      return { title: "rm -rf build", rawInput: { command: "rm -rf build" } };
+    case "search":
+      return { title: "Search the web: t3 code", rawInput: { query: "t3 code" } };
+    case "fetch":
+      return { title: "Fetch https://example.com", rawInput: { url: "https://example.com" } };
+    case "read":
+      return { title: "Read /etc/hosts", rawInput: { path: "/etc/hosts" } };
+    default:
+      return { title: "list_scheduled", rawInput: {} };
+  }
+}
+
+/**
+ * Asks permission for a tool of each kind in turn, as Bob does before running one, then replies
+ * with T3's answers and ends the prompt, unless it was cancelled.
+ */
+async function askAbout(id: number | string, sessionId: string, kinds: ReadonlyArray<string>) {
+  cancellablePrompts.set(sessionId, id);
+  const cwd = tasks.get(sessionId)?.cwd ?? process.cwd();
+  const answers: Array<string> = [];
+  for (const [index, kind] of kinds.entries()) {
+    const toolCallId = `asked-${kind}-${index}`;
+    const { content, ...tool } = askedTool(kind, cwd);
+    notify(sessionId, { sessionUpdate: "tool_call", toolCallId, kind, status: "pending", ...tool });
+    const answer = await request("session/request_permission", {
+      sessionId,
+      options: permissionOptions,
+      toolCall: { toolCallId, kind, status: "pending", ...tool, ...(content ? { content } : {}) },
+    });
+    const outcome = (answer.result as Json | undefined)?.outcome as Json | undefined;
+    const chosen = outcome?.outcome === "selected" ? String(outcome.optionId) : "cancelled";
+    if (requestLogPath) {
+      NodeFS.appendFileSync(
+        requestLogPath,
+        `${JSON.stringify({ method: "_mock/permission", params: { kind, outcome: chosen } })}\n`,
+      );
+    }
+    answers.push(`${kind}=${chosen}`);
+    const allowed = chosen.startsWith("allow");
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: allowed ? "completed" : "failed",
+    });
+    if (cancellablePrompts.get(sessionId) !== id) return;
+  }
+  if (cancellablePrompts.get(sessionId) !== id) return;
+  cancellablePrompts.delete(sessionId);
+  notify(sessionId, {
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: `Bob's tools: ${answers.join(", ")}` },
+  });
+  send({ id, result: { stopReason: "end_turn" } });
+}
+
 const lines = NodeReadline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   if (!line.trim()) return;
@@ -371,6 +458,11 @@ lines.on("line", (line) => {
     readonly method?: string;
     readonly params?: Json;
   };
+  if (message.method === undefined && message.id !== undefined) {
+    awaitingAnswers.get(String(message.id))?.(message as Json);
+    awaitingAnswers.delete(String(message.id));
+    return;
+  }
   if (message.method === "session/cancel") {
     const sessionId = String(message.params?.sessionId);
     const pending = cancellablePrompts.get(sessionId);
@@ -396,7 +488,17 @@ lines.on("line", (line) => {
     finishLater(message.id, String(message.params?.sessionId));
     return;
   }
-  // Notifications and responses to Bob's own requests need no answer.
+  const asked = /ask about ([a-z ,]+)/.exec(promptText(message.params?.prompt));
+  if (message.method === "session/prompt" && message.id !== undefined && asked) {
+    loadState();
+    void askAbout(
+      message.id,
+      String(message.params?.sessionId),
+      asked[1]!.split(/[ ,]+/).filter(Boolean),
+    );
+    return;
+  }
+  // Notifications need no answer.
   if (message.id === undefined || message.method === undefined) return;
   try {
     loadState();

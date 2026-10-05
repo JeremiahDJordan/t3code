@@ -42,6 +42,10 @@ import {
   type AcpSessionMode,
   type AcpToolCallState,
 } from "../../provider/acp/AcpRuntimeModel.ts";
+import {
+  acpPermissionDisposition,
+  type AcpPermissionDisposition,
+} from "../../provider/acp/AcpClientPolicy.ts";
 import { ACP_SESSION_MODE_OPTION_ID } from "../../provider/acp/AcpSessionConfig.ts";
 import {
   type BobRelayLink,
@@ -50,6 +54,7 @@ import {
 } from "../../provider/acp/BobRelay.ts";
 import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import {
+  bobApprovesItsOwnTools,
   deleteBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
@@ -278,6 +283,40 @@ function bobApprovalOptions(
       : []),
     ...(offers("allow_once") ? [{ decision: "accept" as const, label: "Approve" }] : []),
   ];
+}
+
+/**
+ * Bob's permission request as T3 shows and answers it. Bob derives a tool's kind from its
+ * permission group, and for web, MCP and other tools from its name: one named for a search
+ * becomes a "search", which T3 takes for a file read and lets through in every mode, and one
+ * named for a fetch shows as a file read. Every kind but an edit becomes "other", so it asks and
+ * shows as the tool it is.
+ */
+export function normalizeBobPermissionRequest(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): EffectAcpSchema.RequestPermissionRequest {
+  const kind = request.toolCall.kind;
+  return kind === "edit" || kind === "delete" || kind === "move"
+    ? request
+    : { ...request, toolCall: { ...request.toolCall, kind: "other" } };
+}
+
+/**
+ * How T3 answers Bob's permission requests: Accept edits lets Bob's edits through and asks about
+ * the rest. Until T3 reviews Bob's tool calls, Auto works as Accept edits; upstream's Auto
+ * approves everything when no sandbox is set. In Full access Bob approves its own tools.
+ */
+export function bobPermissionDisposition(
+  policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+  request: EffectAcpSchema.RequestPermissionRequest,
+): AcpPermissionDisposition {
+  return acpPermissionDisposition(
+    {
+      ...policy,
+      runtimeMode: policy.runtimeMode === "auto" ? "auto-accept-edits" : policy.runtimeMode,
+    },
+    normalizeBobPermissionRequest(request),
+  );
 }
 
 /** Bob reports a failed turn as a generic internal error with the reason in `data.details`. */
@@ -639,6 +678,11 @@ function wrapBobRuntime(
       state.stopped = true;
     }).pipe(Effect.andThen(saveSteers), Effect.andThen(runtime.cancel)),
     start: () => runtime.start().pipe(Effect.tap(opened)),
+    // The adapter shows and answers each request by its kind, which Bob's tool names skew.
+    handleRequestPermission: (handler) =>
+      runtime.handleRequestPermission((request, context) =>
+        handler(normalizeBobPermissionRequest(request), context),
+      ),
     // Bob advertises `session/load` but replays every message through it; resume restores the
     // task without the replay.
     loadSession: (sessionId, options) =>
@@ -782,6 +826,7 @@ export function makeBobAcpAdapterFlavor(
           cwd: input.cwd,
           resumeSessionId: input.resumeSessionId,
           mcpTokenHash,
+          autoApprove: bobApprovesItsOwnTools(runtimePolicy.runtimeMode),
         });
         const terminated = yield* Deferred.make<void>();
         const runtime = yield* makeBobAcpRuntime({
@@ -811,6 +856,7 @@ export function makeBobAcpAdapterFlavor(
     sessionModeForPolicy: (policy) =>
       policy.interactionMode === "plan" ? undefined : BOB_AGENT_MODE_ID,
     normalizeSessionUpdate: decodeBobToolTitles,
+    permissionDisposition: bobPermissionDisposition,
     approvalOptions: bobApprovalOptions,
     extractSubagentUpdate: extractBobSubagentUpdate,
     registerExtensions: ({ runtime, captureProposedPlan }) =>

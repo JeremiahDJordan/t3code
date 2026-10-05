@@ -18,6 +18,7 @@ import {
   type ProviderTurnId,
   RunAttemptId,
   RunId,
+  type RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -187,6 +188,53 @@ describe("BobAdapterV2 flavor", () => {
     );
   });
 
+  it("lets Bob's edits through in Accept edits and Auto, and asks about everything else", () => {
+    const answer = (runtimeMode: RuntimeMode, kind: EffectAcpSchema.ToolKind) =>
+      flavor.permissionDisposition?.(
+        ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode,
+          interactionMode: "default",
+          cwd: "/workspace",
+        }),
+        {
+          ...permissionRequest([{ optionId: "allow", name: "Allow once", kind: "allow_once" }]),
+          toolCall: { toolCallId: "tool-1", title: "A tool", kind },
+        },
+      );
+    const kinds = [
+      "edit",
+      "delete",
+      "move",
+      "execute",
+      "search",
+      "fetch",
+      "other",
+      "read",
+    ] as const;
+    const answers = (runtimeMode: RuntimeMode) =>
+      Object.fromEntries(kinds.map((kind) => [kind, answer(runtimeMode, kind)]));
+    const editsThrough = {
+      edit: "allow",
+      delete: "allow",
+      move: "allow",
+      execute: "ask",
+      search: "ask",
+      fetch: "ask",
+      other: "ask",
+      read: "ask",
+    } as const;
+    assert.deepEqual(
+      answers("approval-required"),
+      Object.fromEntries(kinds.map((kind) => [kind, "ask"])),
+    );
+    assert.deepEqual(answers("auto-accept-edits"), editsThrough);
+    assert.deepEqual(answers("auto"), editsThrough);
+    assert.deepEqual(
+      answers("full-access"),
+      Object.fromEntries(kinds.map((kind) => [kind, "allow"])),
+    );
+  });
+
   it("starts every turn in Agent but leaves Plan turns to the plan mode switch", () => {
     const mode = (interactionMode: "default" | "plan") =>
       flavor.sessionModeForPolicy?.(
@@ -290,6 +338,8 @@ const openBob = (input: {
   readonly relays?: BobRelays;
   /** Collects the tool call ids subagent steps are read for. */
   readonly subagentStepReads?: Array<string>;
+  /** The thread's runtime mode, Full access unless given. */
+  readonly runtimeMode?: RuntimeMode;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -362,7 +412,11 @@ const openBob = (input: {
       ...(input.mode ? { options: [{ id: "_t3/session-mode", value: input.mode }] } : {}),
     };
     const policyFor = (cwd: string, interactionMode: "default" | "plan" = "default") =>
-      ProviderAdapterV2RuntimePolicy.make({ runtimeMode: "full-access", interactionMode, cwd });
+      ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: input.runtimeMode ?? "full-access",
+        interactionMode,
+        cwd,
+      });
     let sessions = 0;
     let turns = 0;
     /** Opens a session in `cwd`, as a turn after a server start or a folder change does. */
@@ -417,7 +471,7 @@ const openBob = (input: {
             title: "Bob turn",
             providerInstanceId: instanceId,
             modelSelection,
-            runtimeMode: "full-access",
+            runtimeMode: runtimePolicy.runtimeMode,
             interactionMode: options.interactionMode ?? "default",
             branch: null,
             worktreePath: cwd,
@@ -666,6 +720,51 @@ describe("BobAdapterV2 turns", () => {
             event.type === "message.updated" &&
             JSON.stringify(event.message).includes("Hello from Bob."),
         ),
+      );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("in Auto, lets Bob's edits through and asks about its commands and web searches", () =>
+    Effect.gen(function* () {
+      const bob = yield* openBob({ runtimeMode: "auto" });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      const asked: Array<string> = [];
+      const events = yield* bob.runTurn(session, providerThread, "ask about edit execute search", {
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            for (const decision of ["accept", "decline"] as const) {
+              let event = yield* nextEvent;
+              while (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              ) {
+                event = yield* nextEvent;
+              }
+              asked.push(event.runtimeRequest.kind);
+              yield* session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision,
+              });
+            }
+          }),
+      });
+      assert.equal(terminalOf(events)?.status, "completed");
+      assert.deepEqual(asked, ["command", "command"]);
+      assert.deepEqual(
+        bob
+          .requests()
+          .filter((request) => request.method === "_mock/permission")
+          .map((request) => request.params),
+        [
+          { kind: "edit", outcome: "allow" },
+          { kind: "execute", outcome: "allow" },
+          { kind: "search", outcome: "reject" },
+        ],
       );
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
@@ -964,6 +1063,8 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
         if (relay === undefined || taskId === undefined) return;
         assert.isTrue(bobRelayHasTurn(relay.state));
         assert.equal(readBobRelayMeta(relay.state)?.providerThreadId, bound.id);
+        // Its Bob runs in Full access, so only a runtime in Full access takes it over.
+        assert.isTrue(readBobRelayMeta(relay.state)?.autoApprove);
         assert.equal(
           readBobRelayMeta(relay.state)?.mcpTokenHash,
           NodeCrypto.createHash("sha256").update(tokenBefore).digest("hex"),
@@ -983,7 +1084,7 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
           relays: makeBobRelays({
             host,
             instanceId,
-            adoptable: new Map([[taskId, relay.relayId]]),
+            adoptable: new Map([[taskId, { relayId: relay.relayId, autoApprove: true }]]),
             ready: Effect.void,
           }),
           subagentSteps: { entries: [{ _tag: "message", text: "Listing the folder." }] },
@@ -1122,7 +1223,7 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
         relays: makeBobRelays({
           host,
           instanceId,
-          adoptable: new Map([[taskId, relay.relayId]]),
+          adoptable: new Map([[taskId, { relayId: relay.relayId, autoApprove: true }]]),
           ready: Effect.void,
         }),
       });
@@ -1236,7 +1337,7 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
         relays: makeBobRelays({
           host,
           instanceId,
-          adoptable: new Map([[taskId, relay.relayId]]),
+          adoptable: new Map([[taskId, { relayId: relay.relayId, autoApprove: true }]]),
           ready: Effect.void,
         }),
       });

@@ -10,7 +10,7 @@ import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 
-import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
 /** Bob signs in with this key instead of its stored IBM SSO login. */
 export const BOB_API_KEY_ENV = "BOB_API_KEY";
@@ -89,6 +89,11 @@ export function bobSignInMessage(authMethod: BobAuthMethod): string {
   return authMethod === "apiKey" ? BOB_API_KEY_REQUIRED_MESSAGE : BOB_SSO_SIGN_IN_MESSAGE;
 }
 
+/** Whether Bob runs in a mode where it approves its own tools: Full access. */
+export function bobApprovesItsOwnTools(runtimeMode?: RuntimeMode): boolean {
+  return runtimeMode === "full-access";
+}
+
 /**
  * The user opened the project in T3, so Bob trusts it. Only Full access skips
  * Bob's permission prompts; every other mode forwards them through T3.
@@ -100,7 +105,7 @@ export function bobAcpSpawnArgs(
   return [
     "acp",
     "--trust",
-    ...(runtimeMode === "full-access" ? ["--auto-approve"] : []),
+    ...(bobApprovesItsOwnTools(runtimeMode) ? ["--auto-approve"] : []),
     ...(options.disableMcpAndSubagents ? ["--disable-mcp", "--disable-subagents"] : []),
   ];
 }

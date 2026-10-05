@@ -59,8 +59,9 @@ offers Bob's Ask mode and your custom modes (`custom_modes.yaml`); turns use Age
 mode unless you pick another. A custom mode from one project is skipped in projects
 that don't define it. Tool approvals follow
 [Permission modes](./permission-modes.md): **Full access** approves every Bob tool
-call, and **Auto-accept edits** approves file edits. **Supervised** asks before Bob
-acts, and so does **Auto**, since Bob has no automatic reviewer.
+call. **Auto-accept edits** and **Auto** approve Bob's file edits and ask before its
+commands, web searches and fetches, and other tools, such as MCP tools. **Supervised**
+asks before all of them. In every mode Bob reads and searches files without asking.
 
 A message you send while Bob is working follows **Settings → General → Follow-up
 behavior**. Queue holds it until Bob finishes its turn. Steer lets Bob finish the
