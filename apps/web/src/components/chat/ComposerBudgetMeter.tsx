@@ -25,11 +25,14 @@ export function ComposerBudgetMeter(props: {
 }) {
   const { window, onOpenLimits } = props;
   const remaining = remainingPercent(window);
-  // The Limits bars fill with what is left, so the ring runs down as it is spent.
+  // The Limits bars fill with what is left, so the ring runs down as it is spent. It turns
+  // amber and then red where T3 warns that the budget runs low, at 80% and 95% used.
   const color =
-    remaining <= 10
+    remaining <= 5
       ? "var(--color-error)"
-      : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
+      : remaining <= 20
+        ? "var(--color-warning)"
+        : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
   const title = window.amount ? `${window.label} ${window.amount.unit}` : window.label;
 
   return (
