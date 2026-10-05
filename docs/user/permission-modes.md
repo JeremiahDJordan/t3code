@@ -23,8 +23,9 @@ not prevent the agent from asking questions about the task.
 Providers enforce permissions differently. Some read-only actions can proceed in **Supervised**.
 **Auto** uses automatic review on Codex, Claude, Cursor, and Grok; providers without an equivalent,
 including OpenCode and Antigravity, fall back to asking. On Grok, commands its review blocks come
-to you for approval. On Bob Shell, **Auto** approves commands that only read and edits inside the project, and asks
-about the rest; see [Bob Shell approvals](./providers-bob.md#projects-and-approvals).
+to you for approval. On Bob Shell, **Auto** approves commands that only read and edits inside the project, has a
+model check calls such as running tests against your request, and asks about the rest; see
+[Bob Shell approvals](./providers-bob.md#projects-and-approvals).
 
 Muse Code offers only **Supervised** and **Full access**. A Muse thread already set to another mode
 runs in **Supervised**.

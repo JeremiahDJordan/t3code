@@ -15,6 +15,7 @@ import {
   type ServerSettings,
   ThreadId,
 } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -23,6 +24,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -37,6 +39,7 @@ import * as ProcessRunner from "../../processRunner.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import { makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
 import {
   type AdoptableBobRelay,
   bobRelayHasTurn,
@@ -273,6 +276,17 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         setWorkspaceUsageLimits,
       });
       const driverScope = yield* Effect.scope;
+      // In Auto, the model that judges the tool calls the rules leave to what the user asked.
+      const runFork = Effect.runForkWith(yield* Effect.context<never>());
+      const autoJudge = makeBobAutoJudgeForSettings({
+        settings: effectiveConfig,
+        environment: processEnv,
+        cacheDir: serverConfig.providerStatusCacheDir,
+        platform: yield* HostProcessPlatform,
+        httpClient,
+        log: (message) => void runFork(Effect.logWarning(message)),
+      });
+      yield* Scope.addFinalizer(driverScope, autoJudge.close);
       // Bob's relays from before this start: those no instance runs any more stop, this
       // instance's idle ones stop, and each still running a prompt gets a run to finish it in.
       const adoptable = new Map<string, AdoptableBobRelay>();
@@ -347,6 +361,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         selfInvocation,
         onAvailableCommands,
         onAvailableModes,
+        autoJudge: autoJudge.judge,
         // Bob reads its model setting on every turn, so the window follows it. That window is
         // assumed, so a context larger than it proves it wrong and is reported without one.
         readTaskUsage: (sessionId) =>

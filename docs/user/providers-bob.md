@@ -66,13 +66,36 @@ before its commands, web searches and fetches, and other tools, such as MCP tool
 without asking.
 
 **Auto** runs what is routine without asking: commands that only read, such as `ls`,
-`git status` or `rg`, unless they reach secrets, shell history or profiles, agent settings
-or your whole home folder; edits inside the project, except to `.git`, `.env` files, editor
-and agent settings, and other secrets; Bob's todo list; and subagents, whose own tool
-calls are checked the same way. It asks before everything else, including the project's
-tests and scripts, git commits, web searches, and anything that writes or runs outside the
-project. A command T3 Code cannot read with certainty, such as one using `$VARIABLES` or
-`$(...)`, asks.
+`git status` or `rg`, unless they reach secrets, shell history or profiles, the hidden
+folders in your home folder, or everything under your home folder or above the project;
+edits inside the project, except to `.git`, `.env` files, editor and agent settings, and
+other secrets; Bob's todo list; and subagents, whose own tool calls are checked the same way.
+
+Calls that are routine only when your request calls for them go to a reviewer model, which
+checks them against the messages you wrote: the project's tests, builds, linters and type
+checks, such as `npm test`, `npm run build`, `make test` or `cargo test`; file commands
+inside the project such as `mkdir` or `mv`; a plain `sed` substitution in project files;
+web searches and fetches of public pages; GitHub reads with `gh`; and skills. The model sees
+your messages and the call, not what Bob read, check-ins or notices. When it finds the call
+requested and not risky, the call runs; otherwise, when you have written nothing it can
+judge against, or when the model does not answer within a few seconds, you are asked. Tests
+and builds ask with flags beyond plain ones such as `-q` or `--run`, and after Bob changed
+what they run in the same turn: a config file such as `package.json` or a `Makefile`, or
+anything in a hidden folder.
+
+Everything else asks, including running the app or other scripts, git commits and pushes,
+deleting files, installing packages, `awk`, MCP tools, local or private network addresses,
+and anything that writes or runs outside the project. A command T3 Code cannot read with
+certainty, such as one using `$VARIABLES` or `$(...)`, asks.
+
+Choose the reviewer in the Bob instance's **Auto mode reviewer** setting under
+**Settings → Providers**. **Apple's on-device model** is the default; it needs Apple
+Intelligence on macOS 26 or later and the Xcode command line tools, and T3 Code builds a
+small helper for it the first time Auto runs. **OpenAI-compatible endpoint** asks a model
+you run, such as one in Ollama at `http://localhost:11434/v1`; set **Reviewer endpoint**
+and **Reviewer model**, and put a key, if the endpoint needs one, in the instance's
+`BOB_AUTO_REVIEW_API_KEY` environment variable. **Rules only** asks you about every call
+the rules leave to review.
 
 A message you send while Bob is working follows **Settings → General → Follow-up
 behavior**. Queue holds it until Bob finishes its turn. Steer lets Bob finish the

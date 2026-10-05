@@ -16,7 +16,7 @@
  * "finish later", whose tool call runs until that file exists (also logged) and which then
  * replies, and
  * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins, and
- * "ask about <tools>", which asks permission for each tool named (edit, edit-outside, execute, ls,
+ * "ask about <tools>", which asks permission for each tool named (edit, edit-config, edit-outside, execute, ls,
  * test, search, fetch, todo, subagent, read, and an MCP tool for any other name) as Bob asks, logs
  * each answer as `_mock/permission` and replies with them.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
@@ -391,6 +391,13 @@ function askedTool(name: string, cwd: string): Json {
         title: "Writing file notes.md",
         rawInput: { path: "notes.md", content: "Notes" },
         content: [{ type: "diff", path: `${cwd}/notes.md`, oldText: null, newText: "Notes" }],
+      };
+    case "edit-config":
+      return {
+        kind: "edit",
+        title: "Writing file package.json",
+        rawInput: { path: "package.json", content: "{}" },
+        content: [{ type: "diff", path: `${cwd}/package.json`, oldText: null, newText: "{}" }],
       };
     case "edit-outside":
       return {

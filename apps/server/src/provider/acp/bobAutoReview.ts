@@ -194,21 +194,40 @@ class Places {
   /**
    * Whether a word may name a secret or a folder holding them. Inside the workspace only the part
    * below it counts, since T3's own worktrees live under `~/.t3`. Outside it, the word as written
-   * and as resolved both count, and so does the home folder or any folder above it, which hold
-   * `~/.ssh` and the like for a recursive read.
+   * and as resolved both count, and so do the home folder's hidden folders and `Library`, where
+   * every tool keeps its credentials. Unless the read is `shallow`, listing names only, so does
+   * any folder holding the home folder or the workspace, which a recursive read descends from
+   * into secrets and other projects.
    */
-  namesSecret(word: string, base: string): boolean {
+  namesSecret(word: string, base: string, shallow = false): boolean {
     const absolute = this.absolute(word, base);
     if (absolute === undefined) return namesSecret(word);
     const relative = this.inWorkspace(absolute);
     if (relative !== undefined) return namesSecret(relative);
     const resolved = canonicalPath(absolute) ?? absolute;
-    const toHome = NodePath.relative(resolved, this.realHome);
-    const holdsHome =
-      toHome === "" ||
-      (toHome !== ".." && !toHome.startsWith(`..${NodePath.sep}`) && !NodePath.isAbsolute(toHome));
-    return holdsHome || namesSecret(word) || namesSecret(resolved);
+    if (namesSecret(word) || namesSecret(resolved)) return true;
+    const fromHome = within(this.realHome, resolved);
+    if (fromHome !== undefined) {
+      const first = segmentsOf(fromHome)[0] ?? "";
+      const worktrees = segmentsOf(fromHome).slice(0, 2).join("/") === ".t3/worktrees";
+      if ((first.startsWith(".") && !worktrees) || first === "Library") return true;
+    }
+    if (shallow) return false;
+    return (
+      within(resolved, this.realHome) !== undefined ||
+      (this.workspace !== undefined && within(resolved, this.workspace) !== undefined)
+    );
   }
+}
+
+/** Where `path` lies within `root`, "" for the root itself; none when it lies outside. */
+function within(root: string, path: string): string | undefined {
+  const relative = NodePath.relative(root, path);
+  return relative === ".." ||
+    relative.startsWith(`..${NodePath.sep}`) ||
+    NodePath.isAbsolute(relative)
+    ? undefined
+    : relative;
 }
 
 /** A path a call writes: in the workspace, and neither a secret nor protected. */
@@ -466,65 +485,193 @@ const GIT_READS = new Set([
 /** Git flags that write a file, run a program or open a pager on files. */
 const GIT_DENIED_FLAGS = /^(--output|--ext-diff|--open-files-in-pager|--exec|-[A-Za-z]*O)/;
 
-/** Package scripts, tests, builds and linters: the project's own code, run as its own. */
-const PROJECT_RUNNERS: Record<string, ReadonlySet<string> | "any"> = {
-  npm: new Set(["test", "t", "run", "run-script", "start"]),
-  pnpm: new Set([
-    "test",
-    "t",
-    "run",
-    "build",
-    "lint",
-    "typecheck",
-    "check",
-    "format",
-    "dev",
-    "start",
-  ]),
-  yarn: new Set(["test", "run", "build", "lint", "typecheck", "check", "format", "dev", "start"]),
-  bun: new Set(["test", "run"]),
-  vp: new Set(["test", "run", "check", "lint", "fmt", "build", "typecheck", "dev"]),
-  go: new Set(["test", "build", "vet", "run", "fmt"]),
-  cargo: new Set(["test", "build", "check", "clippy", "run", "fmt", "bench", "doc"]),
-  swift: new Set(["build", "test", "run"]),
-  dotnet: new Set(["build", "test", "run"]),
+/**
+ * The project's tests, builds, linters and type checks, which run the project's own code and are
+ * left to review: each runner's subcommands, or for a script runner (`npm run`) the script names,
+ * that only do that work. Running the app, its other scripts, or a script file asks.
+ */
+const ROUTINE_TARGET =
+  /^(test|tests|t|lint|typecheck|type-check|check|build|compile|format|fmt|vet|clippy|doc)(:[\w.-]+)*$/;
+/** Names that publish, deploy or change data, which ask even when they look routine. */
+const PUBLISHING =
+  /deploy|release|publish|push|upload|ship|prod|migrat|seed|reset|drop|wipe|clean|prune/i;
+const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "vp"]);
+const RUNNER_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
+  go: new Set(["test", "build", "vet", "fmt"]),
+  cargo: new Set(["test", "build", "check", "clippy", "fmt", "doc"]),
+  swift: new Set(["build", "test"]),
+  dotnet: new Set(["build", "test"]),
   mvn: new Set(["test", "compile", "package", "verify"]),
   gradle: new Set(["test", "build", "check", "assemble"]),
-  make: "any",
-  cmake: "any",
-  xcodebuild: "any",
-  pytest: "any",
-  mypy: "any",
-  ruff: "any",
-  black: "any",
-  flake8: "any",
-  pylint: "any",
-  eslint: "any",
-  prettier: "any",
-  tsc: "any",
-  jest: "any",
-  vitest: "any",
-  biome: "any",
-  oxlint: "any",
-  rspec: "any",
-  rake: "any",
 };
+/** Test runners, linters and type checkers, whatever their arguments. */
+const CHECKERS = new Set([
+  "pytest",
+  "mypy",
+  "ruff",
+  "black",
+  "flake8",
+  "pylint",
+  "eslint",
+  "prettier",
+  "tsc",
+  "jest",
+  "vitest",
+  "biome",
+  "oxlint",
+  "rspec",
+]);
+/**
+ * Flags a test, build or lint run may take: quieter or louder output, which tests, how many
+ * jobs, and fixing or checking formatting. Any other flag asks, since runners take plugins,
+ * configs and shells by flag.
+ */
+const PLAIN_RUNNER_FLAG =
+  /^(--|-[qvsx]|-vv|-j\d*|--(quiet|verbose|silent|ci|bail|run|no-watch|watch=false|color|no-color|release|lib|tests|all|workspace|failfast|exitfirst|lf|ff|noEmit|pretty|fix|check|write|list|maxfail=\d+|jobs=\d+|reporter=[\w-]+|filter=[\w@./:*-]+)|-(k|t|run|race|short|cover|count=\d+|timeout=\w+))$/;
 /** Words that make a project runner install, publish or fetch and run a package. */
 const PACKAGE_INSTALL = /^(--)?(install|i|add|ci|publish|exec|x|dlx|link|update|upgrade)$/;
 const PYTHON_MODULES = new Set(["pytest", "unittest", "mypy", "ruff", "black", "py_compile"]);
-const SCRIPT_RUNNERS = new Set([
-  "node",
-  "python",
-  "python3",
-  "tsx",
-  "ts-node",
-  "bash",
-  "sh",
-  "zsh",
-]);
+/**
+ * Files that decide what a test or build runs: a test run after Bob edited one of them in the
+ * same turn runs code Bob chose, so it asks.
+ */
+const RUNNER_CONFIG =
+  /^(package\.json|[Mm]akefile|GNUmakefile|.*\.mk|CMakeLists\.txt|.*\.cmake|conftest\.py|pyproject\.toml|setup\.(py|cfg)|tox\.ini|pytest\.ini|noxfile\.py|Cargo\.toml|build\.rs|.*\.gradle(\.kts)?|pom\.xml|.*\.csproj|Package\.swift|(vite|vitest|jest|babel|eslint|prettier|webpack|rollup|playwright)\.config\.[cm]?[jt]s|\.(eslintrc|prettierrc|mocharc)\.[cm]?js)$/;
+
+/** The routine work a project runner is asked to do, or none when it may do anything else. */
+function routineRunnerWork(program: string, args: ReadonlyArray<Word>): string | undefined {
+  const words = operands(args);
+  if (SCRIPT_RUNNERS.has(program)) {
+    const script = words[0] === "run" || words[0] === "run-script" ? words[1] : words[0];
+    return script !== undefined && ROUTINE_TARGET.test(script) ? script : undefined;
+  }
+  const subcommands = RUNNER_SUBCOMMANDS[program];
+  if (subcommands !== undefined) {
+    // The rest are packages or paths, which must stay in the workspace.
+    return words[0] !== undefined && subcommands.has(words[0]) ? words[0] : undefined;
+  }
+  if (program === "make") {
+    // A Makefile named by -f, or code passed by --eval, is not the project's routine work.
+    if (
+      args.some((word) =>
+        /^(-[A-Za-z]*[fECIoW]|--(file|makefile|eval|directory|include-dir))/.test(word.text),
+      )
+    ) {
+      return undefined;
+    }
+    return words.length > 0 && words.every((word) => ROUTINE_TARGET.test(word))
+      ? words.join(" ")
+      : undefined;
+  }
+  if (program === "cmake") {
+    return args.some((word) => word.text === "--build") && !args.some((word) => word.text === "-P")
+      ? "--build"
+      : undefined;
+  }
+  return CHECKERS.has(program) ? "checks" : undefined;
+}
+
+/**
+ * Whether a path decides what a test or build runs: a runner's config by name, any config-like
+ * file (JSON, TOML, YAML, INI, XML, rc files, Xcode and MSBuild project files), or anything in
+ * a hidden folder such as `.cargo`.
+ */
+function decidesWhatRuns(path: string): boolean {
+  const name = NodePath.basename(path);
+  return (
+    RUNNER_CONFIG.test(name) ||
+    /\.(json5?|toml|ya?ml|ini|cfg|xml|props|targets|pbxproj|xcscheme|xcconfig)$/i.test(name) ||
+    /^\.[\w.-]*rc(\.[a-z]+)?$/i.test(name) ||
+    segmentsOf(path)
+      .slice(0, -1)
+      .some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..")
+  );
+}
+
+/**
+ * Whether a tool call may change what a test or build runs: an edit of such a file, or a command
+ * that writes one, such as `cp other.json package.json`.
+ */
+export function bobEditsRunnerConfig(
+  toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
+  context: BobAutoReviewContext,
+): boolean {
+  const places = new Places(context);
+  const workspace = places.workspace;
+  if (workspace === undefined) return true;
+  // Within the workspace, by the path below it; anything outside counts.
+  const decides = (path: string, base: string) => {
+    const absolute = places.absolute(path, base);
+    const relative = absolute === undefined ? undefined : places.inWorkspace(absolute);
+    return relative === undefined || decidesWhatRuns(relative);
+  };
+  const input = record(toolCall.rawInput) ?? {};
+  if (toolCall.kind === "edit" || toolCall.kind === "delete" || toolCall.kind === "move") {
+    return editPaths(toolCall).some((path) => decides(path, workspace));
+  }
+  if (toolCall.kind !== "execute" || typeof input.command !== "string") return false;
+  const base = typeof input.cwd === "string" ? input.cwd : workspace;
+  const commands = simpleCommands(tokenize(input.command) ?? []) ?? [];
+  return commands.some((simple) => {
+    const [name, ...args] = simple.words;
+    const program = name?.text ?? "";
+    if (["cp", "mv", "ln", "touch", "mkdir", "chmod", "tee"].includes(program)) {
+      return writeTargets(args).some((path) => decides(path, base));
+    }
+    if (program === "sed") {
+      const sed = sedCommand(args.map((word) => word.text));
+      return sed !== undefined && sed.inPlace && sed.files.some((path) => decides(path, base));
+    }
+    return false;
+  });
+}
+
 const GH_READS = new Set(["view", "list", "status", "checks", "diff"]);
 /** A sed script that only prints lines by number or by a pattern, such as `1,40p` or `/re/p`. */
 const SED_PRINT = /^(\d+|\$|\/[^/\\]+\/)(,(\d+|\$|\/[^/\\]+\/))?p$/;
+/** A sed script that substitutes once per line, with no flag that writes (`w`) or runs (`e`). */
+const SED_SUBSTITUTE = /^s\/(?:[^/\\]|\\.)*\/(?:[^/\\]|\\.)*\/[gIip0-9]*$/;
+
+/**
+ * What sed is asked to do: one script, whether it edits in place, and the files. None when the
+ * script hides in a file, there is more than one, or a flag is not one of the plain ones.
+ */
+function sedCommand(texts: ReadonlyArray<string>):
+  | {
+      readonly script: string;
+      readonly inPlace: boolean;
+      readonly quiet: boolean;
+      readonly files: ReadonlyArray<string>;
+    }
+  | undefined {
+  const scripts: Array<string> = [];
+  const rest: Array<string> = [];
+  let inPlace = false;
+  let quiet = false;
+  for (let index = 0; index < texts.length; index += 1) {
+    const text = texts[index]!;
+    if (text === "-e" || text === "--expression") {
+      scripts.push(texts[(index += 1)] ?? "");
+    } else if (text.startsWith("--expression=")) {
+      scripts.push(text.slice("--expression=".length));
+    } else if (text === "-i" || text === "-I") {
+      inPlace = true;
+      // BSD sed takes the backup extension as the next word, often an empty one.
+      const next = texts[index + 1];
+      if (next !== undefined && (next === "" || next.startsWith("."))) index += 1;
+    } else if (/^-[iI]./.test(text) || text.startsWith("--in-place")) {
+      inPlace = true;
+    } else if (/^-[nEr]+$/.test(text) || text === "--quiet" || text === "--silent") {
+      quiet ||= text.includes("n") || text === "--quiet" || text === "--silent";
+    } else if (text.startsWith("-") && text !== "-") {
+      return undefined;
+    } else {
+      rest.push(text);
+    }
+  }
+  if (scripts.length === 0 && rest.length > 0) scripts.push(rest.shift()!);
+  return scripts.length === 1 ? { script: scripts[0]!, inPlace, quiet, files: rest } : undefined;
+}
 
 /**
  * Whether a glob can only match visible names in the workspace: the folder before its first
@@ -547,6 +694,15 @@ function globStaysInWorkspace(places: Places, word: string, base: string): boole
 /** The words of a command that are not flags. */
 function operands(words: ReadonlyArray<Word>): ReadonlyArray<string> {
   return words.map((word) => word.text).filter((text) => !text.startsWith("-"));
+}
+
+/** The words a file command writes to: its operands and the values of its flags. */
+function writeTargets(words: ReadonlyArray<Word>): ReadonlyArray<string> {
+  return words.flatMap((word) => {
+    if (!word.text.startsWith("-")) return [word.text];
+    const value = /^--?[^=]+=(.+)$/.exec(word.text)?.[1];
+    return value === undefined ? [] : [value];
+  });
 }
 
 /** Every word and flag value of a command, any of which may be a path. */
@@ -579,15 +735,38 @@ function reviewSimpleCommand(places: Places, command: SimpleCommand, base: strin
   const program = name!.text;
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(program)) return ask("sets environment variables");
   if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(program)) return ask(`runs ${program}`);
-  if (pathLikeWords(args).some((word) => places.namesSecret(word, base))) {
+  // Listing names, without descending, reads no secret held below a folder.
+  const shallow =
+    program === "ls" && !args.some((word) => /^(-[A-Za-z]*R|--recursive)/.test(word.text));
+  if (pathLikeWords(args).some((word) => places.namesSecret(word, base, shallow))) {
     return ask("touches secrets or settings");
   }
+  // `git show HEAD:.env` reads a file by its path in the repository, and a pathspec with magic
+  // or a glob can match one without naming it.
+  if (
+    program === "git" &&
+    operands(args).some((text) => {
+      const path = /^[^:\s]*:(.+)$/.exec(text)?.[1];
+      return (
+        text.startsWith(":") ||
+        GLOB_CHARACTER.test(text) ||
+        (path !== undefined && namesSecret(path))
+      );
+    })
+  ) {
+    return ask("reads from the repository by a path the rules cannot check");
+  }
+
   if (args.length === 1 && args[0]!.text === "--version" && VERSION_COMMANDS.has(program)) {
     return allow("prints a version");
   }
   const glob = args.find((word) => word.globbed && !globStaysInWorkspace(places, word.text, base));
   if (glob !== undefined) return ask("expands a glob that may reach hidden files or secrets");
   const readOnly = READ_ONLY_COMMANDS[program];
+  // A read with no folder named reads the one it runs in, which `cd` may have moved.
+  if (readOnly && places.namesSecret(".", base, shallow)) {
+    return ask("reads from a folder that holds secrets or the home folder");
+  }
   if (readOnly) {
     if (args.some((word) => word.globbed) && !readOnly.glob) {
       return ask(`expands a glob into ${program}'s flags`);
@@ -609,21 +788,26 @@ function reviewSimpleCommand(places: Places, command: SimpleCommand, base: strin
     case "date":
       return args.length === 0 ? allow("only reads") : ask(`may change the ${program}`);
     case "sed": {
-      if (texts.some((text) => /^(-[A-Za-z]*i|--in-place)/.test(text))) {
-        return reviewWrites(places, operands(args).slice(1), base, "edits", "edits files with sed");
+      const sed = sedCommand(texts);
+      if (sed === undefined) return ask("runs a sed script it cannot read");
+      if (!sed.inPlace) {
+        return (sed.quiet && SED_PRINT.test(sed.script)) || SED_SUBSTITUTE.test(sed.script)
+          ? allow("prints lines")
+          : ask("runs a sed script that may write or run something");
       }
-      // `sed -n 'N,Mp'` prints lines; another script may write (`w`) or run (`e`) something.
-      const script = operands(args)[0] ?? "";
-      return texts.includes("-n") && SED_PRINT.test(script)
-        ? allow("prints lines")
-        : review("runs a sed script");
+      return SED_SUBSTITUTE.test(sed.script)
+        ? reviewWrites(places, sed.files, base, "edits", "edits files with sed")
+        : ask("edits files with a sed script that may write or run something");
     }
     case "awk":
-      return review("runs an awk program");
+      // An awk program can write files and run commands; reading one is not worth the risk.
+      return ask("runs an awk program");
     case "git":
-      return reviewGit(places, args, base);
+      return reviewGit(args);
     case "gh":
-      return ["pr", "issue", "run", "repo"].includes(texts[0] ?? "") && GH_READS.has(texts[1] ?? "")
+      return ["pr", "issue", "run", "repo"].includes(texts[0] ?? "") &&
+        GH_READS.has(texts[1] ?? "") &&
+        !texts.some((text) => /^(-[A-Za-z]*w[A-Za-z]*|--web(=.*)?)$/.test(text))
         ? review("reads from GitHub")
         : ask("acts on GitHub");
     case "mkdir":
@@ -631,9 +815,19 @@ function reviewSimpleCommand(places: Places, command: SimpleCommand, base: strin
     case "cp":
     case "mv":
     case "ln":
-      return reviewWrites(places, operands(args), base, "writes", `${program} in the workspace`);
+      // Flags that take a folder or a suffix, such as -t, write where the rules cannot see.
+      if (texts.some((text) => text.startsWith("-") && !/^-[pfnrRvisaL]+$/.test(text))) {
+        return ask(`runs ${program} with flags the rules cannot place`);
+      }
+      return reviewWrites(
+        places,
+        writeTargets(args),
+        base,
+        "writes",
+        `${program} in the workspace`,
+      );
     case "chmod": {
-      const [mode, ...paths] = operands(args);
+      const [mode, ...paths] = writeTargets(args);
       return /^[ugoa]*\+x$/.test(mode ?? "")
         ? reviewWrites(places, paths, base, "makes executable", "makes a workspace file executable")
         : ask("changes permissions");
@@ -645,30 +839,33 @@ function reviewSimpleCommand(places: Places, command: SimpleCommand, base: strin
       }
       break;
   }
-  const runner = PROJECT_RUNNERS[program];
-  if (runner === "any" || (runner !== undefined && runner.has(texts[0] ?? ""))) {
-    if (texts.some((text) => PACKAGE_INSTALL.test(text))) {
-      return ask(`installs or runs packages with ${program}`);
-    }
-    return requireWorkspace(
-      places,
-      base,
-      args,
-      `runs the project's ${[program, ...texts.slice(0, 2)].join(" ")}`,
-    );
+  if (texts.some((text) => PACKAGE_INSTALL.test(text))) {
+    return ask(`installs or runs packages with ${program}`);
   }
-  if (SCRIPT_RUNNERS.has(program)) {
-    const script = texts[0];
-    if (script === undefined || script.startsWith("-")) return ask(`runs ${program} inline code`);
-    const file = reviewWrite(places, script, base, "runs");
-    return file.verdict === "allow"
-      ? requireWorkspace(places, base, args, `runs ${script} from the workspace`)
-      : file;
+  const work = routineRunnerWork(program, args);
+  if (work !== undefined) {
+    // A runner's variables, such as make's SHELL, and most of its flags can make it run code
+    // of Bob's choosing: a plugin, a config, a shell. Only plain flags pass.
+    if (
+      texts.some(
+        (text) =>
+          /^[A-Za-z_][A-Za-z0-9_]*=/.test(text) ||
+          PUBLISHING.test(text) ||
+          (text.startsWith("-") && !PLAIN_RUNNER_FLAG.test(text)),
+      )
+    ) {
+      return ask(`runs ${program} with settings, flags or targets beyond checking the project`);
+    }
+    return requireWorkspace(places, base, args, `runs the project's ${program} ${work}`);
   }
   return ask(`runs ${program}`);
 }
 
-function reviewGit(places: Places, args: ReadonlyArray<Word>, base: string): BobAutoReview {
+/**
+ * Git commands that only read run; every git write asks, since a commit or a branch is history
+ * the user owns and Apple's model allowed commits nobody asked for in trials.
+ */
+function reviewGit(args: ReadonlyArray<Word>): BobAutoReview {
   const texts = args.map((word) => word.text);
   let index = 0;
   while (texts[index] === "--no-pager") index += 1;
@@ -680,43 +877,15 @@ function reviewGit(places: Places, args: ReadonlyArray<Word>, base: string): Bob
   }
   if (GIT_READS.has(subcommand)) return allow("reads the repository");
   const only = (flags: RegExp) => rest.every((text) => flags.test(text));
-  switch (subcommand) {
-    case "branch":
-      if (only(/^(-a|-r|-v|-vv|--all|--remotes|--list|--show-current|--merged|--no-merged)$/)) {
-        return allow("lists branches");
-      }
-      return rest.length === 1 && !rest[0]!.startsWith("-")
-        ? requireWorkspace(places, base, args, "creates a branch")
-        : ask("changes branches");
-    case "tag":
-      return only(/^(-l|--list|-n\d*)$/) ? allow("lists tags") : ask("changes tags");
-    case "remote":
-      return only(/^(-v|--verbose)$/) ? allow("lists remotes") : ask("changes remotes");
-    case "stash":
-      if (rest[0] === "list" || rest[0] === "show") return allow("reads the stash");
-      return rest.length === 0 || ["push", "pop", "apply"].includes(rest[0]!)
-        ? requireWorkspace(places, base, args, "stashes changes")
-        : ask("drops stashed changes");
-    case "worktree":
-      return rest[0] === "list" ? allow("lists worktrees") : ask("changes worktrees");
-    case "reflog":
-      return rest.length === 0 || rest[0] === "show"
-        ? allow("reads the reflog")
-        : ask("changes the reflog");
-    case "add":
-    case "commit":
-      return requireWorkspace(places, base, args, `runs git ${subcommand}`);
-    case "switch":
-      return rest.some((text) => /^(--discard-changes|-f|--force|-C)$/.test(text))
-        ? ask("switches branches, discarding changes")
-        : requireWorkspace(places, base, args, "switches branches");
-    case "checkout":
-      return rest[0] === "-b" && rest.length === 2
-        ? requireWorkspace(places, base, args, "creates a branch")
-        : ask("checks out, which can discard changes");
-    default:
-      return ask(`runs git ${subcommand}`);
-  }
+  const lists =
+    (subcommand === "branch" &&
+      only(/^(-a|-r|-v|-vv|--all|--remotes|--list|--show-current|--merged|--no-merged)$/)) ||
+    (subcommand === "tag" && only(/^(-l|--list|-n\d*)$/)) ||
+    (subcommand === "remote" && only(/^(-v|--verbose)$/)) ||
+    (subcommand === "stash" && ["list", "show"].includes(rest[0] ?? "")) ||
+    (subcommand === "worktree" && rest[0] === "list") ||
+    (subcommand === "reflog" && (rest.length === 0 || rest[0] === "show"));
+  return lists ? allow("reads the repository") : ask(`runs git ${subcommand}`);
 }
 
 /** Reviews a command Bob runs from `cwd`, or from the workspace when Bob gives none. */
@@ -751,7 +920,7 @@ export function reviewBobCommand(
     if (next === undefined) return ask("changes folder in a way the rules cannot follow");
     // Reading from another folder is as safe as reading it by its path; what runs or writes
     // there still has to be in the workspace.
-    if (places.namesSecret(target!.text, base)) return ask("changes to a folder of secrets");
+    if (places.namesSecret(target!.text, base, true)) return ask("changes to a folder of secrets");
     base = next;
   }
   return reviews.length === 0 ? ask("only changes folder") : strictest(reviews);
@@ -790,6 +959,59 @@ function editPaths(toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"
   return paths;
 }
 
+/**
+ * Whether text is plain enough to show the reviewer and to send out: one line, not too long,
+ * and without a run of letters and digits like a key or a token.
+ */
+function plainText(text: string, limit: number): boolean {
+  return (
+    text.length <= limit &&
+    ![...text].some((character) => character < " " || character === "\u007f") &&
+    !(text.match(/[A-Za-z0-9+=_]{20,}/g) ?? []).some(
+      (run) => /\d/.test(run) && /[A-Za-z]/.test(run),
+    )
+  );
+}
+
+/**
+ * Whether a URL is a public web page: http or https, no credentials, a named public host rather
+ * than an IP address or a local, private or cloud metadata name, and nothing token-like in it.
+ */
+function publicPage(value: string): boolean {
+  if (!plainText(value, 300)) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  // `localhost.` is localhost, and names such as 127.0.0.1.nip.io resolve to the address in them.
+  const host = url.hostname.toLowerCase().replace(/\.+$/, "");
+  const labels = host.split(".");
+  return (
+    /^https?:$/.test(url.protocol) &&
+    url.username === "" &&
+    url.password === "" &&
+    labels.length > 1 &&
+    !/^[\d.]+$/.test(host) &&
+    !host.startsWith("0x") &&
+    !host.startsWith("[") &&
+    !labels.includes("localhost") &&
+    !/(^|[.-])\d{1,3}([.-]\d{1,3}){3}([.-]|$)/.test(host) &&
+    !/\.(local|localdomain|internal|lan|home|corp|intranet|arpa)$/.test(host) &&
+    !/(^|\.)(nip\.io|sslip\.io|xip\.io|localtest\.me|lvh\.me|vcap\.me|traefik\.me)$/.test(host) &&
+    plainText(decodeURIComponentSafe(`${url.pathname}${url.search}${url.hash}`), 300)
+  );
+}
+
+function decodeURIComponentSafe(text: string): string {
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
+}
+
 /** Reviews a tool call Bob asks permission for, in Auto. */
 export function reviewBobToolCall(
   toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
@@ -815,16 +1037,22 @@ export function reviewBobToolCall(
       return strictest(paths.map((path) => reviewWrite(places, path, places.workspace!, "edits")));
     }
     case "search":
-      return title.startsWith(BOB_WEB_SEARCH_TITLE) && onlyKeys(input, ["query", "max_results"])
+      if (!title.startsWith(BOB_WEB_SEARCH_TITLE) || !onlyKeys(input, ["query", "max_results"])) {
+        return ask("a tool Bob counts as a search");
+      }
+      return typeof input.query === "string" && plainText(input.query, 200)
         ? review(`searches the web for ${JSON.stringify(input.query)}`)
-        : ask("a tool Bob counts as a search");
+        : ask("searches the web for text that may carry a secret");
     case "fetch":
-      return title.startsWith(BOB_WEB_FETCH_TITLE) &&
-        onlyKeys(input, ["url", "format", "timeout"]) &&
-        typeof input.url === "string" &&
-        /^https?:\/\//i.test(input.url)
+      if (
+        !title.startsWith(BOB_WEB_FETCH_TITLE) ||
+        !onlyKeys(input, ["url", "format", "timeout"])
+      ) {
+        return ask("a tool Bob counts as a fetch");
+      }
+      return typeof input.url === "string" && publicPage(input.url)
         ? review(`fetches ${input.url}`)
-        : ask("a tool Bob counts as a fetch");
+        : ask("fetches a local or private address, or a URL that may carry a secret");
     case "other":
       if (title === BOB_TODO_TITLE && onlyKeys(input, ["todos"])) {
         return allow("updates Bob's todo list");
@@ -836,11 +1064,46 @@ export function reviewBobToolCall(
       ) {
         return allow("starts a subagent, whose tool calls are reviewed in turn");
       }
-      if (title.startsWith(BOB_SKILL_TITLE) && onlyKeys(input, ["skill_name"])) {
+      if (
+        title.startsWith(BOB_SKILL_TITLE) &&
+        onlyKeys(input, ["skill_name"]) &&
+        typeof input.skill_name === "string" &&
+        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.skill_name)
+      ) {
         return review(`loads the skill ${JSON.stringify(input.skill_name)}`);
       }
       return ask("a tool the rules do not know");
     default:
       return ask("a tool the rules do not know");
+  }
+}
+
+/**
+ * What a tool call the rules leave to review does, for the reviewer that judges it, on one line
+ * with the call's own text quoted, so it reads as data.
+ */
+export function describeBobToolCall(
+  toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
+  context: BobAutoReviewContext,
+): string {
+  const input = record(toolCall.rawInput) ?? {};
+  const quoted = (value: unknown) => JSON.stringify(String(value));
+  switch (toolCall.kind) {
+    case "execute": {
+      const cwd = typeof input.cwd === "string" ? input.cwd : undefined;
+      const where =
+        cwd === undefined || cwd === context.workspace
+          ? "in the project folder"
+          : `in ${quoted(cwd)}`;
+      return `runs a command ${where}: ${quoted(input.command)}`;
+    }
+    case "search":
+      return `searches the web for ${quoted(input.query)}`;
+    case "fetch":
+      return `fetches ${quoted(input.url)}`;
+    default:
+      return typeof input.skill_name === "string"
+        ? `loads the skill ${quoted(input.skill_name)}`
+        : quoted(toolCall.title ?? "a tool call");
   }
 }

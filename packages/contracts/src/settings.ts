@@ -732,6 +732,21 @@ const BOB_SESSION_HOSTS = [
 export const BobSessionHost = Schema.Literals(BOB_SESSION_HOSTS.map((host) => host.value));
 export type BobSessionHost = typeof BobSessionHost.Type;
 
+/**
+ * What judges a Bob tool call in Auto that the rules leave to the user's request, such as running
+ * the project's tests or a web search: Apple's on-device model, a model behind an
+ * OpenAI-compatible endpoint, or nothing, so those ask.
+ */
+const BOB_AUTO_REVIEWERS = [
+  { value: "apple", label: "Apple's on-device model" },
+  { value: "endpoint", label: "OpenAI-compatible endpoint" },
+  { value: "off", label: "Rules only" },
+] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
+export const BobAutoReviewer = Schema.Literals(
+  BOB_AUTO_REVIEWERS.map((reviewer) => reviewer.value),
+);
+export type BobAutoReviewer = typeof BobAutoReviewer.Type;
+
 export const BobSettings = makeProviderSettingsSchema(
   {
     // Off by default like Cursor and Grok. Users opt in from Settings.
@@ -772,13 +787,53 @@ export const BobSettings = makeProviderSettingsSchema(
         providerSettingsForm: { placeholder: "bob", clearWhenEmpty: "omit" },
       }),
     ),
+    autoReviewer: BobAutoReviewer.pipe(
+      Schema.withDecodingDefault(Effect.succeed("apple" as const)),
+      Schema.annotateKey({
+        title: "Auto mode reviewer",
+        description:
+          "In Auto, judges a tool call that may be routine, such as running the project's tests or a web search, against what you asked; anything else asks you. Apple's model runs on this Mac with Apple Intelligence on macOS 26 or later and the Xcode command line tools. Rules only asks you about those calls.",
+        providerSettingsForm: {
+          control: "select",
+          options: BOB_AUTO_REVIEWERS,
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    autoReviewEndpoint: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Reviewer endpoint",
+        description:
+          "For an OpenAI-compatible reviewer: the base URL, such as Ollama's. A key in BOB_AUTO_REVIEW_API_KEY among this instance's environment variables is sent as a bearer token.",
+        providerSettingsForm: {
+          placeholder: "http://localhost:11434/v1",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    autoReviewModel: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Reviewer model",
+        description: "For an OpenAI-compatible reviewer: the model to ask.",
+        providerSettingsForm: { placeholder: "qwen3:8b", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["authMethod", "sessionHost", "binaryPath"],
+    order: [
+      "authMethod",
+      "sessionHost",
+      "binaryPath",
+      "autoReviewer",
+      "autoReviewEndpoint",
+      "autoReviewModel",
+    ],
   },
 );
 export type BobSettings = typeof BobSettings.Type;
