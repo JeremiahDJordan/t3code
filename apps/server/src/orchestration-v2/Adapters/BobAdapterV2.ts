@@ -28,6 +28,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import type { ChildProcessSpawner } from "effect/unstable/process";
@@ -54,6 +55,7 @@ import {
   moveBobTask,
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
+import { bobBudgetResetsAt } from "../../provider/Layers/bobUsageLimits.ts";
 import type * as IdAllocator from "../IdAllocator.ts";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { providerMessageTextWithAttachmentPaths } from "../AttachmentPrompt.ts";
@@ -280,6 +282,36 @@ function bobApprovalOptions(
 function bobErrorDetails(error: EffectAcpErrors.AcpRequestError): string | undefined {
   const details = asRecord(error.data)?.details;
   return typeof details === "string" && details.trim() ? details.trim() : undefined;
+}
+
+// Bob's own errors read `<name>: <data as JSON>`, and the data holds the text Bob shows.
+const BOB_NAMED_ERROR = /^([A-Za-z]+Error): (\{[\s\S]*\})$/;
+const decodeBobErrorData = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ description: Schema.optional(Schema.String) })),
+);
+
+/** The error Bob named for a failed turn, with the description Bob shows for it. */
+function bobNamedError(error: EffectAcpErrors.AcpRequestError) {
+  const match = bobErrorDetails(error)?.match(BOB_NAMED_ERROR);
+  if (!match?.[1] || !match[2]) return undefined;
+  const description = Option.getOrUndefined(decodeBobErrorData(match[2]))?.description?.trim();
+  return { name: match[1], description: description || undefined };
+}
+
+/**
+ * Whether a Bob error says Bobcoins ran out: a monthly budget, which resets with the month, or
+ * a trial's, which waits for a plan change. Bob 2.0.5 raises the same `BudgetExceededError` for a
+ * suspended plan and for a profile it could not read, so only its wording of a spent allowance
+ * counts; Bob translates it, and another language reads as an ordinary failure.
+ */
+function bobBobcoinsSpent(
+  named: NonNullable<ReturnType<typeof bobNamedError>>,
+): "monthly" | "trial" | undefined {
+  if (named.name === "TrialExpiredError") return "trial";
+  if (named.name !== "BudgetExceededError") return undefined;
+  return /budget allowance|team budget has been exceeded/i.test(named.description ?? "")
+    ? "monthly"
+    : undefined;
 }
 
 function isBobEmptyReply(cause: unknown): boolean {
@@ -730,10 +762,27 @@ export function makeBobAcpAdapterFlavor(
         });
       }
       if (!isAcpRequestError(cause)) return makeProviderFailure({ cause, class: "provider_error" });
+      const named = bobNamedError(cause);
+      const spent = named === undefined ? undefined : bobBobcoinsSpent(named);
+      // Bob's gateway refuses a budget's Bobcoins until the month resets, and a trial's until
+      // the plan changes.
+      if (named !== undefined && spent !== undefined) {
+        return makeProviderFailure({
+          cause,
+          message: named.description ?? "Bob is out of Bobcoins.",
+          code: named.name,
+          class: "usage_limit",
+          resetAt:
+            spent === "monthly"
+              ? bobBudgetResetsAt(DateTime.formatIso(DateTime.nowUnsafe()))
+              : null,
+        });
+      }
       return makeProviderFailure({
         cause,
         message:
           describeBobAcpSetupError(cause, options.settings.authMethod) ??
+          named?.description ??
           bobErrorDetails(cause) ??
           cause.errorMessage,
         code: String(cause.code),

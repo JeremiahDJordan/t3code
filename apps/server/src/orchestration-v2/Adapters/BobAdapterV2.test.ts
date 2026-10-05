@@ -21,6 +21,7 @@ import {
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -185,6 +186,48 @@ describe("BobAdapterV2 flavor", () => {
       }),
     );
     assert.equal(details?.message, "The model is overloaded.");
+  });
+
+  it("stops a turn as a usage limit only when Bob says its Bobcoins are spent", () => {
+    // Bob 2.0.5's budget errors, as its ACP library sends them.
+    const failure = (name: string, title: string, description: string) =>
+      flavor.promptFailure?.(
+        new EffectAcpErrors.AcpRequestError({
+          code: -32603,
+          errorMessage: "Internal error",
+          data: { details: `${name}: ${JSON.stringify({ title, description })}` },
+        }),
+      );
+    const monthly = failure(
+      "BudgetExceededError",
+      "Budget Exceeded",
+      "Oh no! It looks like you've gone over your budget allowance of 50 Bobcoins.",
+    );
+    assert.equal(monthly?.class, "usage_limit");
+    assert.match(monthly?.resetAt ?? "", /^\d{4}-\d{2}-01T00:00:00\.000Z$/);
+    const team = failure(
+      "BudgetExceededError",
+      "Team Budget Exceeded",
+      "Your team budget has been exceeded. Please contact your account owner.",
+    );
+    assert.equal(team?.class, "usage_limit");
+    assert.isDefined(team?.resetAt);
+    const trial = failure(
+      "TrialExpiredError",
+      "Your Free trial has expired",
+      "You have reached the end of your free trial period. Upgrade your plan to continue.",
+    );
+    assert.equal(trial?.class, "usage_limit");
+    assert.isUndefined(trial?.resetAt);
+    // The same error class for a suspended plan, or a profile Bob could not read.
+    for (const description of [
+      "Your plan has been suspended. You can manage your subscription to update your plan and continue.",
+      "Unable to retrieve profile information.",
+    ]) {
+      const other = failure("BudgetExceededError", "Plan suspended", description);
+      assert.equal(other?.class, "provider_error");
+      assert.equal(other?.message, description);
+    }
   });
 });
 
@@ -608,6 +651,22 @@ describe("BobAdapterV2 turns", () => {
         retryable: true,
       });
       assert.equal(terminal.threadDisposition, "reusable");
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("stops a turn over the team's Bobcoins as a usage limit that resets monthly", () =>
+    Effect.gen(function* () {
+      const terminal = terminalOf((yield* runBobTurn({ text: "spend too much" })).events);
+      assert.equal(terminal?.status, "failed");
+      if (terminal?.status !== "failed") return;
+      assert.deepInclude(terminal.failure, {
+        class: "usage_limit",
+        code: "BudgetExceededError",
+        message: "Oh no! It looks like you've gone over your budget allowance of 50 Bobcoins.",
+      });
+      // Bobcoins reset at 00:00 UTC on the first of the next month.
+      assert.match(terminal.failure.resetAt ?? "", /^\d{4}-\d{2}-01T00:00:00\.000Z$/);
+      assert.isTrue(Date.parse(terminal.failure.resetAt ?? "") > (yield* Clock.currentTimeMillis));
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 

@@ -98,6 +98,11 @@ selected in Bob. In a project that pins a team in its `.bob/settings.json`,
 `/usage-limits` and the ring show that team's allowance instead. The allowance
 updates after each turn that spends Bobcoins.
 
+When your team runs out of Bobcoins, the thread stops as
+[Limited](./thread-sidebar.md) until the allowance resets, and can resume then like
+any limited thread. An expired trial also stops the thread as Limited, without a
+reset time; continue it once your plan changes.
+
 A thread's context meter shows how full Bob's context is and the Bobcoins the
 thread has spent. Bob does not report which model it runs, so the meter's limit
 assumes the context window of the model Bob is set to, or of its default model.

@@ -23,7 +23,7 @@ import {
   clampPercent,
   makeUnavailableUsageLimits,
   makeUsageLimits,
-} from "./providerUsageLimits.ts";
+} from "@t3tools/provider-core/server/usageLimits";
 
 const BOB_DEFAULT_GATEWAY_URL = "https://api.us-east.bob.ibm.com";
 /** Bob treats a token as expired a minute early and renews it before use. */
@@ -204,6 +204,11 @@ function bobBudgetMonth(checkedAt: string) {
     resetsAt: DateTime.formatIso(end),
     windowDurationMins: (DateTime.toEpochMillis(end) - DateTime.toEpochMillis(start)) / 60_000,
   };
+}
+
+/** When the Bobcoins of the month around `at` reset: 00:00 UTC on the first of the next month. */
+export function bobBudgetResetsAt(at: string): string {
+  return bobBudgetMonth(at).resetsAt;
 }
 
 /** The monthly Bobcoin window of one team, and its instance's plan. */
