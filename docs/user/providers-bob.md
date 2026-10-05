@@ -57,11 +57,22 @@ T3 Code's Plan mode uses Bob's plan mode, and the plan Bob writes becomes the
 thread's proposed plan. After Bob has run, the model picker's **Mode** option also
 offers Bob's Ask mode and your custom modes (`custom_modes.yaml`); turns use Agent
 mode unless you pick another. A custom mode from one project is skipped in projects
-that don't define it. Tool approvals follow
-[Permission modes](./permission-modes.md): **Full access** approves every Bob tool
-call. **Auto-accept edits** and **Auto** approve Bob's file edits and ask before its
-commands, web searches and fetches, and other tools, such as MCP tools. **Supervised**
-asks before all of them. In every mode Bob reads and searches files without asking.
+that don't define it.
+
+Tool approvals follow [Permission modes](./permission-modes.md). **Full access**
+approves every Bob tool call. **Auto-accept edits** approves Bob's file edits and asks
+before its commands, web searches and fetches, and other tools, such as MCP tools.
+**Supervised** asks before all of them. In every mode Bob reads and searches files
+without asking.
+
+**Auto** runs what is routine without asking: commands that only read, such as `ls`,
+`git status` or `rg`, unless they reach secrets, shell history or profiles, agent settings
+or your whole home folder; edits inside the project, except to `.git`, `.env` files, editor
+and agent settings, and other secrets; Bob's todo list; and subagents, whose own tool
+calls are checked the same way. It asks before everything else, including the project's
+tests and scripts, git commits, web searches, and anything that writes or runs outside the
+project. A command T3 Code cannot read with certainty, such as one using `$VARIABLES` or
+`$(...)`, asks.
 
 A message you send while Bob is working follows **Settings → General → Follow-up
 behavior**. Queue holds it until Bob finishes its turn. Steer lets Bob finish the

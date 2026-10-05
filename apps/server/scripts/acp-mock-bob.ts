@@ -16,9 +16,9 @@
  * "finish later", whose tool call runs until that file exists (also logged) and which then
  * replies, and
  * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins, and
- * "ask about <kinds>", which asks permission for a tool of each kind named (edit, delete, execute,
- * search, fetch, other, read) as Bob asks, logs each answer as `_mock/permission` and replies with
- * them.
+ * "ask about <tools>", which asks permission for each tool named (edit, edit-outside, execute, ls,
+ * test, search, fetch, todo, subagent, read, and an MCP tool for any other name) as Bob asks, logs
+ * each answer as `_mock/permission` and replies with them.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
@@ -382,61 +382,86 @@ const permissionOptions = [
   { optionId: "reject_always", name: "Always reject", kind: "reject_always" },
 ];
 
-/** A tool of each kind as Bob asks about it: its title, input and any edit it previews. */
-function askedTool(kind: string, cwd: string): Json {
-  switch (kind) {
+/** Bob's tools as Bob asks about them: kind, title (Bob's running label), input, any diff. */
+function askedTool(name: string, cwd: string): Json {
+  switch (name) {
     case "edit":
       return {
-        title: "Write notes.md",
+        kind: "edit",
+        title: "Writing file notes.md",
         rawInput: { path: "notes.md", content: "Notes" },
         content: [{ type: "diff", path: `${cwd}/notes.md`, oldText: null, newText: "Notes" }],
       };
-    case "delete":
-      return { title: "Delete old.txt", rawInput: { path: "old.txt" } };
+    case "edit-outside":
+      return {
+        kind: "edit",
+        title: "Writing file /etc/hosts",
+        rawInput: { path: "/etc/hosts", content: "" },
+        content: [{ type: "diff", path: "/etc/hosts", oldText: null, newText: "" }],
+      };
     case "execute":
-      return { title: "rm -rf build", rawInput: { command: "rm -rf build" } };
+      return { kind: "execute", title: "rm -rf build", rawInput: { command: "rm -rf build" } };
+    case "ls":
+      return { kind: "execute", title: "ls -la", rawInput: { command: "ls -la" } };
+    case "test":
+      return { kind: "execute", title: "npm test", rawInput: { command: "npm test" } };
     case "search":
-      return { title: "Search the web: t3 code", rawInput: { query: "t3 code" } };
+      return {
+        kind: "search",
+        title: 'Searching the web for "t3 code"',
+        rawInput: { query: "t3 code" },
+      };
     case "fetch":
-      return { title: "Fetch https://example.com", rawInput: { url: "https://example.com" } };
+      return {
+        kind: "fetch",
+        title: "Fetching https://example.com",
+        rawInput: { url: "https://example.com" },
+      };
+    case "todo":
+      return { kind: "other", title: "Updating todo list", rawInput: { todos: "[ ] Read" } };
+    case "subagent":
+      return {
+        kind: "other",
+        title: "Running subagent: Count the files",
+        rawInput: { description: "Count the files" },
+      };
     case "read":
-      return { title: "Read /etc/hosts", rawInput: { path: "/etc/hosts" } };
+      return { kind: "read", title: "Reading /etc/hosts", rawInput: { path: "/etc/hosts" } };
     default:
-      return { title: "list_scheduled", rawInput: {} };
+      return { kind: "other", title: "Running List Scheduled (t3)", rawInput: {} };
   }
 }
 
 /**
- * Asks permission for a tool of each kind in turn, as Bob does before running one, then replies
- * with T3's answers and ends the prompt, unless it was cancelled.
+ * Asks permission for each tool in turn, as Bob does before running one, then replies with T3's
+ * answers and ends the prompt, unless it was cancelled.
  */
-async function askAbout(id: number | string, sessionId: string, kinds: ReadonlyArray<string>) {
+async function askAbout(id: number | string, sessionId: string, tools: ReadonlyArray<string>) {
   cancellablePrompts.set(sessionId, id);
   const cwd = tasks.get(sessionId)?.cwd ?? process.cwd();
   const answers: Array<string> = [];
-  for (const [index, kind] of kinds.entries()) {
-    const toolCallId = `asked-${kind}-${index}`;
-    const { content, ...tool } = askedTool(kind, cwd);
-    notify(sessionId, { sessionUpdate: "tool_call", toolCallId, kind, status: "pending", ...tool });
+  for (const [index, tool] of tools.entries()) {
+    const toolCallId = `asked-${tool}-${index}`;
+    const { content, ...asked } = askedTool(tool, cwd);
+    notify(sessionId, { sessionUpdate: "tool_call", toolCallId, status: "pending", ...asked });
     const answer = await request("session/request_permission", {
       sessionId,
       options: permissionOptions,
-      toolCall: { toolCallId, kind, status: "pending", ...tool, ...(content ? { content } : {}) },
+      toolCall: { toolCallId, status: "pending", ...asked, ...(content ? { content } : {}) },
     });
     const outcome = (answer.result as Json | undefined)?.outcome as Json | undefined;
     const chosen = outcome?.outcome === "selected" ? String(outcome.optionId) : "cancelled";
     if (requestLogPath) {
       NodeFS.appendFileSync(
         requestLogPath,
-        `${JSON.stringify({ method: "_mock/permission", params: { kind, outcome: chosen } })}\n`,
+        `${JSON.stringify({ method: "_mock/permission", params: { tool, outcome: chosen } })}\n`,
       );
     }
-    answers.push(`${kind}=${chosen}`);
-    const allowed = chosen.startsWith("allow");
+    answers.push(`${tool}=${chosen}`);
     notify(sessionId, {
       sessionUpdate: "tool_call_update",
       toolCallId,
-      status: allowed ? "completed" : "failed",
+      status: chosen.startsWith("allow") ? "completed" : "failed",
     });
     if (cancellablePrompts.get(sessionId) !== id) return;
   }
@@ -488,7 +513,7 @@ lines.on("line", (line) => {
     finishLater(message.id, String(message.params?.sessionId));
     return;
   }
-  const asked = /ask about ([a-z ,]+)/.exec(promptText(message.params?.prompt));
+  const asked = /ask about ([a-z ,-]+)/.exec(promptText(message.params?.prompt));
   if (message.method === "session/prompt" && message.id !== undefined && asked) {
     loadState();
     void askAbout(

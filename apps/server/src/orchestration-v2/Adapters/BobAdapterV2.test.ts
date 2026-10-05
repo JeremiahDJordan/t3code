@@ -188,7 +188,7 @@ describe("BobAdapterV2 flavor", () => {
     );
   });
 
-  it("lets Bob's edits through in Accept edits and Auto, and asks about everything else", () => {
+  it("lets Bob's edits through in Accept edits, and leaves Auto's to the runtime's review", () => {
     const answer = (runtimeMode: RuntimeMode, kind: EffectAcpSchema.ToolKind) =>
       flavor.permissionDisposition?.(
         ProviderAdapterV2RuntimePolicy.make({
@@ -228,7 +228,8 @@ describe("BobAdapterV2 flavor", () => {
       Object.fromEntries(kinds.map((kind) => [kind, "ask"])),
     );
     assert.deepEqual(answers("auto-accept-edits"), editsThrough);
-    assert.deepEqual(answers("auto"), editsThrough);
+    // Bob's runtime wrapper answers what Auto's review allows; the rest reaches the adapter.
+    assert.deepEqual(answers("auto"), Object.fromEntries(kinds.map((kind) => [kind, "ask"])));
     assert.deepEqual(
       answers("full-access"),
       Object.fromEntries(kinds.map((kind) => [kind, "allow"])),
@@ -724,9 +725,14 @@ describe("BobAdapterV2 turns", () => {
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
-  it.effect("in Auto, lets Bob's edits through and asks about its commands and web searches", () =>
+  /** Runs a turn that has the mock Bob ask about `tools`, answering T3's cards with `decisions`. */
+  const askAbout = (
+    runtimeMode: RuntimeMode,
+    tools: string,
+    decisions: ReadonlyArray<"accept" | "decline">,
+  ) =>
     Effect.gen(function* () {
-      const bob = yield* openBob({ runtimeMode: "auto" });
+      const bob = yield* openBob({ runtimeMode });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
         threadId: bob.threadId,
@@ -734,10 +740,10 @@ describe("BobAdapterV2 turns", () => {
         runtimePolicy: bob.policyFor(bob.workspace),
       });
       const asked: Array<string> = [];
-      const events = yield* bob.runTurn(session, providerThread, "ask about edit execute search", {
+      const events = yield* bob.runTurn(session, providerThread, `ask about ${tools}`, {
         whileRunning: ({ nextEvent }) =>
           Effect.gen(function* () {
-            for (const decision of ["accept", "decline"] as const) {
+            for (const decision of decisions) {
               let event = yield* nextEvent;
               while (
                 event.type !== "runtime_request.updated" ||
@@ -754,18 +760,42 @@ describe("BobAdapterV2 turns", () => {
           }),
       });
       assert.equal(terminalOf(events)?.status, "completed");
-      assert.deepEqual(asked, ["command", "command"]);
-      assert.deepEqual(
-        bob
-          .requests()
-          .filter((request) => request.method === "_mock/permission")
-          .map((request) => request.params),
-        [
-          { kind: "edit", outcome: "allow" },
-          { kind: "execute", outcome: "allow" },
-          { kind: "search", outcome: "reject" },
-        ],
+      const answers = bob
+        .requests()
+        .filter((request) => request.method === "_mock/permission")
+        .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`);
+      return { asked, answers };
+    });
+
+  it.effect("in Auto, runs what the review allows and asks about the rest", () =>
+    Effect.gen(function* () {
+      const { asked, answers } = yield* askAbout(
+        "auto",
+        "edit ls todo execute search edit-outside test",
+        ["accept", "decline", "decline", "accept"],
       );
+      // A web search shows as the tool it is, not as a file read.
+      assert.deepEqual(asked, ["command", "command", "file-change", "command"]);
+      assert.deepEqual(answers, [
+        "edit=allow",
+        "ls=allow",
+        "todo=allow",
+        "execute=allow",
+        "search=reject",
+        "edit-outside=reject",
+        "test=allow",
+      ]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("in Accept edits, lets Bob's edits through and asks about its web searches", () =>
+    Effect.gen(function* () {
+      const { asked, answers } = yield* askAbout("auto-accept-edits", "edit search ls", [
+        "decline",
+        "accept",
+      ]);
+      assert.deepEqual(asked, ["command", "command"]);
+      assert.deepEqual(answers, ["edit=allow", "search=reject", "ls=allow"]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 

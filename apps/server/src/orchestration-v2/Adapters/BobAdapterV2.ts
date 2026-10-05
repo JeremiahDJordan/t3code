@@ -61,6 +61,7 @@ import {
   moveBobTask,
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
+import { reviewBobToolCall } from "../../provider/acp/bobAutoReview.ts";
 import { bobBudgetResetsAt } from "../../provider/Layers/bobUsageLimits.ts";
 import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
 import type * as IdAllocator from "../IdAllocator.ts";
@@ -302,21 +303,18 @@ export function normalizeBobPermissionRequest(
 }
 
 /**
- * How T3 answers Bob's permission requests: Accept edits lets Bob's edits through and asks about
- * the rest. Until T3 reviews Bob's tool calls, Auto works as Accept edits; upstream's Auto
- * approves everything when no sandbox is set. In Full access Bob approves its own tools.
+ * How the adapter answers Bob's permission requests: Accept edits lets Bob's edits through and
+ * asks about the rest. In Auto, Bob's runtime wrapper already let through what the review allows,
+ * so whatever reaches the adapter asks; upstream's Auto would approve everything when no sandbox
+ * is set. In Full access Bob approves its own tools.
  */
 export function bobPermissionDisposition(
   policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
   request: EffectAcpSchema.RequestPermissionRequest,
 ): AcpPermissionDisposition {
-  return acpPermissionDisposition(
-    {
-      ...policy,
-      runtimeMode: policy.runtimeMode === "auto" ? "auto-accept-edits" : policy.runtimeMode,
-    },
-    normalizeBobPermissionRequest(request),
-  );
+  return policy.runtimeMode === "auto"
+    ? "ask"
+    : acpPermissionDisposition(policy, normalizeBobPermissionRequest(request));
 }
 
 /** Bob reports a failed turn as a generic internal error with the reason in `data.details`. */
@@ -491,22 +489,30 @@ function observeBobUpdate(state: BobRuntimeState, update: EffectAcpSchema.Sessio
   }
 }
 
+/** What a Bob runtime's wrapper works with beyond the runtime itself. */
+interface BobRuntimeExtras {
+  /** For an instance that runs Bob in tmux, the relay this Bob runs under. */
+  readonly link?: BobRelayLink | undefined;
+  /** Done once the runtime has recorded that its Bob exited. */
+  readonly terminated?: Deferred.Deferred<void> | undefined;
+  /** The `Authorization` header of the MCP credential this T3 issued the session. */
+  readonly mcpAuthorization?: string | undefined;
+  /** In Auto: the workspace Bob's tool calls are reviewed against. */
+  readonly autoReview?: { readonly workspace: string | null } | undefined;
+}
+
 /**
  * Bob's runtime as the ACP adapter sees it: saved sessions resume instead of replaying their
  * history, the workspace's commands and modes reach the provider snapshot, a plan turn proposes
- * its final reply, and a turn Bob ends without output fails as retryable.
+ * its final reply, a turn Bob ends without output fails as retryable, and in Auto a tool call the
+ * review lets through runs without the adapter asking.
  */
 function wrapBobRuntime(
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   cwd: string,
   hooks: BobAdapterV2Hooks,
   sessions: Map<string, BobSessionControl>,
-  /** For an instance that runs Bob in tmux, the relay this Bob runs under. */
-  link?: BobRelayLink,
-  /** Done once the runtime has recorded that its Bob exited. */
-  terminated?: Deferred.Deferred<void>,
-  /** The `Authorization` header of the MCP credential this T3 issued the session. */
-  mcpAuthorization?: string,
+  { link, terminated, mcpAuthorization, autoReview }: BobRuntimeExtras = {},
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
   const state: BobRuntimeState = {
     answered: false,
@@ -670,6 +676,25 @@ function wrapBobRuntime(
     state.lastCost = usage.bobcoins;
     if (spent && hooks.onBobcoinsSpent) yield* hooks.onBobcoinsSpent(cwd);
   });
+  /**
+   * In Auto, Bob's answer for a tool call the review lets through while a prompt runs: allow
+   * once, so Bob does not remember the tool for later calls. None for a call the user decides.
+   */
+  const autoAnswer = (
+    request: EffectAcpSchema.RequestPermissionRequest,
+  ): Effect.Effect<EffectAcpSchema.RequestPermissionResponse | undefined> =>
+    Effect.suspend(() => {
+      if (autoReview === undefined || !state.prompting || state.stopped) {
+        return Effect.succeed(undefined);
+      }
+      const option = request.options.find((candidate) => candidate.kind === "allow_once");
+      const review = reviewBobToolCall(request.toolCall, autoReview);
+      if (review.verdict !== "allow" || option === undefined) return Effect.succeed(undefined);
+      return Effect.logDebug("Auto approved a Bob tool call").pipe(
+        Effect.annotateLogs({ tool: request.toolCall.title ?? "", reason: review.reason }),
+        Effect.as({ outcome: { outcome: "selected" as const, optionId: option.optionId } }),
+      );
+    });
   const wrapped: AcpSessionRuntime.AcpSessionRuntime["Service"] = {
     ...runtime,
     // Stop cancels at once, and the steers waiting on the prompt go with it.
@@ -681,7 +706,13 @@ function wrapBobRuntime(
     // The adapter shows and answers each request by its kind, which Bob's tool names skew.
     handleRequestPermission: (handler) =>
       runtime.handleRequestPermission((request, context) =>
-        handler(normalizeBobPermissionRequest(request), context),
+        autoAnswer(request).pipe(
+          Effect.flatMap((answer) =>
+            answer === undefined
+              ? handler(normalizeBobPermissionRequest(request), context)
+              : Effect.succeed(answer),
+          ),
+        ),
       ),
     // Bob advertises `session/load` but replays every message through it; resume restores the
     // task without the replay.
@@ -840,15 +871,13 @@ export function makeBobAcpAdapterFlavor(
           environment: options.environment,
           runtimeMode: runtimePolicy.runtimeMode,
         });
-        return wrapBobRuntime(
-          runtime,
-          input.cwd,
-          options,
-          sessions,
+        return wrapBobRuntime(runtime, input.cwd, options, sessions, {
           link,
           terminated,
           mcpAuthorization,
-        );
+          autoReview:
+            runtimePolicy.runtimeMode === "auto" ? { workspace: runtimePolicy.cwd } : undefined,
+        });
       }),
     preferResumeSession: true,
     // Every turn starts in Agent unless the thread picked another mode, so a mode left over in a
