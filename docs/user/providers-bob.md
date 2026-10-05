@@ -100,6 +100,11 @@ selected in Bob. In a project that pins a team in its `.bob/settings.json`,
 `/usage-limits` and the ring show that team's allowance instead. The allowance
 updates after each turn that spends Bobcoins.
 
+On web and desktop, T3 Code warns once when your team has used 80% of the month's
+Bobcoins, and again at 95%, and the ring turns amber and then red. Your **Thread
+notifications** setting applies to the warning too: its sound plays, and a system
+notification appears while T3 Code is in the background.
+
 When your team runs out of Bobcoins, the thread stops as
 [Limited](./thread-sidebar.md) until the allowance resets, and can resume then like
 any limited thread. An expired trial also stops the thread as Limited, without a
