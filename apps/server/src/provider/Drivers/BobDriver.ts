@@ -15,6 +15,7 @@ import {
   type ServerSettings,
   ThreadId,
 } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
@@ -23,6 +24,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -40,7 +42,9 @@ import * as ProcessRunner from "../../processRunner.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
+import { makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
 import {
+  type AdoptableBobRelay,
   bobRelayHasTurn,
   makeBobRelayHost,
   makeBobRelays,
@@ -271,9 +275,20 @@ export const BobDriver: ProviderDriver<
         setWorkspaceUsageLimits,
       });
       const driverScope = yield* Effect.scope;
+      // In Auto, the model that judges the tool calls the rules leave to what the user asked.
+      const runFork = Effect.runForkWith(yield* Effect.context<never>());
+      const autoJudge = makeBobAutoJudgeForSettings({
+        settings: effectiveConfig,
+        environment: processEnv,
+        cacheDir: host.paths.providerStatusCacheDir,
+        platform: yield* HostProcess.Platform,
+        httpClient,
+        log: (message) => void runFork(Effect.logWarning(message)),
+      });
+      yield* Scope.addFinalizer(driverScope, autoJudge.close);
       // Bob's relays from before this start: those no instance runs any more stop, this
       // instance's idle ones stop, and each still running a prompt gets a run to finish it in.
-      const adoptable = new Map<string, string>();
+      const adoptable = new Map<string, AdoptableBobRelay>();
       const scanned = yield* Deferred.make<void>();
       if (relayHost === undefined || instancesWithScannedRelays.has(instanceId)) {
         yield* Deferred.succeed(scanned, undefined);
@@ -297,7 +312,7 @@ export const BobDriver: ProviderDriver<
               yield* relayHost.kill(relayId);
               continue;
             }
-            adoptable.set(meta.sessionId, relayId);
+            adoptable.set(meta.sessionId, { relayId, autoApprove: meta.autoApprove === true });
             if (meta.threadId !== undefined && meta.providerThreadId !== undefined) {
               owners.push({ threadId: meta.threadId, providerThreadId: meta.providerThreadId });
             }
@@ -340,6 +355,7 @@ export const BobDriver: ProviderDriver<
         selfInvocation,
         onAvailableCommands,
         onAvailableModes,
+        autoJudge: autoJudge.judge,
         // Bob reads its model setting on every turn, so the window follows it. That window is
         // assumed, so a context larger than it proves it wrong and is reported without one.
         readTaskUsage: (sessionId) =>

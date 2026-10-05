@@ -51,6 +51,8 @@ const BobRelayMeta = Schema.Struct({
   mcpTokenHash: Schema.optional(Schema.String),
   /** Messages steering the prompt that wait for Bob's running tool calls. */
   steers: Schema.optional(Schema.Array(Schema.String)),
+  /** Bob was started with `--auto-approve` and asks about none of its tools. */
+  autoApprove: Schema.optional(Schema.Boolean),
 });
 type BobRelayMeta = typeof BobRelayMeta.Type;
 
@@ -692,7 +694,7 @@ export const makeBobRelayHost = (input: {
                   (entry): entry is [string, string] => entry[1] !== undefined,
                 ),
               ),
-              meta,
+              meta: command.args.includes("--auto-approve") ? { ...meta, autoApprove: true } : meta,
             });
             const reply = yield* socket.next("state", "10 seconds");
             if (reply === undefined) {
@@ -786,7 +788,16 @@ export interface BobRelays {
     readonly resumeSessionId?: string | undefined;
     /** For a new relay: the digest of the MCP token its Bob gets, kept for the next T3. */
     readonly mcpTokenHash?: string | undefined;
+    /** Whether the Bob this runtime starts approves its own tools, as in Full access. */
+    readonly autoApprove: boolean;
   }) => BobRelayLink;
+}
+
+/** A relay found at startup with a prompt to take over. */
+export interface AdoptableBobRelay {
+  readonly relayId: string;
+  /** Its Bob approves its own tools, so only a runtime in Full access takes it over. */
+  readonly autoApprove: boolean;
 }
 
 /**
@@ -797,24 +808,32 @@ export interface BobRelays {
 export function makeBobRelays(input: {
   readonly host: BobRelayHost;
   readonly instanceId: string;
-  readonly adoptable: Map<string, string>;
+  readonly adoptable: Map<string, AdoptableBobRelay>;
   readonly ready: Effect.Effect<void>;
 }): BobRelays {
   return {
-    linkFor: ({ cwd, resumeSessionId, mcpTokenHash }) => {
+    linkFor: ({ cwd, resumeSessionId, mcpTokenHash, autoApprove }) => {
       let chosen: BobRelayLink | undefined;
-      const choose = () => {
-        const relayId =
-          resumeSessionId === undefined ? undefined : input.adoptable.get(resumeSessionId);
-        if (relayId === undefined || resumeSessionId === undefined) {
-          return input.host.link({
+      /** The link to spawn through, after stopping a relay this runtime must not take over. */
+      const choose = (): { readonly link: BobRelayLink; readonly before: Effect.Effect<void> } => {
+        const fresh = () =>
+          input.host.link({
             instanceId: input.instanceId,
             cwd,
             ...(mcpTokenHash === undefined ? {} : { mcpTokenHash }),
           });
+        const kept =
+          resumeSessionId === undefined ? undefined : input.adoptable.get(resumeSessionId);
+        if (kept === undefined || resumeSessionId === undefined) {
+          return { link: fresh(), before: Effect.void };
         }
         input.adoptable.delete(resumeSessionId);
-        return input.host.attach(relayId);
+        // A Bob started in Full access approves its own tools, which only Full access allows:
+        // after a switch to another mode it stops, and a Bob that asks starts in its place.
+        if (kept.autoApprove && !autoApprove) {
+          return { link: fresh(), before: input.host.kill(kept.relayId).pipe(Effect.ignore) };
+        }
+        return { link: input.host.attach(kept.relayId), before: Effect.void };
       };
       const whenChosen = <A>(use: (link: BobRelayLink) => Effect.Effect<A>, otherwise: A) =>
         Effect.suspend(() => (chosen ? use(chosen) : Effect.succeed(otherwise)));
@@ -823,8 +842,9 @@ export function makeBobRelays(input: {
           input.ready.pipe(
             Effect.andThen(
               Effect.suspend(() => {
-                chosen = choose();
-                return chosen.spawner.spawn(command);
+                const { link, before } = choose();
+                chosen = link;
+                return before.pipe(Effect.andThen(link.spawner.spawn(command)));
               }),
             ),
           ),
