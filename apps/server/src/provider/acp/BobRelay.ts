@@ -44,6 +44,13 @@ const BobRelayMeta = Schema.Struct({
   /** The app thread and provider thread of the turn that runs, for the run that takes it over. */
   threadId: Schema.optional(Schema.String),
   providerThreadId: Schema.optional(Schema.String),
+  /**
+   * The SHA-256 hex digest of the MCP token Bob got when its session opened, which Bob keeps
+   * calling T3's tools with, so the T3 that takes over can accept it.
+   */
+  mcpTokenHash: Schema.optional(Schema.String),
+  /** Messages steering the prompt that wait for Bob's running tool calls. */
+  steers: Schema.optional(Schema.Array(Schema.String)),
 });
 type BobRelayMeta = typeof BobRelayMeta.Type;
 
@@ -60,6 +67,8 @@ const RelayState = Schema.Struct({
   exited: Schema.NullOr(Schema.Struct(RelayExit)),
   promptInFlight: Schema.Boolean,
   promptEnded: Schema.Boolean,
+  /** The prompt's tool calls Bob is running, absent for relays of earlier builds. */
+  openTools: Schema.optional(Schema.Array(Schema.String)),
   meta: Schema.Unknown,
 });
 type BobRelayState = typeof RelayState.Type;
@@ -294,6 +303,10 @@ class LinkState {
   adoptable = false;
   /** The run on this link took over Bob's prompt. */
   adopted = false;
+  /** For a link that attached to a running relay: what the T3 before left in it. */
+  kept: BobRelayMeta | undefined;
+  /** For a link that attached to a running relay: the tool calls Bob was running then. */
+  openTools: ReadonlyArray<string> = [];
 
   send(frame: Record<string, unknown>): void {
     if (this.detached) return;
@@ -334,6 +347,13 @@ export interface BobRelayLink {
   readonly adopt: Effect.Effect<boolean>;
   /** Whether this link took over a prompt Bob started for a T3 before this one. */
   readonly adopted: Effect.Effect<boolean>;
+  /** For a link from `attach`: what the relay kept from the T3 before; otherwise none. */
+  readonly kept: Effect.Effect<BobRelayMeta | undefined>;
+  /**
+   * For a link from `attach`: the tool calls Bob was running when it attached, by the ids the
+   * link shows them under; otherwise none.
+   */
+  readonly openTools: Effect.Effect<ReadonlyArray<string>>;
   /** Stops the relay and its Bob, as a session that closes does. */
   readonly retire: Effect.Effect<void>;
 }
@@ -617,6 +637,8 @@ export const makeBobRelayHost = (input: {
           return true;
         }),
         adopted: Effect.sync(() => state.adopted),
+        kept: Effect.sync(() => state.kept),
+        openTools: Effect.sync(() => state.openTools),
         retire: Effect.suspend(() => (handle ? handle.kill().pipe(Effect.ignore) : Effect.void)),
       };
     };
@@ -717,9 +739,13 @@ export const makeBobRelayHost = (input: {
           }
           // Bob has a prompt that a run on this link takes over.
           state.adoptable = bobRelayHasTurn(attached);
+          state.kept = readBobRelayMeta(attached);
           // Each attach renames anew: a run that takes over after a second restart must not
           // reuse the tool ids of the run that took over after the first.
           const attachment = (yield* crypto.randomUUIDv4.pipe(Effect.orDie)).slice(0, 8);
+          state.openTools = (attached.openTools ?? []).map(
+            (id) => `${id}${ADOPTED_TOOL_CALL_SEPARATOR}${attachment}`,
+          );
           const handle = yield* makeHandle(
             state,
             socket,
@@ -758,6 +784,8 @@ export interface BobRelays {
   readonly linkFor: (input: {
     readonly cwd: string;
     readonly resumeSessionId?: string | undefined;
+    /** For a new relay: the digest of the MCP token its Bob gets, kept for the next T3. */
+    readonly mcpTokenHash?: string | undefined;
   }) => BobRelayLink;
 }
 
@@ -773,13 +801,17 @@ export function makeBobRelays(input: {
   readonly ready: Effect.Effect<void>;
 }): BobRelays {
   return {
-    linkFor: ({ cwd, resumeSessionId }) => {
+    linkFor: ({ cwd, resumeSessionId, mcpTokenHash }) => {
       let chosen: BobRelayLink | undefined;
       const choose = () => {
         const relayId =
           resumeSessionId === undefined ? undefined : input.adoptable.get(resumeSessionId);
         if (relayId === undefined || resumeSessionId === undefined) {
-          return input.host.link({ instanceId: input.instanceId, cwd });
+          return input.host.link({
+            instanceId: input.instanceId,
+            cwd,
+            ...(mcpTokenHash === undefined ? {} : { mcpTokenHash }),
+          });
         }
         input.adoptable.delete(resumeSessionId);
         return input.host.attach(relayId);
@@ -802,6 +834,8 @@ export function makeBobRelays(input: {
         turnSettled: whenChosen((link) => link.turnSettled, undefined),
         adopt: whenChosen((link) => link.adopt, false),
         adopted: whenChosen((link) => link.adopted, false),
+        kept: whenChosen((link) => link.kept, undefined),
+        openTools: whenChosen((link) => link.openTools, []),
         retire: whenChosen((link) => link.retire, undefined),
       };
     },

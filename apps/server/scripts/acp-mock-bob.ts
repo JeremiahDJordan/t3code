@@ -13,7 +13,8 @@
  * A prompt's text picks what Bob does: "use a subagent", "run a command", "say nothing" (an
  * empty reply), "work slowly", which runs a tool call until `T3_ACP_BOB_RELEASE_PATH` exists
  * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`, and
- * "finish later", whose tool call runs until that file exists and which then replies, and
+ * "finish later", whose tool call runs until that file exists (also logged) and which then
+ * replies, and
  * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
@@ -339,6 +340,9 @@ function finishLater(id: number | string, sessionId: string): void {
   const timer = setInterval(() => {
     if (!releasePath || !NodeFS.existsSync(releasePath)) return;
     clearInterval(timer);
+    if (requestLogPath) {
+      NodeFS.appendFileSync(requestLogPath, `${JSON.stringify({ method: "_mock/released" })}\n`);
+    }
     notify(sessionId, {
       sessionUpdate: "tool_call_update",
       toolCallId: "slow-later",

@@ -81,8 +81,10 @@ provider**. It needs tmux 3.2 or later on the machine running T3 Code.
 
 When T3 Code starts again, the turn that was running shows as cancelled, and the thread starts
 a new one that picks Bob up where it is: it shows Bob's tool calls from before again, then the
-rest of Bob's work. Bob's T3 Code tools, such as check-ins, do not work until that turn ends;
-the thread's next message starts a fresh Bob on the same conversation. T3 Code stops an idle
+rest of Bob's work. Bob's T3 Code tools, such as check-ins, keep working, and a message you
+sent to steer Bob while it ran a command still reaches it once the command ends, before any
+message you send after the restart. The thread's
+next message starts a fresh Bob on the same conversation. T3 Code stops an idle
 Bob when it stops, and a Bob that no T3 Code comes back to stops after a day. Under a systemd
 service, T3 Code starts tmux in its own scope, so restarting the service leaves Bob running;
 that needs your user's systemd instance, and a service without one needs `KillMode=process`.

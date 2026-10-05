@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
@@ -178,5 +181,27 @@ it.effect("does not keep credentials of other threads alive", () =>
     timestamp += 2;
 
     expect(yield* registry.resolve(token)).toBeUndefined();
+  }),
+);
+
+it.effect("accepts an earlier server's token as an alias until the credential is revoked", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-5");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("bob"),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const earlier = "token-an-earlier-server-issued";
+    const earlierHash = NodeCrypto.createHash("sha256").update(earlier).digest("hex");
+
+    expect(yield* registry.resolve(earlier)).toBeUndefined();
+    expect(yield* registry.alias("not-a-live-token", earlierHash)).toBe(false);
+    expect(yield* registry.alias(token, earlierHash)).toBe(true);
+    expect(yield* registry.resolve(earlier)).toEqual(yield* registry.resolve(token));
+
+    yield* registry.revokeProviderSession(issued.config.providerSessionId);
+    expect(yield* registry.resolve(earlier)).toBeUndefined();
   }),
 );

@@ -43,8 +43,9 @@ let lastPrompt = null;
 // Bob's requests T3 has not answered, by Bob's id, as Bob sent them.
 const unanswered = new Map();
 // The running prompt's tool calls by tool call id: the frame that started each, and the latest
-// one that set its status, each with its number.
+// one that set its status, each with its number, and whether the call is still running.
 const promptTools = new Map();
+const isOpenStatus = (status) => status !== "completed" && status !== "failed";
 let adoptNext = false;
 let attached = false;
 // After an attach, Bob's own messages wait for the replay so they reach T3 in order.
@@ -102,11 +103,15 @@ const fromBob = (line) => {
     promptTools.set(update.toolCallId, {
       start: { seq, line: keptToolLine(msg, update, line, ["title", "kind", "status"]) },
       status: undefined,
+      open: isOpenStatus(update.status),
     });
   }
   if (update && update.sessionUpdate === "tool_call_update" && typeof update.status === "string") {
     const tool = promptTools.get(update.toolCallId);
-    if (tool) tool.status = { seq, line: keptToolLine(msg, update, line, ["status"]) };
+    if (tool) {
+      tool.status = { seq, line: keptToolLine(msg, update, line, ["status"]) };
+      tool.open = isOpenStatus(update.status);
+    }
   }
 };
 
@@ -185,6 +190,17 @@ const fromT3 = (line) => {
       inflight = key;
       lastPrompt = null;
       promptTools.clear();
+      // T3 sends steers that waited as Bob's next prompt, their texts joined, so they leave the
+      // meta once Bob has them; steers saved since stay for a T3 that takes Bob over.
+      const steers = Array.isArray(meta.steers) ? meta.steers : [];
+      const blocks = (msg.params && msg.params.prompt) || [];
+      const text = blocks.length === 1 && blocks[0].type === "text" ? blocks[0].text : undefined;
+      for (let count = steers.length; count > 0 && text !== undefined; count -= 1) {
+        if (steers.slice(0, count).join("\n\n") === text) {
+          meta = { ...meta, steers: steers.slice(count) };
+          break;
+        }
+      }
     }
     return toBob({ ...msg, id: Number(key) });
   }
@@ -264,6 +280,8 @@ const state = () => ({
   exited,
   promptInFlight: inflight !== null,
   promptEnded: inflight === null && lastPrompt !== null,
+  // The prompt's tool calls Bob is still running, which a steer restored after a restart waits for.
+  openTools: [...promptTools].flatMap(([id, tool]) => (tool.open ? [id] : [])),
   meta,
 });
 
