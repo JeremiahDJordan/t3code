@@ -42,6 +42,10 @@ import {
   type AcpSessionMode,
   type AcpToolCallState,
 } from "@t3tools/provider-acp/server/runtimeModel";
+import {
+  acpPermissionDisposition,
+  type AcpPermissionDisposition,
+} from "@t3tools/provider-acp/server/clientPolicy";
 import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
 import {
   type BobRelayLink,
@@ -50,12 +54,19 @@ import {
 } from "../../provider/acp/BobRelay.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
+  bobApprovesItsOwnTools,
   deleteBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
   moveBobTask,
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
+import type { BobAutoJudge } from "../../provider/acp/bobAutoJudge.ts";
+import {
+  bobEditsRunnerConfig,
+  describeBobToolCall,
+  reviewBobToolCall,
+} from "../../provider/acp/bobAutoReview.ts";
 import { bobBudgetResetsAt } from "../../provider/bobUsageLimits.ts";
 import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -77,6 +88,25 @@ const BOB_PLAN_MODE_ID = "plan";
 export const BOB_EMPTY_REPLY_MESSAGE = "Bob ended its turn without replying.";
 /** Marks the failure the runtime wrapper raises for a turn Bob ended without output. */
 const BOB_EMPTY_REPLY_MARKER = "t3/bob-empty-reply";
+/** How many of the latest messages to Bob Auto's reviewer judges a call against. */
+const BOB_AUTO_REVIEW_REQUESTS = 3;
+/**
+ * Whether the user wrote a message, rather than the server on their behalf, such as the "go on"
+ * after a usage limit lifts.
+ */
+function isUserWritten(message: {
+  readonly createdBy: string;
+  readonly creationSource: string;
+}): boolean {
+  return (
+    message.createdBy === "user" &&
+    message.creationSource !== "server" &&
+    message.creationSource !== "provider"
+  );
+}
+
+/** User messages kept for turns whose prompt has not reached Bob yet, across sessions. */
+const BOB_PENDING_USER_MESSAGES = 100;
 
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
@@ -280,6 +310,37 @@ function bobApprovalOptions(
   ];
 }
 
+/**
+ * Bob's permission request as T3 shows and answers it. Bob derives a tool's kind from its
+ * permission group, and for web, MCP and other tools from its name: one named for a search
+ * becomes a "search", which T3 takes for a file read and lets through in every mode, and one
+ * named for a fetch shows as a file read. Every kind but an edit becomes "other", so it asks and
+ * shows as the tool it is.
+ */
+export function normalizeBobPermissionRequest(
+  request: EffectAcpSchema.RequestPermissionRequest,
+): EffectAcpSchema.RequestPermissionRequest {
+  const kind = request.toolCall.kind;
+  return kind === "edit" || kind === "delete" || kind === "move"
+    ? request
+    : { ...request, toolCall: { ...request.toolCall, kind: "other" } };
+}
+
+/**
+ * How the adapter answers Bob's permission requests: Accept edits lets Bob's edits through and
+ * asks about the rest. In Auto, Bob's runtime wrapper already let through what the review allows,
+ * so whatever reaches the adapter asks; upstream's Auto would approve everything when no sandbox
+ * is set. In Full access Bob approves its own tools.
+ */
+export function bobPermissionDisposition(
+  policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+  request: EffectAcpSchema.RequestPermissionRequest,
+): AcpPermissionDisposition {
+  return policy.runtimeMode === "auto"
+    ? "ask"
+    : acpPermissionDisposition(policy, normalizeBobPermissionRequest(request));
+}
+
 /** Bob reports a failed turn as a generic internal error with the reason in `data.details`. */
 function bobErrorDetails(error: EffectAcpErrors.AcpRequestError): string | undefined {
   const details = asRecord(error.data)?.details;
@@ -351,7 +412,23 @@ export interface BobAdapterV2Hooks {
     parentSessionId: string,
     toolCallId: string,
   ) => Effect.Effect<TaskTranscript>;
+  /** In Auto, judges the tool calls the rules leave to what the user asked for. */
+  readonly autoJudge?: BobAutoJudge | undefined;
 }
+
+/**
+ * The user's own words in a prompt T3 sent Bob, without the instructions T3 wraps a turn's
+ * message in; a steer is the words alone.
+ */
+function bobUserRequest(text: string): string {
+  const start = text.indexOf(USER_REQUEST_OPEN);
+  const end = text.lastIndexOf(USER_REQUEST_CLOSE);
+  return (
+    start >= 0 && end > start ? text.slice(start + USER_REQUEST_OPEN.length, end) : text
+  ).trim();
+}
+const USER_REQUEST_OPEN = "<user_request>";
+const USER_REQUEST_CLOSE = "</user_request>";
 
 /** What the wrapper tracks for one `bob acp` process, by the runtime the adapter holds. */
 interface BobRuntimeState {
@@ -375,6 +452,10 @@ interface BobRuntimeState {
   steerCancelled: boolean;
   /** The user stopped the running prompt, which sends Bob nothing more in this turn. */
   stopped: boolean;
+  /** What the user asked Bob lately, in turns' messages and steers, latest last, for Auto. */
+  readonly requests: Array<string>;
+  /** Bob asked to edit a file that decides what a test or build runs, in this turn. */
+  runnerConfigEdited: boolean;
   /** The adapter's update handler, which takes the usage Bob does not report itself. */
   handler?: (
     notification: EffectAcpSchema.SessionNotification,
@@ -396,8 +477,11 @@ interface BobTurnContext {
 
 /** How Bob's session wrapper reaches the runtime of a Bob session, by Bob's task id. */
 interface BobSessionControl {
-  /** Steers the running prompt with a message; false when no prompt is with Bob. */
-  readonly steer: (text: string) => Effect.Effect<boolean>;
+  /**
+   * Steers the running prompt with a message, which Auto's reviewer reads when the user wrote it;
+   * false when no prompt is with Bob.
+   */
+  readonly steer: (text: string, fromUser: boolean) => Effect.Effect<boolean>;
   readonly prepareTurn: (turn: BobTurnContext) => Effect.Effect<void>;
   /** Tells a relay whose thread its Bob works for, so a T3 that restarts mid-turn finds it. */
   readonly describe: (owner: {
@@ -452,22 +536,41 @@ function observeBobUpdate(state: BobRuntimeState, update: EffectAcpSchema.Sessio
   }
 }
 
+/** What a Bob runtime's wrapper works with beyond the runtime itself. */
+interface BobRuntimeExtras {
+  /** For an instance that runs Bob in tmux, the relay this Bob runs under. */
+  readonly link?: BobRelayLink | undefined;
+  /** Done once the runtime has recorded that its Bob exited. */
+  readonly terminated?: Deferred.Deferred<void> | undefined;
+  /** The `Authorization` header of the MCP credential this T3 issued the session. */
+  readonly mcpAuthorization?: string | undefined;
+  /** In Auto: the workspace Bob's tool calls are reviewed against. */
+  readonly autoReview?: { readonly workspace: string | null } | undefined;
+  /**
+   * Turns' messages the user wrote, by the text Bob gets, counted until their prompts reach Bob;
+   * Auto's reviewer reads them.
+   */
+  readonly userMessages?: Map<string, number> | undefined;
+}
+
 /**
  * Bob's runtime as the ACP adapter sees it: saved sessions resume instead of replaying their
  * history, the workspace's commands and modes reach the provider snapshot, a plan turn proposes
- * its final reply, and a turn Bob ends without output fails as retryable.
+ * its final reply, a turn Bob ends without output fails as retryable, and in Auto a tool call the
+ * review lets through runs without the adapter asking.
  */
 function wrapBobRuntime(
   runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   cwd: string,
   hooks: BobAdapterV2Hooks,
   sessions: Map<string, BobSessionControl>,
-  /** For an instance that runs Bob in tmux, the relay this Bob runs under. */
-  link?: BobRelayLink,
-  /** Done once the runtime has recorded that its Bob exited. */
-  terminated?: Deferred.Deferred<void>,
-  /** The `Authorization` header of the MCP credential this T3 issued the session. */
-  mcpAuthorization?: string,
+  {
+    link,
+    terminated,
+    mcpAuthorization,
+    autoReview,
+    userMessages = new Map(),
+  }: BobRuntimeExtras = {},
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
   const state: BobRuntimeState = {
     answered: false,
@@ -478,6 +581,14 @@ function wrapBobRuntime(
     steers: [],
     steerCancelled: false,
     stopped: false,
+    requests: [],
+    runnerConfigEdited: false,
+  };
+  /** Keeps a message the user sent Bob for Auto's reviewer, which reads the latest few. */
+  const remember = (request: string) => {
+    if (!request) return;
+    state.requests.push(request);
+    state.requests.splice(0, state.requests.length - BOB_AUTO_REVIEW_REQUESTS);
   };
   /**
    * Cancels the running prompt for waiting steers once Bob runs no tool call, so a tool call Bob
@@ -526,10 +637,11 @@ function wrapBobRuntime(
       return result;
     });
   const control: BobSessionControl = {
-    steer: (text) =>
+    steer: (text, fromUser) =>
       Effect.suspend(() => {
         if (!state.prompting) return Effect.succeed(false);
         state.steers.push(text);
+        if (fromUser) remember(text.trim());
         return saveSteers.pipe(Effect.andThen(interruptForSteer), Effect.as(true));
       }),
     prepareTurn: (turn) =>
@@ -631,6 +743,51 @@ function wrapBobRuntime(
     state.lastCost = usage.bobcoins;
     if (spent && hooks.onBobcoinsSpent) yield* hooks.onBobcoinsSpent(cwd);
   });
+  /**
+   * In Auto, Bob's answer for a tool call the review lets through while a prompt runs: allow
+   * once, so Bob does not remember the tool for later calls. A call the rules leave to review
+   * goes to the reviewer model, judged against what T3 asked Bob. None for a call the user
+   * decides, including one the user stopped the prompt during.
+   */
+  const autoAnswer = (request: EffectAcpSchema.RequestPermissionRequest) =>
+    Effect.gen(function* () {
+      const reviewing = () => autoReview !== undefined && state.prompting && !state.stopped;
+      const option = request.options.find((candidate) => candidate.kind === "allow_once");
+      if (autoReview === undefined || !reviewing() || option === undefined) return undefined;
+      const review = reviewBobToolCall(request.toolCall, autoReview);
+      let reason = review.reason;
+      if (review.verdict === "review") {
+        // Only the user's own request can call for such a call, and only the project's own
+        // test or build setup, not one Bob just changed.
+        if (
+          hooks.autoJudge === undefined ||
+          state.requests.length === 0 ||
+          (request.toolCall.kind === "execute" && state.runnerConfigEdited)
+        ) {
+          return undefined;
+        }
+        const judgement = yield* hooks.autoJudge.judge({
+          userMessages: [...state.requests],
+          call: describeBobToolCall(request.toolCall, autoReview),
+        });
+        yield* Effect.logDebug("Auto review of a Bob tool call").pipe(
+          Effect.annotateLogs({
+            tool: request.toolCall.title ?? "",
+            reviewer: hooks.autoJudge.name,
+            decision: judgement.decision,
+            reason: judgement.reason,
+          }),
+        );
+        if (judgement.decision !== "allow" || !reviewing()) return undefined;
+        reason = `${hooks.autoJudge.name}: ${judgement.reason}`;
+      } else if (review.verdict !== "allow") {
+        return undefined;
+      }
+      yield* Effect.logDebug("Auto approved a Bob tool call").pipe(
+        Effect.annotateLogs({ tool: request.toolCall.title ?? "", reason }),
+      );
+      return { outcome: { outcome: "selected" as const, optionId: option.optionId } };
+    });
   const wrapped: AcpSessionRuntime.AcpSessionRuntime["Service"] = {
     ...runtime,
     // Stop cancels at once, and the steers waiting on the prompt go with it.
@@ -639,6 +796,22 @@ function wrapBobRuntime(
       state.stopped = true;
     }).pipe(Effect.andThen(saveSteers), Effect.andThen(runtime.cancel)),
     start: () => runtime.start().pipe(Effect.tap(opened)),
+    // The adapter shows and answers each request by its kind, which Bob's tool names skew.
+    handleRequestPermission: (handler) =>
+      runtime.handleRequestPermission((request, context) =>
+        Effect.sync(() => {
+          if (autoReview !== undefined && bobEditsRunnerConfig(request.toolCall, autoReview)) {
+            state.runnerConfigEdited = true;
+          }
+        }).pipe(
+          Effect.andThen(autoAnswer(request)),
+          Effect.flatMap((answer) =>
+            answer === undefined
+              ? handler(normalizeBobPermissionRequest(request), context)
+              : Effect.succeed(answer),
+          ),
+        ),
+      ),
     // Bob advertises `session/load` but replays every message through it; resume restores the
     // task without the replay.
     loadSession: (sessionId, options) =>
@@ -674,6 +847,17 @@ function wrapBobRuntime(
         state.stopped = false;
         const turn = state.nextTurn;
         state.nextTurn = undefined;
+        state.runnerConfigEdited = false;
+        // The turn's message leads the prompt; it counts for Auto only when the user wrote it,
+        // not a check-in, a notice or a wake.
+        const first = payload.prompt.find((block) => block.type === "text");
+        const request = first?.type === "text" ? bobUserRequest(first.text) : "";
+        const pending = userMessages.get(request) ?? 0;
+        if (pending > 0) {
+          if (pending === 1) userMessages.delete(request);
+          else userMessages.set(request, pending - 1);
+          remember(request);
+        }
         if (link) yield* link.turnStarted;
         let result: EffectAcpSchema.PromptResponse;
         if (link && (yield* link.adopt)) {
@@ -759,6 +943,7 @@ export interface BobAdapterV2Options extends BobAdapterV2Hooks {
 export function makeBobAcpAdapterFlavor(
   options: BobAdapterV2Options,
   sessions: Map<string, BobSessionControl> = new Map(),
+  userMessages: Map<string, number> = new Map(),
 ): AcpAdapterV2Flavor {
   return {
     driver: BOB_PROVIDER,
@@ -782,8 +967,13 @@ export function makeBobAcpAdapterFlavor(
           cwd: input.cwd,
           resumeSessionId: input.resumeSessionId,
           mcpTokenHash,
+          autoApprove: bobApprovesItsOwnTools(runtimePolicy.runtimeMode),
         });
         const terminated = yield* Deferred.make<void>();
+        // Auto's reviewer model gets ready while Bob starts, so its first call does not wait.
+        if (runtimePolicy.runtimeMode === "auto" && options.autoJudge !== undefined) {
+          yield* options.autoJudge.warm.pipe(Effect.forkDetach);
+        }
         const runtime = yield* makeBobAcpRuntime({
           ...input,
           onTermination: (error) =>
@@ -795,15 +985,14 @@ export function makeBobAcpAdapterFlavor(
           environment: options.environment,
           runtimeMode: runtimePolicy.runtimeMode,
         });
-        return wrapBobRuntime(
-          runtime,
-          input.cwd,
-          options,
-          sessions,
+        return wrapBobRuntime(runtime, input.cwd, options, sessions, {
           link,
           terminated,
           mcpAuthorization,
-        );
+          autoReview:
+            runtimePolicy.runtimeMode === "auto" ? { workspace: runtimePolicy.cwd } : undefined,
+          userMessages,
+        });
       }),
     preferResumeSession: true,
     // Every turn starts in Agent unless the thread picked another mode, so a mode left over in a
@@ -811,6 +1000,7 @@ export function makeBobAcpAdapterFlavor(
     sessionModeForPolicy: (policy) =>
       policy.interactionMode === "plan" ? undefined : BOB_AGENT_MODE_ID,
     normalizeSessionUpdate: decodeBobToolTitles,
+    permissionDisposition: bobPermissionDisposition,
     approvalOptions: bobApprovalOptions,
     extractSubagentUpdate: extractBobSubagentUpdate,
     registerExtensions: ({ runtime, captureProposedPlan }) =>
@@ -939,6 +1129,7 @@ function wrapBobSession(
   },
   sessions: ReadonlyMap<string, BobSessionControl>,
   resolveAttachmentPath: ProviderHost.ProviderHost["Service"]["resolveAttachmentPath"],
+  userMessages: Map<string, number>,
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
   let cwd = openedIn;
@@ -1033,7 +1224,7 @@ function wrapBobSession(
           resolveAttachmentPath,
         });
         // Too late once Bob's prompt ended; the message then follows the turn instead.
-        if (steer === undefined || !(yield* steer(text))) {
+        if (steer === undefined || !(yield* steer(text, isUserWritten(input.message)))) {
           return yield* new ProviderAdapter.ProviderAdapterSteerRunError({
             driver: BOB_PROVIDER,
             providerThreadId: input.providerThread.id,
@@ -1044,6 +1235,20 @@ function wrapBobSession(
       }),
     startTurn: (input) => {
       follow(input.runtimePolicy);
+      // Auto's reviewer judges calls against what the user asked, never a check-in, a notice or
+      // another agent's message, so the runtime keeps the turn's text only when the user wrote it.
+      if (isUserWritten(input.message)) {
+        const text = providerMessageTextWithAttachmentPaths({
+          text: input.message.text,
+          attachments: input.message.attachments,
+          resolveAttachmentPath,
+        }).trim();
+        userMessages.set(text, (userMessages.get(text) ?? 0) + 1);
+        for (const [old] of userMessages) {
+          if (userMessages.size <= BOB_PENDING_USER_MESSAGES) break;
+          userMessages.delete(old);
+        }
+      }
       const mode = modes.missing(input);
       if (mode !== undefined) missingModes.set(input.attemptId, { input, mode });
       const taskId = bobTaskId(input.providerThread);
@@ -1173,6 +1378,8 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
   const offeredModes = new Map<string, ReadonlySet<string>>();
   // Each Bob session's runtime, by Bob's task id.
   const sessions = new Map<string, BobSessionControl>();
+  // Turns' messages the user wrote, as Bob gets them, counted until their prompts reach Bob.
+  const userMessages = new Map<string, number>();
   const adapter = yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: makeBobAcpAdapterFlavor(
@@ -1184,6 +1391,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
         },
       },
       sessions,
+      userMessages,
     ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
@@ -1245,6 +1453,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
             modes,
             sessions,
             options.host.resolveAttachmentPath,
+            userMessages,
           ),
         ),
       ),

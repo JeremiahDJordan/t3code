@@ -18,6 +18,7 @@ import {
   type ProviderTurnId,
   RunAttemptId,
   RunId,
+  type RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -47,6 +48,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
+import type { BobAutoJudge, BobAutoJudgeInput } from "../../provider/acp/bobAutoJudge.ts";
 import { execScriptSource, writeFakeCli } from "@t3tools/provider-testing/fakeCli";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -192,6 +194,54 @@ describe("BobAdapterV2 flavor", () => {
     );
   });
 
+  it("lets Bob's edits through in Accept edits, and leaves Auto's to the runtime's review", () => {
+    const answer = (runtimeMode: RuntimeMode, kind: EffectAcpSchema.ToolKind) =>
+      flavor.permissionDisposition?.(
+        ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode,
+          interactionMode: "default",
+          cwd: "/workspace",
+        }),
+        {
+          ...permissionRequest([{ optionId: "allow", name: "Allow once", kind: "allow_once" }]),
+          toolCall: { toolCallId: "tool-1", title: "A tool", kind },
+        },
+      );
+    const kinds = [
+      "edit",
+      "delete",
+      "move",
+      "execute",
+      "search",
+      "fetch",
+      "other",
+      "read",
+    ] as const;
+    const answers = (runtimeMode: RuntimeMode) =>
+      Object.fromEntries(kinds.map((kind) => [kind, answer(runtimeMode, kind)]));
+    const editsThrough = {
+      edit: "allow",
+      delete: "allow",
+      move: "allow",
+      execute: "ask",
+      search: "ask",
+      fetch: "ask",
+      other: "ask",
+      read: "ask",
+    } as const;
+    assert.deepEqual(
+      answers("approval-required"),
+      Object.fromEntries(kinds.map((kind) => [kind, "ask"])),
+    );
+    assert.deepEqual(answers("auto-accept-edits"), editsThrough);
+    // Bob's runtime wrapper answers what Auto's review allows; the rest reaches the adapter.
+    assert.deepEqual(answers("auto"), Object.fromEntries(kinds.map((kind) => [kind, "ask"])));
+    assert.deepEqual(
+      answers("full-access"),
+      Object.fromEntries(kinds.map((kind) => [kind, "allow"])),
+    );
+  });
+
   it("starts every turn in Agent but leaves Plan turns to the plan mode switch", () => {
     const mode = (interactionMode: "default" | "plan") =>
       flavor.sessionModeForPolicy?.(
@@ -297,6 +347,10 @@ const openBob = (input: {
   readonly relays?: BobRelays;
   /** Collects the tool call ids subagent steps are read for. */
   readonly subagentStepReads?: Array<string>;
+  /** The thread's runtime mode, Full access unless given. */
+  readonly runtimeMode?: RuntimeMode;
+  /** Auto's reviewer model. */
+  readonly autoJudge?: BobAutoJudge;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -330,6 +384,7 @@ const openBob = (input: {
       settings: decodeBobSettings({ enabled: true, binaryPath }),
       environment: process.env,
       selfInvocation: yield* resolveSelfInvocation(),
+      ...(input.autoJudge ? { autoJudge: input.autoJudge } : {}),
       onAvailableCommands: (available, cwd) =>
         Effect.sync(() => {
           commands.push({ names: available.map((command) => command.name), cwd });
@@ -364,7 +419,11 @@ const openBob = (input: {
       ...(input.mode ? { options: [{ id: "_t3/session-mode", value: input.mode }] } : {}),
     };
     const policyFor = (cwd: string, interactionMode: "default" | "plan" = "default") =>
-      ProviderAdapterV2RuntimePolicy.make({ runtimeMode: "full-access", interactionMode, cwd });
+      ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: input.runtimeMode ?? "full-access",
+        interactionMode,
+        cwd,
+      });
     let sessions = 0;
     let turns = 0;
     /** Opens a session in `cwd`, as a turn after a server start or a folder change does. */
@@ -394,6 +453,8 @@ const openBob = (input: {
         }) => Effect.Effect<void | "stop", ProviderAdapter.ProviderAdapterV2Error>;
         /** The message is a wake T3 started for the provider, not a user's. */
         readonly wake?: boolean;
+        /** The message is the server's, such as a check-in, not a user's. */
+        readonly fromServer?: boolean;
       } = {},
     ) =>
       Effect.gen(function* () {
@@ -419,7 +480,7 @@ const openBob = (input: {
             title: "Bob turn",
             providerInstanceId: instanceId,
             modelSelection,
-            runtimeMode: "full-access",
+            runtimeMode: runtimePolicy.runtimeMode,
             interactionMode: options.interactionMode ?? "default",
             branch: null,
             worktreePath: cwd,
@@ -442,8 +503,9 @@ const openBob = (input: {
           rootNodeId: NodeId.make(`node-bob-${turn}`),
           providerThread,
           message: {
-            createdBy: options.wake === true ? "agent" : "user",
-            creationSource: options.wake === true ? "provider" : "web",
+            createdBy: options.wake === true || options.fromServer === true ? "agent" : "user",
+            creationSource:
+              options.wake === true ? "provider" : options.fromServer === true ? "server" : "web",
             messageId: MessageId.make(`message-bob-${turn}`),
             text,
             attachments: [],
@@ -669,6 +731,176 @@ describe("BobAdapterV2 turns", () => {
             JSON.stringify(event.message).includes("Hello from Bob."),
         ),
       );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  /** Runs a turn that has the mock Bob ask about `tools`, answering T3's cards with `decisions`. */
+  const askAbout = (
+    runtimeMode: RuntimeMode,
+    tools: string,
+    decisions: ReadonlyArray<"accept" | "decline">,
+    autoJudge?: BobAutoJudge,
+    fromServer = false,
+  ) =>
+    Effect.gen(function* () {
+      const bob = yield* openBob({ runtimeMode, ...(autoJudge ? { autoJudge } : {}) });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      const asked: Array<string> = [];
+      const events = yield* bob.runTurn(session, providerThread, `ask about ${tools}`, {
+        fromServer,
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            for (const decision of decisions) {
+              let event = yield* nextEvent;
+              while (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              ) {
+                event = yield* nextEvent;
+              }
+              asked.push(event.runtimeRequest.kind);
+              yield* session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision,
+              });
+            }
+          }),
+      });
+      assert.equal(terminalOf(events)?.status, "completed");
+      const answers = bob
+        .requests()
+        .filter((request) => request.method === "_mock/permission")
+        .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`);
+      return { asked, answers };
+    });
+
+  it.effect("in Auto, runs what the review allows and asks about the rest", () =>
+    Effect.gen(function* () {
+      const { asked, answers } = yield* askAbout(
+        "auto",
+        "edit ls todo execute search edit-outside test",
+        ["accept", "decline", "decline", "accept"],
+      );
+      // A web search shows as the tool it is, not as a file read.
+      assert.deepEqual(asked, ["command", "command", "file-change", "command"]);
+      assert.deepEqual(answers, [
+        "edit=allow",
+        "ls=allow",
+        "todo=allow",
+        "execute=allow",
+        "search=reject",
+        "edit-outside=reject",
+        "test=allow",
+      ]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("in Auto, lets the reviewer model decide the calls the rules leave to it", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const autoJudge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return {
+              decision: input.call.startsWith("fetches") ? ("ask" as const) : ("allow" as const),
+              reason: "test",
+            };
+          }),
+      };
+      const { asked, answers } = yield* askAbout(
+        "auto",
+        "test search fetch execute",
+        ["decline", "decline"],
+        autoJudge,
+      );
+      // The reviewer passes the tests and the search; the fetch, and a command the rules ask
+      // about, come to the user.
+      assert.deepEqual(answers, ["test=allow", "search=allow", "fetch=reject", "execute=reject"]);
+      assert.deepEqual(asked, ["command", "command"]);
+      assert.deepEqual(
+        judged.map((input) => input.call),
+        [
+          'runs a command in the project folder: "npm test"',
+          'searches the web for "t3 code"',
+          'fetches "https://example.com"',
+        ],
+      );
+      assert.deepEqual(judged[0]?.userMessages, ["ask about test search fetch execute"]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("in Auto, asks about the calls left to review without the user's own request", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const allowAll: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "allow" as const, reason: "test" };
+          }),
+      };
+      // A check-in or a notice the server sent is no request of the user's.
+      const fromServer = yield* askAbout("auto", "test ls", ["decline"], allowAll, true);
+      assert.deepEqual(fromServer.answers, ["test=reject", "ls=allow"]);
+      // Tests after Bob changed what they run are Bob's choice, not the project's.
+      const afterConfig = yield* askAbout("auto", "edit-config test", ["decline"], allowAll);
+      assert.deepEqual(afterConfig.answers, ["edit-config=allow", "test=reject"]);
+      assert.lengthOf(judged, 0);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "in Auto, runs the tests the user asks for whatever Bob changed in an earlier turn",
+    () =>
+      Effect.gen(function* () {
+        const allowAll: BobAutoJudge = {
+          name: "a test reviewer",
+          warm: Effect.void,
+          judge: () => Effect.succeed({ decision: "allow" as const, reason: "test" }),
+        };
+        const bob = yield* openBob({ runtimeMode: "auto", autoJudge: allowAll });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        // Bob changes what the tests run, then the user asks for the tests in the next turn.
+        const first = yield* bob.runTurn(session, providerThread, "ask about edit-config");
+        const bound = first.findLast((event) => event.type === "provider_thread.updated");
+        yield* bob.runTurn(
+          session,
+          bound?.type === "provider_thread.updated" ? bound.providerThread : providerThread,
+          "Run the tests. ask about test",
+        );
+        assert.deepEqual(
+          bob
+            .requests()
+            .filter((request) => request.method === "_mock/permission")
+            .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`),
+          ["edit-config=allow", "test=allow"],
+        );
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("in Accept edits, lets Bob's edits through and asks about its web searches", () =>
+    Effect.gen(function* () {
+      const { asked, answers } = yield* askAbout("auto-accept-edits", "edit search ls", [
+        "decline",
+        "accept",
+      ]);
+      assert.deepEqual(asked, ["command", "command"]);
+      assert.deepEqual(answers, ["edit=allow", "search=reject", "ls=allow"]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
@@ -965,6 +1197,8 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
         if (relay === undefined || taskId === undefined) return;
         assert.isTrue(bobRelayHasTurn(relay.state));
         assert.equal(readBobRelayMeta(relay.state)?.providerThreadId, bound.id);
+        // Its Bob runs in Full access, so only a runtime in Full access takes it over.
+        assert.isTrue(readBobRelayMeta(relay.state)?.autoApprove);
         assert.equal(
           readBobRelayMeta(relay.state)?.mcpTokenHash,
           NodeCrypto.createHash("sha256").update(tokenBefore).digest("hex"),
@@ -984,7 +1218,7 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
           relays: makeBobRelays({
             host,
             instanceId,
-            adoptable: new Map([[taskId, relay.relayId]]),
+            adoptable: new Map([[taskId, { relayId: relay.relayId, autoApprove: true }]]),
             ready: Effect.void,
           }),
           subagentSteps: { entries: [{ _tag: "message", text: "Listing the folder." }] },
@@ -1123,7 +1357,7 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
         relays: makeBobRelays({
           host,
           instanceId,
-          adoptable: new Map([[taskId, relay.relayId]]),
+          adoptable: new Map([[taskId, { relayId: relay.relayId, autoApprove: true }]]),
           ready: Effect.void,
         }),
       });
@@ -1237,7 +1471,7 @@ describe.skipIf(!tmuxInstalled)("BobAdapterV2 in tmux", () => {
         relays: makeBobRelays({
           host,
           instanceId,
-          adoptable: new Map([[taskId, relay.relayId]]),
+          adoptable: new Map([[taskId, { relayId: relay.relayId, autoApprove: true }]]),
           ready: Effect.void,
         }),
       });
