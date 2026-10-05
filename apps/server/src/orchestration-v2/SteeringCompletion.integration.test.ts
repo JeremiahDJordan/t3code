@@ -707,3 +707,46 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
     }),
   ),
 );
+
+it.effect("queues a steer sent after Stop as a turn of its own", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { steered, layer, startFirstTurn } =
+        yield* nextTurnSelectionHarness("steering-after-stop");
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = yield* startFirstTurn;
+        const first = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        // The provider has not yet confirmed the Stop, so the run still counts as running.
+        yield* orchestrator.dispatch({
+          type: "run.interrupt",
+          commandId: CommandId.make("stop"),
+          threadId,
+          runId: first.id,
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("steer-after-stop"),
+          threadId,
+          messageId: MessageId.make("message:after-stop"),
+          text: "after stop",
+          attachments: [],
+          modelSelection: composerSelection,
+          dispatchMode: { type: "steer_active", targetRunId: first.id },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(steered, []);
+        const message = projection.messages.find(
+          (candidate) => candidate.id === MessageId.make("message:after-stop"),
+        );
+        assert.isDefined(message?.runId);
+        assert.notEqual(message?.runId, first.id);
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
+);

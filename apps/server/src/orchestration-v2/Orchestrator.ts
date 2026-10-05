@@ -984,6 +984,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
       );
 
+  /**
+   * Whether the user stopped the run, which may still be winding down. The command projection
+   * leaves out interrupt requests, so this reads them when a message would join the run.
+   */
+  const runStopRequested = (threadId: ThreadId, runId: RunId) =>
+    projectionStore
+      .getThreadRecords(threadId, ["turnItems"], { turnItemTypes: ["run_interrupt_request"] })
+      .pipe(
+        Effect.map(({ turnItems }) => turnItems.some((item) => item.runId === runId)),
+        Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+      );
+
   const readHandoffItems = (threadId: ThreadId, runIds?: ReadonlyArray<RunId | null>) =>
     projectionStore
       .getThreadRecords(
@@ -4715,13 +4727,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           target?.activeAttemptId,
         );
         // The client may still show a running turn while its completion is being
-        // projected. Preserve the submission as a new turn when steering is too late.
+        // projected. Preserve the submission as a new turn when steering is too late,
+        // or when the user stopped the turn, so it follows the stop instead of joining it.
         if (
           target !== undefined &&
           (target.status === "completed" ||
             ((target.status === "running" || target.status === "waiting") &&
               turn !== undefined &&
-              turn.status === "completed"))
+              turn.status === "completed") ||
+            (yield* runStopRequested(command.threadId, target.id).pipe(mapDispatchError(command))))
         ) {
           dispatchMode = { type: "start_immediately" };
         }
@@ -4801,7 +4815,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           active !== undefined &&
           activeTurn !== undefined &&
           providerThread?.providerSessionId != null &&
-          (activeMessage === undefined || !isNativeMaintenanceCommand(activeMessage))
+          (activeMessage === undefined || !isNativeMaintenanceCommand(activeMessage)) &&
+          !(yield* runStopRequested(command.threadId, active.id).pipe(mapDispatchError(command)))
         ) {
           const session = yield* providerSessions
             .get(providerThread.providerSessionId)
