@@ -218,6 +218,13 @@ function runPrompt(params: Json): Json {
 function handle(method: string, params: Json): Json {
   switch (method) {
     case "initialize":
+      if (requestLogPath) {
+        // The shell Bob would run commands with, which T3 may point at its sandbox.
+        NodeFS.appendFileSync(
+          requestLogPath,
+          `${JSON.stringify({ method: "_mock/env", params: { SHELL: process.env.SHELL ?? "" } })}\n`,
+        );
+      }
       return {
         protocolVersion: 1,
         agentInfo: { name: "bob-mock", version: "2.0.5" },
@@ -412,6 +419,9 @@ function askedTool(name: string, cwd: string): Json {
       return { kind: "execute", title: "ls -la", rawInput: { command: "ls -la" } };
     case "test":
       return { kind: "execute", title: "npm test", rawInput: { command: "npm test" } };
+    case "test-denied":
+      // Runs, and fails as the sandbox stops it.
+      return { kind: "execute", title: "npm run e2e", rawInput: { command: "npm run e2e" } };
     case "search":
       return {
         kind: "search",
@@ -465,10 +475,38 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
       );
     }
     answers.push(`${tool}=${chosen}`);
+    const approvals = process.env.T3_BOB_APPROVALS;
+    if (asked.kind === "execute" && chosen.startsWith("allow") && approvals && requestLogPath) {
+      // What T3's sandbox shell would find when Bob runs the command: an approval to run it
+      // outside the sandbox, which it uses up.
+      const found = NodeFS.existsSync(approvals)
+        ? NodeFS.readdirSync(approvals).map((name) => {
+            const path = `${approvals}/${name}`;
+            const text = NodeFS.readFileSync(path, "utf8");
+            if (text === (asked.rawInput as { command?: string }).command) NodeFS.rmSync(path);
+            return text;
+          })
+        : [];
+      NodeFS.appendFileSync(
+        requestLogPath,
+        `${JSON.stringify({ method: "_mock/approvals", params: { tool, found } })}\n`,
+      );
+    }
+    const denied = tool === "test-denied" && chosen.startsWith("allow");
     notify(sessionId, {
       sessionUpdate: "tool_call_update",
       toolCallId,
-      status: chosen.startsWith("allow") ? "completed" : "failed",
+      status: chosen.startsWith("allow") && !denied ? "completed" : "failed",
+      ...(denied
+        ? {
+            content: [
+              {
+                type: "content",
+                content: { type: "text", text: "Error: listen EPERM: operation not permitted" },
+              },
+            ],
+          }
+        : {}),
     });
     if (cancellablePrompts.get(sessionId) !== id) return;
   }
