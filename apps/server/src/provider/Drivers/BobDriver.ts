@@ -339,7 +339,9 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
           Effect.forkIn(driverScope),
         );
       }
+      const platform = yield* HostProcessPlatform;
       const orchestrationAdapter = makeBobAdapterV2({
+        platform,
         ...(relayHost
           ? {
               relays: makeBobRelays({

@@ -59,34 +59,39 @@ offers Bob's Ask mode and your custom modes (`custom_modes.yaml`); turns use Age
 mode unless you pick another. A custom mode from one project is skipped in projects
 that don't define it.
 
-Tool approvals follow [Permission modes](./permission-modes.md). **Full access**
-approves every Bob tool call. **Auto-accept edits** approves Bob's file edits and asks
-before its commands, web searches and fetches, and other tools, such as MCP tools.
-**Supervised** asks before all of them. In every mode Bob reads and searches files
-without asking.
+Tool approvals follow [Permission modes](./permission-modes.md). On macOS, outside **Full
+access**, Bob's commands run in a sandbox, as Codex's do: they read anywhere but the hidden
+files and folders in your home folder and app data in `~/Library`, where tools keep
+credentials, apart from toolchain folders such as `~/.cargo` or `~/.config` and the `bin`
+folders on your `PATH`; they write only in the project and temporary folders, with `.git`, `.env` files
+and agent settings kept read-only, and reach no network, not even servers on your Mac. A
+command you approve runs outside the sandbox, once.
 
-**Auto** runs what is routine without asking: commands that only read, such as `ls`,
-`git status` or `rg`, unless they reach secrets, shell history or profiles, the hidden
-folders in your home folder, or everything under your home folder or above the project;
-edits inside the project, except to `.git`, `.env` files, editor and agent settings, and
-other secrets; Bob's todo list; and subagents, whose own tool calls are checked the same way.
+- **Supervised** runs commands that only read, such as `ls`, `git status` or `rg`, in a
+  sandbox that writes only temporary files, and asks before Bob's other commands and its
+  edits.
+- **Auto-accept edits** runs Bob's commands in the sandbox, tests, builds and scripts
+  included, and its edits inside the project, except to `.git`, `.env` files, editor and agent
+  settings, and other secrets. It asks before `rm` and other delete commands, git commits and
+  pushes, installing packages, network tools such as `curl`, commands that run in the
+  background, and commands T3 Code cannot read with certainty, such as one using `$VARIABLES`.
+- **Auto** works as Auto-accept edits, and a reviewer model checks web searches and fetches of
+  public pages, skills and GitHub reads with `gh` against the messages you wrote. When it finds
+  the call requested and not risky, the call runs; otherwise, when you have written nothing it
+  can judge against, or when it does not answer within a few seconds, you are asked.
+- **Full access** lets Bob approve every tool call itself, without a sandbox.
 
-Calls that are routine only when your request calls for them go to a reviewer model, which
-checks them against the messages you wrote: the project's tests, builds, linters and type
-checks, such as `npm test`, `npm run build`, `make test` or `cargo test`; file commands
-inside the project such as `mkdir` or `mv`; a plain `sed` substitution in project files;
-web searches and fetches of public pages; GitHub reads with `gh`; and skills. The model sees
-your messages and the call, not what Bob read, check-ins or notices. When it finds the call
-requested and not risky, the call runs; otherwise, when you have written nothing it can
-judge against, or when the model does not answer within a few seconds, you are asked. Tests
-and builds ask with flags beyond plain ones such as `-q` or `--run`, and after Bob changed
-what they run in the same turn: a config file such as `package.json` or a `Makefile`, or
-anything in a hidden folder.
+A command that needs the network or writes outside the project fails in the sandbox: a test
+that starts a server, a tool that keeps a cache outside the project, such as Go's, or one that
+reads its settings in a hidden folder of your home folder. When the sandbox stops a command,
+the next time Bob runs it you are asked, so you can let it run outside; ask Bob to try again. Bob's own todo list and subagents run in every mode; a subagent's
+tool calls are checked the same way. **Always allow this session** stops Bob asking about that
+tool, and its commands still run in the sandbox. In every mode Bob reads and searches files
+with its own tools without asking.
 
-Everything else asks, including running the app or other scripts, git commits and pushes,
-deleting files, installing packages, `awk`, MCP tools, local or private network addresses,
-and anything that writes or runs outside the project. A command T3 Code cannot read with
-certainty, such as one using `$VARIABLES` or `$(...)`, asks.
+Without a sandbox, for now on Linux, **Supervised** and **Auto-accept edits** ask before every
+command, and **Auto** runs commands that only read, has the reviewer model check file commands
+such as `mkdir` or `mv` as well, and asks before the project's tests and builds.
 
 Choose the reviewer in the Bob instance's **Auto mode reviewer** setting under
 **Settings → Providers**. **Apple's on-device model** is the default; it needs Apple

@@ -7,10 +7,11 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import { afterAll, describe, expect, it } from "vite-plus/test";
 
 import {
-  bobEditsRunnerConfig,
   reviewBobCommand,
-  reviewBobToolCall,
+  reviewBobCommandInSandbox,
+  reviewBobPermission,
   type BobAutoVerdict,
+  type BobPermissionMode,
 } from "./bobAutoReview.ts";
 
 // A home with secrets, and a workspace under it as T3's worktrees are under `~/.t3`.
@@ -73,22 +74,8 @@ describe("reviewBobCommand", () => {
     }
   });
 
-  it("leaves the project's own scripts, builds and file commands to review", () => {
+  it("leaves file commands, sed edits and GitHub reads to review", () => {
     for (const command of [
-      "npm test",
-      "npm run build -- --quiet",
-      "pytest -q tests",
-      "go test ./... -run TestSlug -v",
-      "eslint --fix src",
-      "tsc --noEmit",
-      "pnpm run lint",
-      "vp test run src/a.test.ts",
-      "make test",
-      "go test ./...",
-      "cargo test",
-      "pnpm typecheck",
-      "pytest -q",
-      "python3 -m pytest tests",
       "mkdir -p src/new && touch src/new/b.ts",
       "mv src/a.ts src/b.ts",
       "sed -i '' 's/a/b/' src/a.ts",
@@ -146,7 +133,13 @@ describe("reviewBobCommand", () => {
       "sed -i '' '1d' src/a.ts",
       "cp --target-directory=/tmp src/a.ts",
       "cp -t/tmp src/a.ts",
-      // Runner flags that load a plugin, a config or a shell of Bob's choosing.
+      // Without a sandbox the project's tests and builds run code of Bob's choosing.
+      "npm test",
+      "pnpm run lint",
+      "make test",
+      "pytest -q",
+      "python3 -m pytest tests",
+      "cargo test",
       "pytest -p evil tests",
       "go test -exec ./run.sh ./...",
       "npm test --script-shell ./run.sh",
@@ -286,10 +279,13 @@ const toolCall = (
   rawInput,
   ...(content ? { content } : {}),
 });
-const toolVerdict = (call: EffectAcpSchema.RequestPermissionRequest["toolCall"]) =>
-  reviewBobToolCall(call, context).verdict;
+const toolVerdict = (
+  call: EffectAcpSchema.RequestPermissionRequest["toolCall"],
+  mode: BobPermissionMode = "auto",
+  sandboxed = false,
+) => reviewBobPermission(call, { mode, sandboxed, context }).verdict;
 
-describe("reviewBobToolCall", () => {
+describe("reviewBobPermission", () => {
   it("lets edits inside the workspace through, by Bob's diff or its input", () => {
     expect(
       toolVerdict(
@@ -394,30 +390,165 @@ describe("reviewBobToolCall", () => {
 
   it("asks about everything without a workspace", () => {
     expect(
-      reviewBobToolCall(toolCall("edit", "Writing file a.ts", { path: "a.ts" }), {
-        workspace: null,
-        home,
+      reviewBobPermission(toolCall("edit", "Writing file a.ts", { path: "a.ts" }), {
+        mode: "auto",
+        sandboxed: false,
+        context: { workspace: null, home },
       }).verdict,
     ).toBe("ask");
     expect(reviewBobCommand("ls", undefined, { workspace: null, home }).verdict).toBe("ask");
   });
 });
 
-describe("bobEditsRunnerConfig", () => {
-  it("tells edits and commands that change what a test or build runs", () => {
-    const edits = (path: string) =>
-      bobEditsRunnerConfig(toolCall("edit", `Writing file ${path}`, { path }), context);
-    const runs = (command: string) =>
-      bobEditsRunnerConfig(toolCall("execute", command, { command }), context);
-    // The workspace lies under ~/.t3, which does not make its files hidden.
-    expect(edits("src/a.ts")).toBe(false);
-    expect(edits(NodePath.join(workspace, "src", "a.ts"))).toBe(false);
-    for (const path of ["package.json", "jest.config.json", ".cargo/config.toml", "Makefile"]) {
-      expect(edits(path), path).toBe(true);
+describe("reviewBobCommandInSandbox", () => {
+  const sandboxVerdict = (command: string) =>
+    reviewBobCommandInSandbox(command, undefined, context).verdict;
+
+  it("runs what the sandbox bounds, scripts and runners with any flags included", () => {
+    for (const command of [
+      "npm test",
+      "npm test -- --config ./evil.js",
+      "pytest -p plugin tests",
+      "node scripts/check.js",
+      "./scripts/run.sh",
+      "make",
+      "cargo test",
+      "awk '{print $1}' src/a.ts",
+      "FOO=1 npm test",
+      "timeout 60 npm test",
+      "bash -c 'npm test && ls'",
+      "git status",
+      "mkdir -p build && cp src/a.ts build/",
+    ]) {
+      expect(sandboxVerdict(command), command).toBe("allow");
     }
-    expect(runs("cp fixtures/pkg.json package.json")).toBe(true);
-    expect(runs("sed -i '' 's/a/b/' package.json")).toBe(true);
-    expect(runs("cp src/a.ts src/b.ts")).toBe(false);
-    expect(runs("npm test")).toBe(false);
+  });
+
+  it("asks before what needs more than the sandbox: the network, the machine, deleting work", () => {
+    for (const command of [
+      "rm -rf build",
+      "git commit -m 'Fix'",
+      "git push",
+      "npm install left-pad",
+      "pnpm add zod",
+      "npx create-thing",
+      "curl https://example.com",
+      "sudo ls",
+      "kill 1",
+      "open https://example.com",
+      "bash -c 'rm -rf build'",
+      "env FOO=1 rm x",
+      "find . -delete",
+      "xargs rm < list",
+      "eval ls",
+      "caffeinate rm -rf build",
+      "env -u FOO rm -rf src",
+      "stdbuf -o L rm -rf src",
+      "timeout -s KILL 5 rm -rf src",
+      "nice -n 5 curl https://example.com",
+      "yarn",
+      "npm in left-pad",
+      "cat ~/.ssh/id_rsa",
+      "gh pr create",
+      "echo $HOME",
+    ]) {
+      expect(sandboxVerdict(command), command).toBe("ask");
+    }
+    // A GitHub read needs the network, so the reviewer decides whether it may leave the sandbox.
+    expect(sandboxVerdict("gh pr view 12")).toBe("review");
+  });
+});
+
+describe("reviewBobPermission in each mode", () => {
+  const command = (text: string, extra: Record<string, unknown> = {}) =>
+    toolCall("execute", text, { command: text, ...extra });
+  const edit = toolCall("edit", "Writing file src/new.ts", { path: "src/new.ts" });
+  const outside = toolCall("edit", "Writing file /etc/hosts", { path: "/etc/hosts" });
+  const search = toolCall("search", 'Searching the web for "t3"', { query: "t3" });
+  const todo = toolCall("other", "Updating todo list", { todos: "[ ] Read" });
+  const verdicts = (mode: BobPermissionMode, sandboxed: boolean) =>
+    [
+      command("ls"),
+      command("npm test"),
+      command("rm -rf build"),
+      command("gh pr view 1"),
+      command("ls", { background: true }),
+      edit,
+      outside,
+      search,
+      todo,
+    ].map((call) => toolVerdict(call, mode, sandboxed));
+
+  it("answers as Codex's modes do with a sandbox", () => {
+    // ls, npm test, rm, gh read, background, edit, edit outside, search, todo
+    expect(verdicts("approval-required", true)).toEqual([
+      "allow",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "allow",
+    ]);
+    expect(verdicts("auto-accept-edits", true)).toEqual([
+      "allow",
+      "allow",
+      "ask",
+      "ask",
+      "ask",
+      "allow",
+      "ask",
+      "ask",
+      "allow",
+    ]);
+    expect(verdicts("auto", true)).toEqual([
+      "allow",
+      "allow",
+      "ask",
+      "review",
+      "ask",
+      "allow",
+      "ask",
+      "review",
+      "allow",
+    ]);
+  });
+
+  it("asks about every command outside Auto without a sandbox", () => {
+    expect(verdicts("approval-required", false)).toEqual([
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "allow",
+    ]);
+    expect(verdicts("auto-accept-edits", false)).toEqual([
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "ask",
+      "allow",
+      "ask",
+      "ask",
+      "allow",
+    ]);
+    expect(verdicts("auto", false)).toEqual([
+      "allow",
+      "ask",
+      "ask",
+      "review",
+      "ask",
+      "allow",
+      "ask",
+      "review",
+      "allow",
+    ]);
   });
 });

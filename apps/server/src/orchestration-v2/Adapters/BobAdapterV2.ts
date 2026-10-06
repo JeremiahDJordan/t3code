@@ -9,6 +9,8 @@
  *
  * @module orchestration-v2/Adapters/BobAdapterV2
  */
+import * as NodeOS from "node:os";
+
 import {
   type BobAuthMethod,
   type BobSettings,
@@ -63,10 +65,11 @@ import {
 } from "../../provider/acp/BobAcpSupport.ts";
 import type { BobAutoJudge } from "../../provider/acp/bobAutoJudge.ts";
 import {
-  bobEditsRunnerConfig,
+  type BobPermissionMode,
   describeBobToolCall,
-  reviewBobToolCall,
+  reviewBobPermission,
 } from "../../provider/acp/bobAutoReview.ts";
+import { type BobSandbox, makeBobSandbox } from "../../provider/acp/bobSandbox.ts";
 import { bobBudgetResetsAt } from "../../provider/Layers/bobUsageLimits.ts";
 import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
 import type * as IdAllocator from "../IdAllocator.ts";
@@ -336,9 +339,9 @@ export function bobPermissionDisposition(
   policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
   request: EffectAcpSchema.RequestPermissionRequest,
 ): AcpPermissionDisposition {
-  return policy.runtimeMode === "auto"
-    ? "ask"
-    : acpPermissionDisposition(policy, normalizeBobPermissionRequest(request));
+  return policy.runtimeMode === "full-access"
+    ? acpPermissionDisposition(policy, normalizeBobPermissionRequest(request))
+    : "ask";
 }
 
 /** Bob reports a failed turn as a generic internal error with the reason in `data.details`. */
@@ -454,8 +457,6 @@ interface BobRuntimeState {
   stopped: boolean;
   /** What the user asked Bob lately, in turns' messages and steers, latest last, for Auto. */
   readonly requests: Array<string>;
-  /** Bob asked to edit a file that decides what a test or build runs, in this turn. */
-  runnerConfigEdited: boolean;
   /** The adapter's update handler, which takes the usage Bob does not report itself. */
   handler?: (
     notification: EffectAcpSchema.SessionNotification,
@@ -536,6 +537,36 @@ function observeBobUpdate(state: BobRuntimeState, update: EffectAcpSchema.Sessio
   }
 }
 
+/** The command line of a command Bob asks to run. */
+function commandOf(request: EffectAcpSchema.RequestPermissionRequest): string | undefined {
+  const command = asRecord(request.toolCall.rawInput)?.command;
+  return request.toolCall.kind === "execute" && typeof command === "string" ? command : undefined;
+}
+
+/**
+ * Whether a command that failed in the sandbox was stopped by it rather than failing on its own:
+ * a denied file operation or no network, as a test needing a server or a cache outside the
+ * project hits.
+ */
+function bobSandboxDenied(update: EffectAcpSchema.ToolCallUpdate): boolean {
+  // The end of the output, where a run the sandbox stopped says so, however long it ran.
+  const output = [
+    ...(update.content ?? []).map((content) =>
+      content.type === "content"
+        ? content.content.type === "text"
+          ? content.content.text.slice(-16_384)
+          : (acpContentBlockDisplayText(content.content) ?? "")
+        : "",
+    ),
+    typeof update.rawOutput === "string"
+      ? update.rawOutput
+      : JSON.stringify(update.rawOutput ?? ""),
+  ].join("\n");
+  return /operation not permitted|EPERM|EACCES|could not resolve host|ENOTFOUND|EAI_AGAIN|getaddrinfo|nodename nor servname|network is unreachable|couldn't connect to server|ECONNREFUSED/i.test(
+    output,
+  );
+}
+
 /** What a Bob runtime's wrapper works with beyond the runtime itself. */
 interface BobRuntimeExtras {
   /** For an instance that runs Bob in tmux, the relay this Bob runs under. */
@@ -544,8 +575,17 @@ interface BobRuntimeExtras {
   readonly terminated?: Deferred.Deferred<void> | undefined;
   /** The `Authorization` header of the MCP credential this T3 issued the session. */
   readonly mcpAuthorization?: string | undefined;
-  /** In Auto: the workspace Bob's tool calls are reviewed against. */
-  readonly autoReview?: { readonly workspace: string | null } | undefined;
+  /**
+   * Outside Full access: the mode Bob's tool calls are answered in, the workspace they are
+   * reviewed against, and the sandbox Bob's commands run in, where this host has one.
+   */
+  readonly review?:
+    | {
+        readonly mode: BobPermissionMode;
+        readonly workspace: string | null;
+        readonly sandbox: BobSandbox | undefined;
+      }
+    | undefined;
   /**
    * Turns' messages the user wrote, by the text Bob gets, counted until their prompts reach Bob;
    * Auto's reviewer reads them.
@@ -568,7 +608,7 @@ function wrapBobRuntime(
     link,
     terminated,
     mcpAuthorization,
-    autoReview,
+    review: answering,
     userMessages = new Map(),
   }: BobRuntimeExtras = {},
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
@@ -582,7 +622,6 @@ function wrapBobRuntime(
     steerCancelled: false,
     stopped: false,
     requests: [],
-    runnerConfigEdited: false,
   };
   /** Keeps a message the user sent Bob for Auto's reviewer, which reads the latest few. */
   const remember = (request: string) => {
@@ -744,31 +783,34 @@ function wrapBobRuntime(
     if (spent && hooks.onBobcoinsSpent) yield* hooks.onBobcoinsSpent(cwd);
   });
   /**
-   * In Auto, Bob's answer for a tool call the review lets through while a prompt runs: allow
-   * once, so Bob does not remember the tool for later calls. A call the rules leave to review
-   * goes to the reviewer model, judged against what T3 asked Bob. None for a call the user
-   * decides, including one the user stopped the prompt during.
+   * Outside Full access, Bob's answer for a tool call the mode lets through while a prompt runs:
+   * allow once, so Bob does not remember the tool for later calls. In Auto, a call the rules leave
+   * to review goes to the reviewer model, judged against what the user asked; a command it lets
+   * through, which needs the network, runs outside the sandbox. None for a call the user decides,
+   * including one the user stopped the prompt during.
    */
   const autoAnswer = (request: EffectAcpSchema.RequestPermissionRequest) =>
     Effect.gen(function* () {
-      const reviewing = () => autoReview !== undefined && state.prompting && !state.stopped;
+      const reviewing = () => answering !== undefined && state.prompting && !state.stopped;
       const option = request.options.find((candidate) => candidate.kind === "allow_once");
-      if (autoReview === undefined || !reviewing() || option === undefined) return undefined;
-      const review = reviewBobToolCall(request.toolCall, autoReview);
-      let reason = review.reason;
-      if (review.verdict === "review") {
-        // Only the user's own request can call for such a call, and only the project's own
-        // test or build setup, not one Bob just changed.
-        if (
-          hooks.autoJudge === undefined ||
-          state.requests.length === 0 ||
-          (request.toolCall.kind === "execute" && state.runnerConfigEdited)
-        ) {
-          return undefined;
-        }
+      if (answering === undefined || !reviewing() || option === undefined) return undefined;
+      // A sandbox whose shell went missing no longer bounds what Bob runs.
+      const sandboxed = answering.sandbox?.ready() === true;
+      const command = commandOf(request);
+      // The sandbox stopped this command before; the user decides whether it runs outside.
+      if (command !== undefined && sandboxCalls.deniedCommands.has(command)) return undefined;
+      const decision = reviewBobPermission(request.toolCall, {
+        mode: answering.mode,
+        sandboxed,
+        context: answering,
+      });
+      let reason = decision.reason;
+      if (decision.verdict === "review") {
+        // Only the user's own request can call for such a call.
+        if (hooks.autoJudge === undefined || state.requests.length === 0) return undefined;
         const judgement = yield* hooks.autoJudge.judge({
           userMessages: [...state.requests],
-          call: describeBobToolCall(request.toolCall, autoReview),
+          call: describeBobToolCall(request.toolCall, answering),
         });
         yield* Effect.logDebug("Auto review of a Bob tool call").pipe(
           Effect.annotateLogs({
@@ -780,13 +822,62 @@ function wrapBobRuntime(
         );
         if (judgement.decision !== "allow" || !reviewing()) return undefined;
         reason = `${hooks.autoJudge.name}: ${judgement.reason}`;
-      } else if (review.verdict !== "allow") {
+        letOutOfSandbox(request);
+      } else if (decision.verdict !== "allow") {
         return undefined;
       }
-      yield* Effect.logDebug("Auto approved a Bob tool call").pipe(
+      yield* Effect.logDebug("Bob tool call approved by its permission mode").pipe(
         Effect.annotateLogs({ tool: request.toolCall.title ?? "", reason }),
       );
+      if (command !== undefined && sandboxed && decision.verdict === "allow") {
+        sandboxCalls.running.set(request.toolCall.toolCallId, command);
+      }
       return { outcome: { outcome: "selected" as const, optionId: option.optionId } };
+    });
+  /**
+   * The sandbox's bookkeeping for this Bob: commands running in it, by tool call, to notice one
+   * the sandbox stops; commands it stopped, which ask next time; and tool calls let out, whose
+   * end drops any approval left.
+   */
+  const sandboxCalls = {
+    running: new Map<string, string>(),
+    deniedCommands: new Set<string>(),
+    /** Each approved call's approval file, which its end lets go of. */
+    approvedCalls: new Map<string, string>(),
+  };
+  /** Lets a command run outside the sandbox once, as approved. */
+  const letOutOfSandbox = (request: EffectAcpSchema.RequestPermissionRequest) => {
+    const command = commandOf(request);
+    if (command === undefined || answering?.sandbox === undefined) return;
+    const approval = answering.sandbox.approveOutside(command);
+    sandboxCalls.approvedCalls.set(request.toolCall.toolCallId, approval);
+    sandboxCalls.deniedCommands.delete(command);
+  };
+  /** Follows Bob's tool calls through the sandbox as they end. */
+  const followSandboxedCall = (update: EffectAcpSchema.SessionUpdate) => {
+    if (update.sessionUpdate !== "tool_call_update") return;
+    if (update.status !== "completed" && update.status !== "failed") return;
+    const id = update.toolCallId;
+    // Approvals still waiting for other approved calls stay; any other was left by a command.
+    if (sandboxCalls.approvedCalls.delete(id)) {
+      answering?.sandbox?.dropApprovals(new Set(sandboxCalls.approvedCalls.values()));
+    }
+    const command = sandboxCalls.running.get(id);
+    if (command === undefined) return;
+    sandboxCalls.running.delete(id);
+    if (update.status === "failed" && bobSandboxDenied(update))
+      sandboxCalls.deniedCommands.add(command);
+  };
+  /** A command the user approved on a card runs outside the sandbox, as Codex's do. */
+  const userApproved = (
+    request: EffectAcpSchema.RequestPermissionRequest,
+    response: EffectAcpSchema.RequestPermissionResponse,
+  ) =>
+    Effect.sync(() => {
+      if (response.outcome.outcome !== "selected") return;
+      const optionId = response.outcome.optionId;
+      const kind = request.options.find((option) => option.optionId === optionId)?.kind;
+      if (kind === "allow_once" || kind === "allow_always") letOutOfSandbox(request);
     });
   const wrapped: AcpSessionRuntime.AcpSessionRuntime["Service"] = {
     ...runtime,
@@ -799,15 +890,12 @@ function wrapBobRuntime(
     // The adapter shows and answers each request by its kind, which Bob's tool names skew.
     handleRequestPermission: (handler) =>
       runtime.handleRequestPermission((request, context) =>
-        Effect.sync(() => {
-          if (autoReview !== undefined && bobEditsRunnerConfig(request.toolCall, autoReview)) {
-            state.runnerConfigEdited = true;
-          }
-        }).pipe(
-          Effect.andThen(autoAnswer(request)),
+        autoAnswer(request).pipe(
           Effect.flatMap((answer) =>
             answer === undefined
-              ? handler(normalizeBobPermissionRequest(request), context)
+              ? handler(normalizeBobPermissionRequest(request), context).pipe(
+                  Effect.tap((response) => userApproved(request, response)),
+                )
               : Effect.succeed(answer),
           ),
         ),
@@ -825,6 +913,7 @@ function wrapBobRuntime(
         Effect.andThen(
           runtime.handleSessionUpdate((notification) => {
             observeBobUpdate(state, notification.update);
+            followSandboxedCall(notification.update);
             const commands =
               notification.update.sessionUpdate === "available_commands_update" &&
               hooks.onAvailableCommands
@@ -847,7 +936,6 @@ function wrapBobRuntime(
         state.stopped = false;
         const turn = state.nextTurn;
         state.nextTurn = undefined;
-        state.runnerConfigEdited = false;
         // The turn's message leads the prompt; it counts for Auto only when the user wrote it,
         // not a check-in, a notice or a wake.
         const first = payload.prompt.find((block) => block.type === "text");
@@ -912,6 +1000,10 @@ function wrapBobRuntime(
             state.prompting = false;
             state.steerCancelled = false;
             state.openTools.clear();
+            // No approval outlives the turn it was given in.
+            sandboxCalls.approvedCalls.clear();
+            sandboxCalls.running.clear();
+            answering?.sandbox?.dropApprovals(new Set());
           }),
         ),
         Effect.ensuring(link ? link.turnSettled : Effect.void),
@@ -923,7 +1015,37 @@ function wrapBobRuntime(
   return wrapped;
 }
 
+/**
+ * The sandbox for a Bob runtime's commands, or none where the host has none or it cannot be set
+ * up, in which case the modes answer as without one.
+ */
+function openBobSandbox(
+  options: BobAdapterV2Options,
+  mode: BobPermissionMode,
+  cwd: string,
+): Effect.Effect<BobSandbox | undefined> {
+  return Effect.try(() =>
+    makeBobSandbox({
+      mode: mode === "approval-required" ? "read-only" : "workspace-write",
+      workspace: cwd,
+      home: options.environment.HOME ?? NodeOS.homedir(),
+      platform: options.platform ?? "linux",
+      shell: options.environment.SHELL,
+      cacheDir: options.serverConfig.providerStatusCacheDir,
+      stateDir: options.serverConfig.stateDir,
+      key: `${options.instanceId}\0${cwd}`,
+      temporaryFolders: [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp"],
+      searchPath: options.environment.PATH,
+    }),
+  ).pipe(
+    Effect.tapError((cause) => Effect.logWarning("Bob's sandbox could not be set up", cause)),
+    Effect.orElseSucceed(() => undefined),
+  );
+}
+
 export interface BobAdapterV2Options extends BobAdapterV2Hooks {
+  /** The host's platform, which decides whether Bob's commands can run in a sandbox. */
+  readonly platform?: NodeJS.Platform;
   /** For an instance that runs Bob in tmux: the relays its Bob sessions run under. */
   readonly relays?: BobRelays;
   readonly instanceId: ProviderInstanceId;
@@ -974,6 +1096,10 @@ export function makeBobAcpAdapterFlavor(
         if (runtimePolicy.runtimeMode === "auto" && options.autoJudge !== undefined) {
           yield* options.autoJudge.warm.pipe(Effect.forkDetach);
         }
+        const mode = runtimePolicy.runtimeMode;
+        // Outside Full access Bob's commands run in a sandbox, read-only in Supervised.
+        const sandbox =
+          mode === "full-access" ? undefined : yield* openBobSandbox(options, mode, input.cwd);
         const runtime = yield* makeBobAcpRuntime({
           ...input,
           onTermination: (error) =>
@@ -982,15 +1108,15 @@ export function makeBobAcpAdapterFlavor(
               .pipe(Effect.ensuring(Deferred.succeed(terminated, undefined))),
           childProcessSpawner: link?.spawner ?? options.childProcessSpawner,
           bobSettings: options.settings,
-          environment: options.environment,
-          runtimeMode: runtimePolicy.runtimeMode,
+          environment: { ...options.environment, ...sandbox?.environment },
+          runtimeMode: mode,
         });
         return wrapBobRuntime(runtime, input.cwd, options, sessions, {
           link,
           terminated,
           mcpAuthorization,
-          autoReview:
-            runtimePolicy.runtimeMode === "auto" ? { workspace: runtimePolicy.cwd } : undefined,
+          review:
+            mode === "full-access" ? undefined : { mode, workspace: runtimePolicy.cwd, sandbox },
           userMessages,
         });
       }),

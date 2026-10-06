@@ -2,7 +2,9 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -47,6 +49,7 @@ import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
 import type { BobAutoJudge, BobAutoJudgeInput } from "../../provider/acp/bobAutoJudge.ts";
+import { bobSandboxAvailable } from "../../provider/acp/bobSandbox.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
@@ -92,6 +95,9 @@ const mcpRegistryLayer = McpSessionRegistry.layer.pipe(
     ),
   ),
 );
+
+/** Whether this host runs Bob's commands in a sandbox, as macOS does. */
+const sandboxAvailable = bobSandboxAvailable(HostProcessPlatform.defaultValue());
 
 const flavor = makeBobAcpAdapterFlavor({
   instanceId: ProviderInstanceId.make("bob-test"),
@@ -189,7 +195,7 @@ describe("BobAdapterV2 flavor", () => {
     );
   });
 
-  it("lets Bob's edits through in Accept edits, and leaves Auto's to the runtime's review", () => {
+  it("asks about every call that reaches the adapter, but in Full access", () => {
     const answer = (runtimeMode: RuntimeMode, kind: EffectAcpSchema.ToolKind) =>
       flavor.permissionDisposition?.(
         ProviderAdapterV2RuntimePolicy.make({
@@ -214,23 +220,11 @@ describe("BobAdapterV2 flavor", () => {
     ] as const;
     const answers = (runtimeMode: RuntimeMode) =>
       Object.fromEntries(kinds.map((kind) => [kind, answer(runtimeMode, kind)]));
-    const editsThrough = {
-      edit: "allow",
-      delete: "allow",
-      move: "allow",
-      execute: "ask",
-      search: "ask",
-      fetch: "ask",
-      other: "ask",
-      read: "ask",
-    } as const;
-    assert.deepEqual(
-      answers("approval-required"),
-      Object.fromEntries(kinds.map((kind) => [kind, "ask"])),
-    );
-    assert.deepEqual(answers("auto-accept-edits"), editsThrough);
-    // Bob's runtime wrapper answers what Auto's review allows; the rest reaches the adapter.
-    assert.deepEqual(answers("auto"), Object.fromEntries(kinds.map((kind) => [kind, "ask"])));
+    // Bob's runtime wrapper answers what each mode lets through; the rest reaches the adapter.
+    const asks = Object.fromEntries(kinds.map((kind) => [kind, "ask" as const]));
+    assert.deepEqual(answers("approval-required"), asks);
+    assert.deepEqual(answers("auto-accept-edits"), asks);
+    assert.deepEqual(answers("auto"), asks);
     assert.deepEqual(
       answers("full-access"),
       Object.fromEntries(kinds.map((kind) => [kind, "allow"])),
@@ -344,6 +338,8 @@ const openBob = (input: {
   readonly runtimeMode?: RuntimeMode;
   /** Auto's reviewer model. */
   readonly autoJudge?: BobAutoJudge;
+  /** The host's platform; macOS runs Bob's commands in a sandbox. */
+  readonly platform?: NodeJS.Platform;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -383,6 +379,7 @@ const openBob = (input: {
       idAllocator: yield* IdAllocator.IdAllocatorV2,
       serverConfig: yield* ServerConfig.ServerConfig,
       ...(input.autoJudge ? { autoJudge: input.autoJudge } : {}),
+      ...(input.platform ? { platform: input.platform } : {}),
       onAvailableCommands: (available, cwd) =>
         Effect.sync(() => {
           commands.push({ names: available.map((command) => command.name), cwd });
@@ -739,9 +736,14 @@ describe("BobAdapterV2 turns", () => {
     decisions: ReadonlyArray<"accept" | "decline">,
     autoJudge?: BobAutoJudge,
     fromServer = false,
+    platform?: NodeJS.Platform,
   ) =>
     Effect.gen(function* () {
-      const bob = yield* openBob({ runtimeMode, ...(autoJudge ? { autoJudge } : {}) });
+      const bob = yield* openBob({
+        runtimeMode,
+        ...(autoJudge ? { autoJudge } : {}),
+        ...(platform ? { platform } : {}),
+      });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
         threadId: bob.threadId,
@@ -774,7 +776,7 @@ describe("BobAdapterV2 turns", () => {
         .requests()
         .filter((request) => request.method === "_mock/permission")
         .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`);
-      return { asked, answers };
+      return { asked, answers, bob };
     });
 
   it.effect("in Auto, runs what the review allows and asks about the rest", () =>
@@ -815,23 +817,19 @@ describe("BobAdapterV2 turns", () => {
       };
       const { asked, answers } = yield* askAbout(
         "auto",
-        "test search fetch execute",
+        "search fetch execute",
         ["decline", "decline"],
         autoJudge,
       );
-      // The reviewer passes the tests and the search; the fetch, and a command the rules ask
-      // about, come to the user.
-      assert.deepEqual(answers, ["test=allow", "search=allow", "fetch=reject", "execute=reject"]);
+      // The reviewer passes the search; the fetch, and a command the rules ask about, come to
+      // the user.
+      assert.deepEqual(answers, ["search=allow", "fetch=reject", "execute=reject"]);
       assert.deepEqual(asked, ["command", "command"]);
       assert.deepEqual(
         judged.map((input) => input.call),
-        [
-          'runs a command in the project folder: "npm test"',
-          'searches the web for "t3 code"',
-          'fetches "https://example.com"',
-        ],
+        ['searches the web for "t3 code"', 'fetches "https://example.com"'],
       );
-      assert.deepEqual(judged[0]?.userMessages, ["ask about test search fetch execute"]);
+      assert.deepEqual(judged[0]?.userMessages, ["ask about search fetch execute"]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
@@ -848,25 +846,31 @@ describe("BobAdapterV2 turns", () => {
           }),
       };
       // A check-in or a notice the server sent is no request of the user's.
-      const fromServer = yield* askAbout("auto", "test ls", ["decline"], allowAll, true);
-      assert.deepEqual(fromServer.answers, ["test=reject", "ls=allow"]);
-      // Tests after Bob changed what they run are Bob's choice, not the project's.
-      const afterConfig = yield* askAbout("auto", "edit-config test", ["decline"], allowAll);
-      assert.deepEqual(afterConfig.answers, ["edit-config=allow", "test=reject"]);
+      const fromServer = yield* askAbout("auto", "search ls", ["decline"], allowAll, true);
+      assert.deepEqual(fromServer.answers, ["search=reject", "ls=allow"]);
       assert.lengthOf(judged, 0);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
-  it.effect(
-    "in Auto, runs the tests the user asks for whatever Bob changed in an earlier turn",
+  it.effect.skipIf(!sandboxAvailable)(
+    "in Auto with a sandbox, runs the tests the user asks for whatever Bob changed earlier",
     () =>
       Effect.gen(function* () {
+        let judged = 0;
         const allowAll: BobAutoJudge = {
           name: "a test reviewer",
           warm: Effect.void,
-          judge: () => Effect.succeed({ decision: "allow" as const, reason: "test" }),
+          judge: () =>
+            Effect.sync(() => {
+              judged += 1;
+              return { decision: "allow" as const, reason: "test" };
+            }),
         };
-        const bob = yield* openBob({ runtimeMode: "auto", autoJudge: allowAll });
+        const bob = yield* openBob({
+          runtimeMode: "auto",
+          autoJudge: allowAll,
+          platform: "darwin",
+        });
         const session = yield* bob.openSession(bob.workspace);
         const providerThread = yield* session.ensureThread({
           threadId: bob.threadId,
@@ -887,6 +891,79 @@ describe("BobAdapterV2 turns", () => {
             .filter((request) => request.method === "_mock/permission")
             .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`),
           ["edit-config=allow", "test=allow"],
+        );
+        // The sandbox bounds the tests, so the reviewer is not asked.
+        assert.equal(judged, 0);
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect.skipIf(!sandboxAvailable)(
+    "in Supervised with a sandbox, runs what only reads and asks about the rest",
+    () =>
+      Effect.gen(function* () {
+        const { answers, bob } = yield* askAbout(
+          "approval-required",
+          "ls test edit",
+          ["decline", "decline"],
+          undefined,
+          false,
+          "darwin",
+        );
+        assert.deepEqual(answers, ["ls=allow", "test=reject", "edit=reject"]);
+        const shell = bob.requests().find((request) => request.method === "_mock/env")?.params;
+        assert.include(String(shell?.SHELL), "bob-sandbox");
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect.skipIf(!sandboxAvailable)(
+    "in Accept edits with a sandbox, runs tests in it and lets a command the user approved out",
+    () =>
+      Effect.gen(function* () {
+        const { answers, bob } = yield* askAbout(
+          "auto-accept-edits",
+          "test execute",
+          ["accept"],
+          undefined,
+          false,
+          "darwin",
+        );
+        assert.deepEqual(answers, ["test=allow", "execute=allow"]);
+        // Bob's shell finds an approval for the approved `rm -rf build` only.
+        assert.deepEqual(
+          bob
+            .requests()
+            .filter((request) => request.method === "_mock/approvals")
+            .map((request) => request.params),
+          [
+            { tool: "test", found: [] },
+            { tool: "execute", found: ["rm -rf build"] },
+          ],
+        );
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect.skipIf(!sandboxAvailable)(
+    "asks before running again a command the sandbox stopped, and lets the approved run out once",
+    () =>
+      Effect.gen(function* () {
+        const { answers, asked } = yield* askAbout(
+          "auto-accept-edits",
+          "test-denied test-denied",
+          ["accept"],
+          undefined,
+          false,
+          "darwin",
+        );
+        assert.deepEqual(answers, ["test-denied=allow", "test-denied=allow"]);
+        assert.deepEqual(asked, ["command"]);
+        // Its approval is gone once the approved run ended.
+        const config = yield* ServerConfig.ServerConfig;
+        const approvals = NodePath.join(config.stateDir, "bob-sandbox", "approvals");
+        assert.deepEqual(
+          NodeFS.readdirSync(approvals, { recursive: true, withFileTypes: true }).filter((entry) =>
+            entry.isFile(),
+          ),
+          [],
         );
       }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );

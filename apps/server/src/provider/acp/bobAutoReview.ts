@@ -485,146 +485,9 @@ const GIT_READS = new Set([
 /** Git flags that write a file, run a program or open a pager on files. */
 const GIT_DENIED_FLAGS = /^(--output|--ext-diff|--open-files-in-pager|--exec|-[A-Za-z]*O)/;
 
-/**
- * The project's tests, builds, linters and type checks, which run the project's own code and are
- * left to review: each runner's subcommands, or for a script runner (`npm run`) the script names,
- * that only do that work. Running the app, its other scripts, or a script file asks.
- */
-const ROUTINE_TARGET =
-  /^(test|tests|t|lint|typecheck|type-check|check|build|compile|format|fmt|vet|clippy|doc)(:[\w.-]+)*$/;
-/** Names that publish, deploy or change data, which ask even when they look routine. */
-const PUBLISHING =
-  /deploy|release|publish|push|upload|ship|prod|migrat|seed|reset|drop|wipe|clean|prune/i;
-const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "vp"]);
-const RUNNER_SUBCOMMANDS: Record<string, ReadonlySet<string>> = {
-  go: new Set(["test", "build", "vet", "fmt"]),
-  cargo: new Set(["test", "build", "check", "clippy", "fmt", "doc"]),
-  swift: new Set(["build", "test"]),
-  dotnet: new Set(["build", "test"]),
-  mvn: new Set(["test", "compile", "package", "verify"]),
-  gradle: new Set(["test", "build", "check", "assemble"]),
-};
-/** Test runners, linters and type checkers, whatever their arguments. */
-const CHECKERS = new Set([
-  "pytest",
-  "mypy",
-  "ruff",
-  "black",
-  "flake8",
-  "pylint",
-  "eslint",
-  "prettier",
-  "tsc",
-  "jest",
-  "vitest",
-  "biome",
-  "oxlint",
-  "rspec",
-]);
-/**
- * Flags a test, build or lint run may take: quieter or louder output, which tests, how many
- * jobs, and fixing or checking formatting. Any other flag asks, since runners take plugins,
- * configs and shells by flag.
- */
-const PLAIN_RUNNER_FLAG =
-  /^(--|-[qvsx]|-vv|-j\d*|--(quiet|verbose|silent|ci|bail|run|no-watch|watch=false|color|no-color|release|lib|tests|all|workspace|failfast|exitfirst|lf|ff|noEmit|pretty|fix|check|write|list|maxfail=\d+|jobs=\d+|reporter=[\w-]+|filter=[\w@./:*-]+)|-(k|t|run|race|short|cover|count=\d+|timeout=\w+))$/;
-/** Words that make a project runner install, publish or fetch and run a package. */
-const PACKAGE_INSTALL = /^(--)?(install|i|add|ci|publish|exec|x|dlx|link|update|upgrade)$/;
-const PYTHON_MODULES = new Set(["pytest", "unittest", "mypy", "ruff", "black", "py_compile"]);
-/**
- * Files that decide what a test or build runs: a test run after Bob edited one of them in the
- * same turn runs code Bob chose, so it asks.
- */
-const RUNNER_CONFIG =
-  /^(package\.json|[Mm]akefile|GNUmakefile|.*\.mk|CMakeLists\.txt|.*\.cmake|conftest\.py|pyproject\.toml|setup\.(py|cfg)|tox\.ini|pytest\.ini|noxfile\.py|Cargo\.toml|build\.rs|.*\.gradle(\.kts)?|pom\.xml|.*\.csproj|Package\.swift|(vite|vitest|jest|babel|eslint|prettier|webpack|rollup|playwright)\.config\.[cm]?[jt]s|\.(eslintrc|prettierrc|mocharc)\.[cm]?js)$/;
-
-/** The routine work a project runner is asked to do, or none when it may do anything else. */
-function routineRunnerWork(program: string, args: ReadonlyArray<Word>): string | undefined {
-  const words = operands(args);
-  if (SCRIPT_RUNNERS.has(program)) {
-    const script = words[0] === "run" || words[0] === "run-script" ? words[1] : words[0];
-    return script !== undefined && ROUTINE_TARGET.test(script) ? script : undefined;
-  }
-  const subcommands = RUNNER_SUBCOMMANDS[program];
-  if (subcommands !== undefined) {
-    // The rest are packages or paths, which must stay in the workspace.
-    return words[0] !== undefined && subcommands.has(words[0]) ? words[0] : undefined;
-  }
-  if (program === "make") {
-    // A Makefile named by -f, or code passed by --eval, is not the project's routine work.
-    if (
-      args.some((word) =>
-        /^(-[A-Za-z]*[fECIoW]|--(file|makefile|eval|directory|include-dir))/.test(word.text),
-      )
-    ) {
-      return undefined;
-    }
-    return words.length > 0 && words.every((word) => ROUTINE_TARGET.test(word))
-      ? words.join(" ")
-      : undefined;
-  }
-  if (program === "cmake") {
-    return args.some((word) => word.text === "--build") && !args.some((word) => word.text === "-P")
-      ? "--build"
-      : undefined;
-  }
-  return CHECKERS.has(program) ? "checks" : undefined;
-}
-
-/**
- * Whether a path decides what a test or build runs: a runner's config by name, any config-like
- * file (JSON, TOML, YAML, INI, XML, rc files, Xcode and MSBuild project files), or anything in
- * a hidden folder such as `.cargo`.
- */
-function decidesWhatRuns(path: string): boolean {
-  const name = NodePath.basename(path);
-  return (
-    RUNNER_CONFIG.test(name) ||
-    /\.(json5?|toml|ya?ml|ini|cfg|xml|props|targets|pbxproj|xcscheme|xcconfig)$/i.test(name) ||
-    /^\.[\w.-]*rc(\.[a-z]+)?$/i.test(name) ||
-    segmentsOf(path)
-      .slice(0, -1)
-      .some((segment) => segment.startsWith(".") && segment !== "." && segment !== "..")
-  );
-}
-
-/**
- * Whether a tool call may change what a test or build runs: an edit of such a file, or a command
- * that writes one, such as `cp other.json package.json`.
- */
-export function bobEditsRunnerConfig(
-  toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
-  context: BobAutoReviewContext,
-): boolean {
-  const places = new Places(context);
-  const workspace = places.workspace;
-  if (workspace === undefined) return true;
-  // Within the workspace, by the path below it; anything outside counts.
-  const decides = (path: string, base: string) => {
-    const absolute = places.absolute(path, base);
-    const relative = absolute === undefined ? undefined : places.inWorkspace(absolute);
-    return relative === undefined || decidesWhatRuns(relative);
-  };
-  const input = record(toolCall.rawInput) ?? {};
-  if (toolCall.kind === "edit" || toolCall.kind === "delete" || toolCall.kind === "move") {
-    return editPaths(toolCall).some((path) => decides(path, workspace));
-  }
-  if (toolCall.kind !== "execute" || typeof input.command !== "string") return false;
-  const base = typeof input.cwd === "string" ? input.cwd : workspace;
-  const commands = simpleCommands(tokenize(input.command) ?? []) ?? [];
-  return commands.some((simple) => {
-    const [name, ...args] = simple.words;
-    const program = name?.text ?? "";
-    if (["cp", "mv", "ln", "touch", "mkdir", "chmod", "tee"].includes(program)) {
-      return writeTargets(args).some((path) => decides(path, base));
-    }
-    if (program === "sed") {
-      const sed = sedCommand(args.map((word) => word.text));
-      return sed !== undefined && sed.inPlace && sed.files.some((path) => decides(path, base));
-    }
-    return false;
-  });
-}
+/** Words that make a package manager install, publish, or fetch and run a package. */
+const PACKAGE_INSTALL =
+  /^(--)?(install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|add|ci|update|upgrade|up|publish|link|dlx|exec|x|login|logout|adduser|remove|uninstall|get|sync|fetch|restore|require|resolve|lock)$/;
 
 const GH_READS = new Set(["view", "list", "status", "checks", "diff"]);
 /** A sed script that only prints lines by number or by a pattern, such as `1,40p` or `/re/p`. */
@@ -708,26 +571,6 @@ function writeTargets(words: ReadonlyArray<Word>): ReadonlyArray<string> {
 /** Every word and flag value of a command, any of which may be a path. */
 function pathLikeWords(words: ReadonlyArray<Word>): ReadonlyArray<string> {
   return words.map((word) => /^--?[^=]+=(.*)$/.exec(word.text)?.[1] ?? word.text);
-}
-
-/**
- * A command that runs the project's code, left to review when it runs in the workspace and every
- * argument that may be a path, such as `make -C ..` or `--prefix`, stays inside it.
- */
-function requireWorkspace(
-  places: Places,
-  base: string,
-  args: ReadonlyArray<Word>,
-  reason: string,
-): BobAutoReview {
-  const outside = pathLikeWords(args).some((word) => {
-    if (!word.includes("/") && !word.startsWith("~") && word !== "..") return false;
-    const absolute = places.absolute(word, base);
-    return absolute === undefined || places.inWorkspace(absolute) === undefined;
-  });
-  return places.inWorkspace(base) === undefined || outside
-    ? ask(`${reason} outside the workspace`)
-    : review(reason);
 }
 
 function reviewSimpleCommand(places: Places, command: SimpleCommand, base: string): BobAutoReview {
@@ -832,31 +675,6 @@ function reviewSimpleCommand(places: Places, command: SimpleCommand, base: strin
         ? reviewWrites(places, paths, base, "makes executable", "makes a workspace file executable")
         : ask("changes permissions");
     }
-    case "python":
-    case "python3":
-      if (texts[0] === "-m" && PYTHON_MODULES.has(texts[1] ?? "")) {
-        return requireWorkspace(places, base, args, `runs python -m ${texts[1]}`);
-      }
-      break;
-  }
-  if (texts.some((text) => PACKAGE_INSTALL.test(text))) {
-    return ask(`installs or runs packages with ${program}`);
-  }
-  const work = routineRunnerWork(program, args);
-  if (work !== undefined) {
-    // A runner's variables, such as make's SHELL, and most of its flags can make it run code
-    // of Bob's choosing: a plugin, a config, a shell. Only plain flags pass.
-    if (
-      texts.some(
-        (text) =>
-          /^[A-Za-z_][A-Za-z0-9_]*=/.test(text) ||
-          PUBLISHING.test(text) ||
-          (text.startsWith("-") && !PLAIN_RUNNER_FLAG.test(text)),
-      )
-    ) {
-      return ask(`runs ${program} with settings, flags or targets beyond checking the project`);
-    }
-    return requireWorkspace(places, base, args, `runs the project's ${program} ${work}`);
   }
   return ask(`runs ${program}`);
 }
@@ -924,6 +742,246 @@ export function reviewBobCommand(
     base = next;
   }
   return reviews.length === 0 ? ask("only changes folder") : strictest(reviews);
+}
+
+// --- Commands in the sandbox ------------------------------------------------------------------
+
+/**
+ * Programs that need more than the sandbox gives, the network, the machine or the user's other
+ * processes, or that delete work, and so ask: the user can let them run outside it.
+ */
+const OUTSIDE_SANDBOX = new Set([
+  "sudo",
+  "su",
+  "doas",
+  "kill",
+  "pkill",
+  "killall",
+  "open",
+  "osascript",
+  "launchctl",
+  "defaults",
+  "crontab",
+  "systemctl",
+  "service",
+  "shutdown",
+  "reboot",
+  "halt",
+  "diskutil",
+  "mount",
+  "umount",
+  "security",
+  "chown",
+  "chflags",
+  "xattr",
+  "tmux",
+  "screen",
+  "curl",
+  "wget",
+  "ssh",
+  "scp",
+  "sftp",
+  "rsync",
+  "nc",
+  "ncat",
+  "netcat",
+  "telnet",
+  "ftp",
+  "ping",
+  "dig",
+  "nslookup",
+  "host",
+  "whois",
+  "docker",
+  "podman",
+  "kubectl",
+  "helm",
+  "terraform",
+  "aws",
+  "gcloud",
+  "az",
+  "heroku",
+  "vercel",
+  "netlify",
+  "fly",
+  "flyctl",
+  "npx",
+  "bunx",
+  "pnpx",
+  "brew",
+  "apt",
+  "apt-get",
+  "yum",
+  "dnf",
+  "pacman",
+  "port",
+  "snap",
+  "pip",
+  "pip3",
+  "pipx",
+  "gem",
+  "rm",
+  "rmdir",
+  "unlink",
+  "shred",
+  "srm",
+  "trash",
+  "eval",
+  "xargs",
+  "exec",
+]);
+const PACKAGE_MANAGERS = new Set([
+  "npm",
+  "pnpm",
+  "yarn",
+  "bun",
+  "vp",
+  "uv",
+  "poetry",
+  "cargo",
+  "go",
+  "bundle",
+  "composer",
+  "mix",
+  "dotnet",
+  "swift",
+  "deno",
+]);
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+/** Commands that only run the one after them, whose own leading words are options or numbers. */
+const WRAPPERS = new Set([
+  "env",
+  "nohup",
+  "nice",
+  "time",
+  "timeout",
+  "command",
+  "builtin",
+  "caffeinate",
+  "arch",
+  "stdbuf",
+  "setsid",
+]);
+/** Wrapper flags that take the next word as their value. */
+const WRAPPER_VALUE_FLAGS = /^-(u|C|S|s|k|i|o|e|n)$/;
+/** Package managers that install the project's dependencies when run with no command. */
+const BARE_INSTALLERS = new Set(["yarn", "pnpm", "bun"]);
+
+function reviewSandboxedCommand(
+  places: Places,
+  words: ReadonlyArray<Word>,
+  base: string,
+  depth: number,
+): BobAutoReview {
+  let index = 0;
+  // `FOO=1 npm test`: what the variables change, the sandbox bounds.
+  while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]!.text)) index += 1;
+  const name = words[index];
+  if (name === undefined) return allow("sets variables");
+  const args = words.slice(index + 1);
+  const texts = args.map((word) => word.text);
+  const program = NodePath.basename(name.text);
+  if (pathLikeWords(args).some((word) => places.namesSecret(word, base))) {
+    return ask("touches secrets or settings");
+  }
+  if (WRAPPERS.has(program)) {
+    // Whatever the wrapper runs, a command that needs more than the sandbox asks.
+    if (args.some((word) => OUTSIDE_SANDBOX.has(NodePath.basename(word.text)))) {
+      return ask(`runs ${program} around a command that needs more than the sandbox`);
+    }
+    let rest = -1;
+    for (let index = 0; index < args.length; index += 1) {
+      const text = args[index]!.text;
+      if (WRAPPER_VALUE_FLAGS.test(text)) {
+        index += 1;
+        continue;
+      }
+      if (text.startsWith("-") || /^[\d.]+[smhd]?$/.test(text) || text.includes("=")) continue;
+      rest = index;
+      break;
+    }
+    return rest < 0 || depth > 3
+      ? ask(`runs ${program} in a way the rules cannot follow`)
+      : reviewSandboxedCommand(places, args.slice(rest), base, depth + 1);
+  }
+  if (OUTSIDE_SANDBOX.has(program))
+    return ask(`runs ${program}, which needs more than the sandbox`);
+  if (SHELLS.has(program)) {
+    const inline = texts.indexOf("-c");
+    if (inline < 0) return allow("runs a script in the sandbox");
+    const script = texts[inline + 1];
+    return script === undefined || depth > 3
+      ? ask(`runs ${program} in a way the rules cannot follow`)
+      : reviewSandboxedLine(places, script, base, depth + 1);
+  }
+  if (program === "find" && texts.some((text) => /^-(exec|execdir|ok|okdir|delete)$/.test(text))) {
+    return ask("runs find with an action that may delete files");
+  }
+  if (program === "git") {
+    const git = reviewGit(args);
+    return git.verdict === "allow" ? allow("reads the repository in the sandbox") : git;
+  }
+  if (program === "gh") {
+    return ["pr", "issue", "run", "repo"].includes(texts[0] ?? "") &&
+      GH_READS.has(texts[1] ?? "") &&
+      !texts.some((text) => /^(-[A-Za-z]*w[A-Za-z]*|--web(=.*)?)$/.test(text))
+      ? review("reads from GitHub, outside the sandbox")
+      : ask("acts on GitHub");
+  }
+  if (
+    PACKAGE_MANAGERS.has(program) &&
+    (texts.some((text) => PACKAGE_INSTALL.test(text)) ||
+      (BARE_INSTALLERS.has(program) && operands(args).length === 0))
+  ) {
+    return ask(`installs or fetches packages with ${program}`);
+  }
+  return allow("runs in the sandbox");
+}
+
+function reviewSandboxedLine(
+  places: Places,
+  command: string,
+  start: string,
+  depth: number,
+): BobAutoReview {
+  if (command.length > 2_000) return ask("a command too long to review");
+  const tokens = tokenize(command);
+  const commands = tokens ? simpleCommands(tokens) : undefined;
+  if (!commands) return ask("a command the rules cannot read with certainty");
+  let base = start;
+  const reviews: Array<BobAutoReview> = [];
+  for (const simple of commands) {
+    if (simple.words[0]!.text !== "cd") {
+      reviews.push(reviewSandboxedCommand(places, simple.words, base, depth));
+      continue;
+    }
+    const target = simple.words[1];
+    const next =
+      simple.words.length !== 2 || !target || target.globbed || target.text.startsWith("-")
+        ? undefined
+        : places.absolute(target.text, base);
+    if (next === undefined) return ask("changes folder in a way the rules cannot follow");
+    if (places.namesSecret(target!.text, base, true)) return ask("changes to a folder of secrets");
+    base = next;
+  }
+  return strictest(reviews);
+}
+
+/**
+ * Reviews a command Bob runs in the sandbox, where it writes only in the workspace and reaches no
+ * network. What needs more asks, so the user can let it run outside, and so do deleting files and
+ * anything the rules cannot read; the rest runs, bounded by the sandbox. A GitHub read is left
+ * to review, since it needs the network.
+ */
+export function reviewBobCommandInSandbox(
+  command: string,
+  cwd: string | undefined,
+  context: BobAutoReviewContext,
+): BobAutoReview {
+  const places = new Places(context);
+  const start = cwd ?? places.workspace;
+  if (start === undefined || !NodePath.isAbsolute(start)) return ask("no folder to run in");
+  return reviewSandboxedLine(places, command, start, 0);
 }
 
 // --- Tool calls -------------------------------------------------------------------------------
@@ -1012,24 +1070,51 @@ function decodeURIComponentSafe(text: string): string {
   }
 }
 
-/** Reviews a tool call Bob asks permission for, in Auto. */
-export function reviewBobToolCall(
+/** The permission modes T3 answers Bob's requests in; in Full access Bob approves its own. */
+export type BobPermissionMode = "approval-required" | "auto-accept-edits" | "auto";
+
+/**
+ * Reviews a tool call Bob asks permission for, as the thread's permission mode answers it.
+ * With `sandboxed`, Bob's commands run in the sandbox: read-only in Supervised, the workspace in
+ * Accept edits and Auto. Supervised runs commands that only read; Accept edits and Auto run any
+ * command the sandbox bounds and edits in the workspace; Auto also leaves web searches, fetches,
+ * skills and GitHub reads to its reviewer. Everything else asks.
+ */
+export function reviewBobPermission(
   toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
-  context: BobAutoReviewContext,
+  input: {
+    readonly mode: BobPermissionMode;
+    readonly sandboxed: boolean;
+    readonly context: BobAutoReviewContext;
+  },
 ): BobAutoReview {
-  const input = record(toolCall.rawInput) ?? {};
+  const { mode, sandboxed, context } = input;
+  const raw = record(toolCall.rawInput) ?? {};
   const title = (toolCall.title ?? "").trim();
+  const reviewed = (result: BobAutoReview) =>
+    result.verdict === "review" && mode !== "auto" ? ask(result.reason) : result;
   switch (toolCall.kind ?? "other") {
     case "execute": {
-      const { command, cwd } = input;
+      const { command, cwd } = raw;
       if (typeof command !== "string" || (cwd !== undefined && typeof cwd !== "string")) {
         return ask("a command without a readable command line");
       }
-      return reviewBobCommand(command, cwd, context);
+      // A server or a watcher outlives the turn, and the sandbox would cut its network off.
+      if (raw.background === true) return ask("runs a command in the background");
+      if (!sandboxed)
+        return mode === "auto" ? reviewBobCommand(command, cwd, context) : ask("runs a command");
+      if (mode === "approval-required") {
+        const read = reviewBobCommand(command, cwd, context);
+        return read.verdict === "allow"
+          ? allow(`${read.reason}, in a read-only sandbox`)
+          : ask(read.reason);
+      }
+      return reviewed(reviewBobCommandInSandbox(command, cwd, context));
     }
     case "edit":
     case "delete":
     case "move": {
+      if (mode === "approval-required") return ask("an edit");
       const places = new Places(context);
       if (places.workspace === undefined) return ask("an edit without a workspace");
       const paths = editPaths(toolCall);
@@ -1037,40 +1122,37 @@ export function reviewBobToolCall(
       return strictest(paths.map((path) => reviewWrite(places, path, places.workspace!, "edits")));
     }
     case "search":
-      if (!title.startsWith(BOB_WEB_SEARCH_TITLE) || !onlyKeys(input, ["query", "max_results"])) {
+      if (!title.startsWith(BOB_WEB_SEARCH_TITLE) || !onlyKeys(raw, ["query", "max_results"])) {
         return ask("a tool Bob counts as a search");
       }
-      return typeof input.query === "string" && plainText(input.query, 200)
-        ? review(`searches the web for ${JSON.stringify(input.query)}`)
+      return typeof raw.query === "string" && plainText(raw.query, 200)
+        ? reviewed(review(`searches the web for ${JSON.stringify(raw.query)}`))
         : ask("searches the web for text that may carry a secret");
     case "fetch":
-      if (
-        !title.startsWith(BOB_WEB_FETCH_TITLE) ||
-        !onlyKeys(input, ["url", "format", "timeout"])
-      ) {
+      if (!title.startsWith(BOB_WEB_FETCH_TITLE) || !onlyKeys(raw, ["url", "format", "timeout"])) {
         return ask("a tool Bob counts as a fetch");
       }
-      return typeof input.url === "string" && publicPage(input.url)
-        ? review(`fetches ${input.url}`)
+      return typeof raw.url === "string" && publicPage(raw.url)
+        ? reviewed(review(`fetches ${raw.url}`))
         : ask("fetches a local or private address, or a URL that may carry a secret");
     case "other":
-      if (title === BOB_TODO_TITLE && onlyKeys(input, ["todos"])) {
+      if (title === BOB_TODO_TITLE && onlyKeys(raw, ["todos"])) {
         return allow("updates Bob's todo list");
       }
       if (
         title.startsWith(BOB_SUBAGENT_TITLE) &&
-        typeof input.description === "string" &&
-        onlyKeys(input, ["description", "name", "fork_context"])
+        typeof raw.description === "string" &&
+        onlyKeys(raw, ["description", "name", "fork_context"])
       ) {
         return allow("starts a subagent, whose tool calls are reviewed in turn");
       }
       if (
         title.startsWith(BOB_SKILL_TITLE) &&
-        onlyKeys(input, ["skill_name"]) &&
-        typeof input.skill_name === "string" &&
-        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(input.skill_name)
+        onlyKeys(raw, ["skill_name"]) &&
+        typeof raw.skill_name === "string" &&
+        /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(raw.skill_name)
       ) {
-        return review(`loads the skill ${JSON.stringify(input.skill_name)}`);
+        return reviewed(review(`loads the skill ${JSON.stringify(raw.skill_name)}`));
       }
       return ask("a tool the rules do not know");
     default:
