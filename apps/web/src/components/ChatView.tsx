@@ -9835,6 +9835,7 @@ export default function ChatView(props: ChatViewProps) {
   const onRespondToApproval = async (
     requestId: RuntimeRequestId,
     decision: ProviderApprovalDecision,
+    optionId?: string,
   ) => {
     if (!activeThreadId || !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope))
       return;
@@ -9853,6 +9854,7 @@ export default function ChatView(props: ChatViewProps) {
         threadId: activeThreadId,
         requestId,
         decision,
+        ...(optionId === undefined ? {} : { optionId }),
       },
     });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {

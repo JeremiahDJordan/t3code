@@ -1624,6 +1624,7 @@ export interface ChatComposerProps {
   onRespondToApproval: (
     requestId: RuntimeRequestId,
     decision: ProviderApprovalDecision,
+    optionId?: string,
   ) => Promise<unknown>;
   onSelectActivePendingUserInputOption: (questionId: string, optionValue: string) => void;
   onAdvanceActivePendingUserInput: () => void;

@@ -3,22 +3,27 @@
 /**
  * A stand-in for IBM Bob Shell's `bob acp`, for the Bob adapter and text generation tests.
  *
- * Bob 2.0.5 speaks ACP protocol 1, so this answers raw JSON-RPC in that shape rather than going
+ * Bob 2.0.6 speaks ACP protocol 1, so this answers raw JSON-RPC in that shape rather than going
  * through effect-acp's agent, which speaks protocol 2. It behaves the way Bob does where T3
  * depends on it: sessions carry Bob's modes (Agent, Ask, Plan and a custom mode) and switch with
  * `session/set_mode`, commands arrive after a session opens, tool titles are HTML-escaped,
  * subagents run as a "Running subagent: …" tool call with the report in `<task_result>` tags,
- * and tasks move with `_bob/task/export` and `_bob/task/import`.
+ * tasks move with `_bob/task/export` and `_bob/task/import`, and a file outside the session's
+ * folder is refused before anyone is asked, but for `~/.bob` and Bob's terminal history.
  *
  * A prompt's text picks what Bob does: "use a subagent", "run a command", "say nothing" (an
  * empty reply), "work slowly", which runs a tool call until `T3_ACP_BOB_RELEASE_PATH` exists
  * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`, and
  * "finish later", whose tool call runs until that file exists (also logged) and which then
  * replies, and
- * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins, and
+ * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins,
+ * "exit now", which ends Bob's process mid-prompt,
+ * "read the attached file", which replies with the text of the prompt's first `resource` block,
+ * or else reads the file a `[Attached … is saved at: <path>]` line names, as a read tool call
+ * that fails outside the session's folder, and replies with the file's text or Bob's refusal, and
  * "ask about <tools>", which asks permission for each tool named (edit, edit-config, edit-outside, execute, ls,
- * test, search, fetch, todo, subagent, read, and an MCP tool for any other name) as Bob asks, logs
- * each answer as `_mock/permission` and replies with them.
+ * test, test-denied, tool-denied, commit, search, fetch, todo, subagent, read, and an MCP tool for
+ * any other name) as Bob asks, logs each answer as `_mock/permission` and replies with them.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
@@ -27,6 +32,8 @@
  * share their task database.
  */
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
 const requestLogPath = process.env.T3_ACP_REQUEST_LOG_PATH;
@@ -140,6 +147,59 @@ function promptText(prompt: unknown): string {
     : "";
 }
 
+/** Bob 2.0.6's refusal of a tool outside the workspace, when its setting does not allow them. */
+const OUTSIDE_WORKSPACE_NOTE =
+  'Tools are blocked from working outside of the current workspace. Do not attempt to work around this by using execute_command or creating scripts. Enable "Allow outside workspace tool requests" in settings.';
+
+/** Whether Bob's tools may touch `path` from a session in `cwd`: its folder, `~/.bob` and its terminal history. */
+function insideBobWorkspace(path: string, cwd: string): boolean {
+  const target = NodePath.resolve(cwd, path);
+  return [
+    cwd,
+    NodePath.join(NodeOS.homedir(), ".bob"),
+    NodePath.join(NodeOS.tmpdir(), "bob-terminal-history"),
+  ].some((folder) => {
+    const relative = NodePath.relative(NodePath.resolve(folder), target);
+    return !relative.startsWith("..") && !NodePath.isAbsolute(relative);
+  });
+}
+
+/**
+ * Reads the file the prompt attached: the text Bob was given in a `resource` block, or else the
+ * file at the path the prompt names, which Bob refuses outside its workspace.
+ */
+function readAttachedFile(sessionId: string, prompt: unknown, text: string): string {
+  const resource = Array.isArray(prompt)
+    ? (prompt as Array<Json>).find((part) => part.type === "resource")
+    : undefined;
+  const embedded = (resource?.resource as Json | undefined)?.text;
+  if (typeof embedded === "string") return `The attached file says: ${embedded}`;
+  const path = /\[Attached [^\]]* is saved at: ([^\]]+)\]/.exec(text)?.[1];
+  if (path === undefined) return "No file is attached.";
+  const toolCallId = "read-attached-1";
+  notify(sessionId, {
+    sessionUpdate: "tool_call",
+    toolCallId,
+    title: `Reading ${path}`,
+    kind: "read",
+    status: "in_progress",
+    rawInput: { path },
+  });
+  const cwd = tasks.get(sessionId)?.cwd ?? process.cwd();
+  if (!insideBobWorkspace(path, cwd)) {
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId,
+      status: "failed",
+      content: [{ type: "content", content: { type: "text", text: OUTSIDE_WORKSPACE_NOTE } }],
+    });
+    return OUTSIDE_WORKSPACE_NOTE;
+  }
+  const content = NodeFS.readFileSync(path, "utf8");
+  notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+  return `The attached file says: ${content}`;
+}
+
 function runPrompt(params: Json): Json {
   const sessionId = String(params.sessionId);
   const text = promptText(params.prompt);
@@ -203,8 +263,9 @@ function runPrompt(params: Json): Json {
       status: "completed",
     });
   }
-  const reply =
-    currentModeId === "plan"
+  const reply = text.includes("read the attached file")
+    ? readAttachedFile(sessionId, params.prompt, text)
+    : currentModeId === "plan"
       ? "## Plan\n\n1. Read the code.\n2. Change it."
       : (promptResponseText ?? "Hello from Bob.");
   notify(sessionId, {
@@ -222,14 +283,24 @@ function handle(method: string, params: Json): Json {
         // The shell Bob would run commands with, which T3 may point at its sandbox.
         NodeFS.appendFileSync(
           requestLogPath,
-          `${JSON.stringify({ method: "_mock/env", params: { SHELL: process.env.SHELL ?? "" } })}\n`,
+          `${JSON.stringify({
+            method: "_mock/env",
+            params: {
+              SHELL: process.env.SHELL ?? "",
+              PROFILE: process.env.T3_BOB_SANDBOX_PROFILE ?? "",
+              // The folder Bob was started in, which `--trust` trusts.
+              CWD: process.cwd(),
+            },
+          })}\n`,
         );
       }
       return {
         protocolVersion: 1,
-        agentInfo: { name: "bob-mock", version: "2.0.5" },
+        agentInfo: { name: "bob-mock", version: "2.0.6" },
         agentCapabilities: {
           loadSession: true,
+          // Bob takes a file's text in the prompt as a `resource` block.
+          promptCapabilities: { embeddedContext: true },
           sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} },
         },
         // Bob's only method opens an IBM SSO browser, which T3 must never call.
@@ -381,12 +452,12 @@ function request(method: string, params: Json): Promise<Json> {
   return new Promise((resolve) => awaitingAnswers.set(id, resolve));
 }
 
-// Bob's options for every permission request.
+// Bob 2.0.6's options for a permission request. It offers Always allow, which approves the
+// tool for the task, for commands, MCP tools and permission groups: every tool the mock asks about.
 const permissionOptions = [
   { optionId: "allow", name: "Allow once", kind: "allow_once" },
   { optionId: "allow_always", name: "Always allow", kind: "allow_always" },
   { optionId: "reject", name: "Reject", kind: "reject_once" },
-  { optionId: "reject_always", name: "Always reject", kind: "reject_always" },
 ];
 
 /** Bob's tools as Bob asks about them: kind, title (Bob's running label), input, any diff. */
@@ -407,6 +478,8 @@ function askedTool(name: string, cwd: string): Json {
         content: [{ type: "diff", path: `${cwd}/package.json`, oldText: null, newText: "{}" }],
       };
     case "edit-outside":
+      // Bob 2.0.6 asks about this, and "read", only when its "Allow outside workspace tool
+      // requests" setting is on; otherwise it refuses them, as "read the attached file" does.
       return {
         kind: "edit",
         title: "Writing file /etc/hosts",
@@ -422,6 +495,15 @@ function askedTool(name: string, cwd: string): Json {
     case "test-denied":
       // Runs, and fails as the sandbox stops it.
       return { kind: "execute", title: "npm run e2e", rawInput: { command: "npm run e2e" } };
+    case "tool-denied":
+      // Runs, and fails as the sandbox stops it reading its settings in a hidden folder.
+      return { kind: "execute", title: "fake-tool sync", rawInput: { command: "fake-tool sync" } };
+    case "commit":
+      return {
+        kind: "execute",
+        title: 'git commit -m "Notes"',
+        rawInput: { command: 'git commit -m "Notes"' },
+      };
     case "search":
       return {
         kind: "search",
@@ -482,7 +564,8 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
       const found = NodeFS.existsSync(approvals)
         ? NodeFS.readdirSync(approvals).map((name) => {
             const path = `${approvals}/${name}`;
-            const text = NodeFS.readFileSync(path, "utf8");
+            // The folder it was approved in, then the command.
+            const text = NodeFS.readFileSync(path, "utf8").split("\n").slice(1).join("\n");
             if (text === (asked.rawInput as { command?: string }).command) NodeFS.rmSync(path);
             return text;
           })
@@ -492,7 +575,11 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
         `${JSON.stringify({ method: "_mock/approvals", params: { tool, found } })}\n`,
       );
     }
-    const denied = tool === "test-denied" && chosen.startsWith("allow");
+    const denied = (tool === "test-denied" || tool === "tool-denied") && chosen.startsWith("allow");
+    const deniedText =
+      tool === "tool-denied"
+        ? `Error: EPERM: operation not permitted, open '${process.env.HOME ?? ""}/.fake-tool/config.json'`
+        : "Error: listen EPERM: operation not permitted";
     notify(sessionId, {
       sessionUpdate: "tool_call_update",
       toolCallId,
@@ -502,7 +589,7 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
             content: [
               {
                 type: "content",
-                content: { type: "text", text: "Error: listen EPERM: operation not permitted" },
+                content: { type: "text", text: deniedText },
               },
             ],
           }
@@ -557,6 +644,13 @@ lines.on("line", (line) => {
   ) {
     finishLater(message.id, String(message.params?.sessionId));
     return;
+  }
+  // Bob's process dies mid-prompt, so T3 starts another for the next turn.
+  if (
+    message.method === "session/prompt" &&
+    promptText(message.params?.prompt).includes("exit now")
+  ) {
+    process.exit(1);
   }
   const asked = /ask about ([a-z ,-]+)/.exec(promptText(message.params?.prompt));
   if (message.method === "session/prompt" && message.id !== undefined && asked) {

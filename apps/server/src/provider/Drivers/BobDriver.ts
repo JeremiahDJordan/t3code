@@ -9,6 +9,8 @@
  * @module provider/Drivers/BobDriver
  */
 import {
+  type BobRule,
+  type BobRuleScope,
   BobSettings,
   ProviderDriverKind,
   ProviderThreadId,
@@ -25,11 +27,14 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import { bobDelegatedTaskEnded } from "../bobDelegatedTask.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeBobAdapterV2 } from "../../orchestration-v2/Adapters/BobAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -42,7 +47,7 @@ import * as ProcessRunner from "../../processRunner.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
-import { makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
+import { type BobAutoJudge, makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
 import {
   type AdoptableBobRelay,
   bobRelayHasTurn,
@@ -153,6 +158,9 @@ export const BobDriver: ProviderDriver<
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettingsService;
       const host = yield* ProviderHost.ProviderHost;
+      // The server's database, for the user's messages a delegated Bob task works under; without
+      // it every call such a task leaves to the reviewer asks.
+      const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
       const loggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       const selfInvocation = yield* resolveSelfInvocation();
@@ -277,15 +285,47 @@ export const BobDriver: ProviderDriver<
       const driverScope = yield* Effect.scope;
       // In Auto, the model that judges the tool calls the rules leave to what the user asked.
       const runFork = Effect.runForkWith(yield* Effect.context<never>());
-      const autoJudge = makeBobAutoJudgeForSettings({
-        settings: effectiveConfig,
-        environment: processEnv,
-        cacheDir: host.paths.providerStatusCacheDir,
-        platform: yield* HostProcess.Platform,
-        httpClient,
-        log: (message) => void runFork(Effect.logWarning(message)),
+      const judgePlatform = yield* HostProcess.Platform;
+      const makeJudge = () =>
+        makeBobAutoJudgeForSettings({
+          settings: effectiveConfig,
+          environment: processEnv,
+          cacheDir: host.paths.providerStatusCacheDir,
+          platform: judgePlatform,
+          httpClient,
+          log: (message) => void runFork(Effect.logWarning(message)),
+        });
+      // A settings change rebuilds this driver while Bob's open sessions keep its adapter, so the
+      // reviewer closes once the driver and every Bob runtime holding it are done, and a runtime
+      // such a session starts later gets a new one.
+      let currentJudge = makeJudge();
+      let judgeHolders = 1;
+      const releaseJudge = Effect.suspend(() =>
+        --judgeHolders === 0 ? currentJudge.close : Effect.void,
+      );
+      yield* Scope.addFinalizer(driverScope, releaseJudge);
+      const firstJudge = currentJudge.judge;
+      const autoJudge: BobAutoJudge | undefined = firstJudge && {
+        name: firstJudge.name,
+        judge: (input) =>
+          Effect.suspend(
+            () =>
+              currentJudge.judge?.judge(input) ??
+              Effect.succeed({ decision: "ask" as const, reason: "no reviewer" }),
+          ),
+        extract: (text) =>
+          Effect.suspend(() => currentJudge.judge?.extract?.(text) ?? Effect.succeed(undefined)),
+        warm: Effect.suspend(() => currentJudge.judge?.warm ?? Effect.void),
+      };
+      // The user's permission rules, shared by every Bob instance and kept apart from this
+      // instance's settings, so a rule a card adds neither restarts Bob nor waits for a new thread.
+      const savedRules = (settings: {
+        bobRules: ReadonlyArray<BobRule>;
+        bobRuleScope: BobRuleScope;
+      }) => ({
+        rules: settings.bobRules,
+        scope: settings.bobRuleScope,
       });
-      yield* Scope.addFinalizer(driverScope, autoJudge.close);
       // Bob's relays from before this start: those no instance runs any more stop, this
       // instance's idle ones stop, and each still running a prompt gets a run to finish it in.
       const adoptable = new Map<string, AdoptableBobRelay>();
@@ -299,8 +339,12 @@ export const BobDriver: ProviderDriver<
         const activation = yield* ServerActivation;
         yield* Effect.gen(function* () {
           const keeps = tmuxBobInstanceIds(yield* serverSettings.getSettings);
-          const owners: Array<{ readonly threadId: string; readonly providerThreadId: string }> =
-            [];
+          const owners: Array<{
+            readonly threadId: string;
+            readonly providerThreadId: string;
+            readonly relayId: string;
+            readonly sessionId: string;
+          }> = [];
           for (const { relayId, state } of yield* relayHost.scan) {
             const meta = readBobRelayMeta(state);
             if (meta === undefined || !keeps.has(meta.instanceId)) {
@@ -312,14 +356,35 @@ export const BobDriver: ProviderDriver<
               yield* relayHost.kill(relayId);
               continue;
             }
-            adoptable.set(meta.sessionId, { relayId, autoApprove: meta.autoApprove === true });
+            adoptable.set(meta.sessionId, {
+              relayId,
+              autoApprove: meta.autoApprove === true,
+              mode: meta.mode,
+            });
             if (meta.threadId !== undefined && meta.providerThreadId !== undefined) {
-              owners.push({ threadId: meta.threadId, providerThreadId: meta.providerThreadId });
+              owners.push({
+                threadId: meta.threadId,
+                providerThreadId: meta.providerThreadId,
+                relayId,
+                sessionId: meta.sessionId,
+              });
             }
           }
           yield* Deferred.succeed(scanned, undefined);
           yield* activation ?? Effect.void;
           for (const owner of owners) {
+            // A delegated task's answer was taken when recovery ended its row; finishing its
+            // prompt would answer no one, beside a Retry doing the same work.
+            const ended = Option.isSome(sql)
+              ? yield* bobDelegatedTaskEnded(ThreadId.make(owner.threadId)).pipe(
+                  Effect.provideService(SqlClient.SqlClient, sql.value),
+                )
+              : false;
+            if (ended) {
+              adoptable.delete(owner.sessionId);
+              yield* relayHost.kill(owner.relayId);
+              continue;
+            }
             yield* continuationRequests.offer({
               threadId: ThreadId.make(owner.threadId),
               providerThreadId: ProviderThreadId.make(owner.providerThreadId),
@@ -357,7 +422,32 @@ export const BobDriver: ProviderDriver<
         selfInvocation,
         onAvailableCommands,
         onAvailableModes,
-        autoJudge: autoJudge.judge,
+        autoJudge,
+        holdAutoJudge: Effect.acquireRelease(
+          Effect.sync(() => {
+            if (judgeHolders++ === 0) currentJudge = makeJudge();
+          }),
+          () => releaseJudge,
+        ).pipe(Effect.asVoid),
+        rules: {
+          get: serverSettings.getSettings.pipe(
+            Effect.map(savedRules),
+            Effect.orElseSucceed(() => ({ rules: [], scope: "thread" as const })),
+          ),
+          subscribe: serverSettings.subscribeChanges.pipe(Effect.map(Stream.map(savedRules))),
+          // Applied to the saved rules under the settings lock, beside edits from Settings.
+          add: (rule, scope) =>
+            serverSettings
+              .updateSettings({ bobRuleScope: scope, bobRuleChanges: { add: [rule] } })
+              .pipe(
+                Effect.as(true),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Could not save a Bob permission rule", cause).pipe(
+                    Effect.as(false),
+                  ),
+                ),
+              ),
+        },
         // Bob reads its model setting on every turn, so the window follows it. That window is
         // assumed, so a context larger than it proves it wrong and is reported without one.
         readTaskUsage: (sessionId) =>

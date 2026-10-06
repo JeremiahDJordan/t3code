@@ -387,6 +387,9 @@ export const layerExecutor: Layer.Layer<
                 ...(effect.request.decision === undefined
                   ? {}
                   : { decision: effect.request.decision }),
+                ...(effect.request.optionId === undefined
+                  ? {}
+                  : { optionId: effect.request.optionId }),
                 ...(effect.request.answers === undefined
                   ? {}
                   : { answers: effect.request.answers }),

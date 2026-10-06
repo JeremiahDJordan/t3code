@@ -68,10 +68,15 @@ that don't define it.
 Tool approvals follow [Permission modes](./permission-modes.md). On macOS, outside **Full
 access**, Bob's commands run in a sandbox, as Codex's do: they read anywhere but the hidden
 files and folders in your home folder and app data in `~/Library`, where tools keep
-credentials, apart from toolchain folders such as `~/.cargo` or `~/.config` and the `bin`
-folders on your `PATH`; they write only in the project and temporary folders, with `.git`, `.env` files
-and agent settings kept read-only, and reach no network, not even servers on your Mac. A
-command you approve runs outside the sandbox, once.
+credentials, apart from toolchain folders such as `~/.cargo` or `~/.config/git` and the `bin`
+folders on your `PATH`; they write only in the project and temporary folders, with `.git` and
+agent settings kept read-only, and reach no network, not even servers on your Mac. They cannot
+read the project's `.env` files, apart from samples such as `.env.example` (one that is a symlink
+to a file named otherwise stays readable), nor see environment
+variables named like credentials, such as `GH_TOKEN` or `OPENAI_API_KEY`, whose names hold
+`KEY`, `SECRET`, `TOKEN`, `PASSWORD` or `CREDENTIAL`, approved commands included. A command you
+approve runs outside the sandbox, once, in the folder it asked for; the card's **Approve** says
+so.
 
 - **Supervised** runs commands that only read, such as `ls`, `git status` or `rg`, in a
   sandbox that writes only temporary files, and asks before Bob's other commands and its
@@ -82,22 +87,42 @@ command you approve runs outside the sandbox, once.
   pushes, installing packages, network tools such as `curl`, commands that run in the
   background, and commands T3 Code cannot read with certainty, such as one using `$VARIABLES`.
 - **Auto** works as Auto-accept edits, and a reviewer model checks web searches and fetches of
-  public pages, skills and GitHub reads with `gh` against the messages you wrote. When it finds
-  the call requested and not risky, the call runs; otherwise, when you have written nothing it
-  can judge against, or when it does not answer within a few seconds, you are asked.
+  public pages, skills and GitHub reads with `gh` against the last six messages you wrote. It
+  also keeps each sentence you type that limits what Bob may do, such as "don't search the web
+  for this", or allows it something, such as "you can search the web again", so it holds after
+  its message is older than six, until T3 Code restarts; when there are many, the oldest go
+  first. A permission stops counting once a later message sets any limit, and attachments are
+  never read for either. A long message is read for those sentences before the reviewer sees
+  it shortened. What the reviewer takes from each message, each call Auto answers or asks
+  about, and your answer, are kept in T3 Code's trace file,
+  `~/.t3/userdata/logs/server.trace.ndjson`. When it finds the call requested and not risky,
+  the call runs; otherwise, when you have written nothing it can judge against, or when it
+  does not answer within a few seconds, you are asked. To have Auto ask before every web
+  search, fetch, GitHub read and skill in one thread, pick **Always ask** in the **Auto
+  network** option beside the model.
 - **Full access** lets Bob approve every tool call itself, without a sandbox.
 
 A command that needs the network or writes outside the project fails in the sandbox: a test
 that starts a server, a tool that keeps a cache outside the project, such as Go's, or one that
 reads its settings in a hidden folder of your home folder. When the sandbox stops a command,
-the next time Bob runs it you are asked, so you can let it run outside; ask Bob to try again. Bob's own todo list and subagents run in every mode; a subagent's
-tool calls are checked the same way. **Always allow this session** stops Bob asking about that
-tool, and its commands still run in the sandbox. In every mode Bob reads and searches files
-with its own tools without asking.
+the next time Bob runs it you are asked, so you can let it run outside; ask Bob to try again.
+Bob's own todo list and subagents run in every mode; a subagent's tool calls are checked the
+same way. For commands and edits a card offers a rule instead of **Always allow for this task**,
+which Bob would apply to every later call of that tool; for Bob's other tools it stops Bob
+asking about that tool for the rest of the thread's Bob task, even after T3 Code restarts.
 
-Without a sandbox, for now on Linux, **Supervised** and **Auto-accept edits** ask before every
-command, and **Auto** runs commands that only read, has the reviewer model check file commands
-such as `mkdir` or `mv` as well, and asks before the project's tests and builds.
+Bob's own approval settings apply in T3 Code, in every mode, **Supervised** included. Bob reads
+and searches files with its own tools without asking, and runs the commands it approves by
+default without a card: `cat`, `git diff`, `git log`, `git rev-parse`, `git show`,
+`git status`, `grep`, `head`, `tail`, `ls`, `sort`, `wc`, `which`, `du` and `df`. Outside
+**Full access** these commands still run in the sandbox. Anything you add to Bob's approvals,
+and approvals you saved on a task in Bob itself, also run without a card. No setting in T3 Code
+stops this. Bob also refuses to use its tools outside the project folder, in every mode, unless
+you turn on **Allow outside workspace tool requests** in Bob's settings; text files you attach
+reach Bob inside your message, so it can still read them.
+
+Without a sandbox, for now on Linux, every mode but **Full access** asks before every command,
+apart from those your rules let run without asking.
 
 Choose the reviewer in the Bob instance's **Auto mode reviewer** setting under
 **Settings → Providers**. **Apple's on-device model** is the default; it needs Apple
@@ -105,8 +130,8 @@ Intelligence on macOS 26 or later and the Xcode command line tools, and T3 Code 
 small helper for it the first time Auto runs. **OpenAI-compatible endpoint** asks a model
 you run, such as one in Ollama at `http://localhost:11434/v1`; set **Reviewer endpoint**
 and **Reviewer model**, and put a key, if the endpoint needs one, in the instance's
-`BOB_AUTO_REVIEW_API_KEY` environment variable. **Rules only** asks you about every call
-the rules leave to review.
+`BOB_AUTO_REVIEW_API_KEY` environment variable. Only Auto sends your messages to the reviewer.
+**Rules only** asks you about every call the rules leave to review.
 
 A message you send while Bob is working follows **Settings → General → Follow-up
 behavior**. Queue holds it until Bob finishes its turn. Steer lets Bob finish the
@@ -117,6 +142,39 @@ writing. **Stop** still stops Bob at once.
 If Bob ends a turn without replying, which its backend sometimes does with a long
 conversation, the thread says so and offers **Retry**, which sends your message
 again.
+
+### Permission rules
+
+Rules change what Bob may do without asking, outside **Full access**:
+
+- **Run without asking**: commands starting with these words, such as `git commit`, run
+  outside the sandbox without asking.
+- **Always ask**: commands starting with these words always ask, even in the sandbox.
+- **Commands may read** and **Commands may write in**: folders the sandbox opens, such as a
+  tool's settings in `~/.vercel` or a cache in `~/Library/Caches/go-build`. A folder that
+  holds your home folder, or the home folder itself, only opens for reading: writing there
+  would let commands replace tools that run outside the sandbox. A rule for a path that
+  passes through a symlink, below your home folder, the project's folder or anywhere else,
+  opens nothing, since a command could have made the link; name the folder it points to.
+- **Keep private**: paths commands never read or write, and Bob's own edits of them ask. Bob's
+  own reads still go through, since Bob does not ask before them.
+
+An approval card can add a rule: when a command asks, the card offers to run commands
+starting the same way without asking, and when the sandbox stopped a command at a folder, to
+open that folder. Pick where the rule applies, this thread, this project or every project,
+from the button's menu; the card offers the place you picked last first. The card offers no
+rule for commands that can run anything, such as `bash`, `node`, `npx` or `curl`, nor folders
+beyond a tool's own, such as all of `~/Library`, app data or an agent's folder, and warns that a rule for the project's own scripts, such as
+`npm run build`, lets Bob's changes to them run outside the sandbox.
+
+See and remove rules, a thread's included, and add rules for a project or every project, in
+the Bob instance's **Permission rules** under **Settings → Providers**. They apply to every Bob
+instance on that environment. A path starting with `./` is in the project's folder, so a
+project's rule follows each thread into its worktree. A rule that opens a folder never opens
+a credential store or app data in it, such as `~/.cargo/credentials.toml`, nor a `.env` file;
+name the file itself to open it. A rule to run commands without asking applies only to
+commands that run in the project's folder, on paths in it, with no variables set before them,
+and not in the background.
 
 ## Keep Bob running when T3 Code restarts
 
