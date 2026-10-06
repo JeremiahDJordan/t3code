@@ -23,6 +23,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { BOB_API_KEY_REQUIRED_MESSAGE } from "./acp/BobAcpSupport.ts";
+import { BOB_NETWORK_OPTION_ID } from "./acp/bobAutoJudge.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import {
   BOB_MODE_OPTION_ID,
@@ -52,6 +53,19 @@ describe("buildInitialBobProviderSnapshot", () => {
       const snapshot = yield* buildInitialBobProviderSnapshot(decodeBobSettings({}));
       expect(snapshot.enabled).toBe(false);
       expect(snapshot.status).toBe("disabled");
+    }),
+  );
+
+  it.effect("offers the Auto network choice only while the instance has a reviewer", () =>
+    Effect.gen(function* () {
+      const optionIds = (autoReviewer: "apple" | "off") =>
+        buildInitialBobProviderSnapshot(decodeBobSettings({ enabled: true, autoReviewer })).pipe(
+          Effect.map((snapshot) =>
+            snapshot.models[0]?.capabilities?.optionDescriptors?.map((option) => option.id),
+          ),
+        );
+      expect(yield* optionIds("apple")).toEqual([BOB_NETWORK_OPTION_ID]);
+      expect(yield* optionIds("off")).toEqual([]);
     }),
   );
 

@@ -226,7 +226,7 @@ export function useSelectedThreadRequests() {
   );
 
   const onRespondToApproval = useCallback(
-    async (requestId: RuntimeRequestId, decision: ProviderApprovalDecision) => {
+    async (requestId: RuntimeRequestId, decision: ProviderApprovalDecision, optionId?: string) => {
       if (
         !selectedThreadShell ||
         !readEnvironmentScope(selectedThreadShell.environmentId, AuthOrchestrationOperateScope)
@@ -247,6 +247,7 @@ export function useSelectedThreadRequests() {
           threadId: selectedThreadShell.id,
           requestId,
           decision,
+          ...(optionId === undefined ? {} : { optionId }),
         },
       });
       setRespondingApprovalId((current) => (current === requestId ? null : current));

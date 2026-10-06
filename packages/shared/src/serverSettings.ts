@@ -18,6 +18,7 @@ import {
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
+  sameBobRule,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -397,6 +398,20 @@ function translateLegacyProjectOverridePatch(
   } as ServerSettingsPatch;
 }
 
+/** The saved Bob rules with some removed and others added, each once. */
+function applyBobRuleChanges(
+  rules: ServerSettings["bobRules"],
+  changes: NonNullable<ServerSettingsPatch["bobRuleChanges"]>,
+): ServerSettings["bobRules"] {
+  const kept = rules.filter(
+    (rule) => !(changes.remove ?? []).some((gone) => sameBobRule(gone, rule)),
+  );
+  for (const rule of changes.add ?? []) {
+    if (!kept.some((saved) => sameBobRule(saved, rule))) kept.push(rule);
+  }
+  return kept;
+}
+
 export function applyServerSettingsPatch(
   current: ServerSettings,
   rawPatch: ServerSettingsPatch,
@@ -424,6 +439,8 @@ export function applyServerSettingsPatch(
     // Already translated into `projectSettingsOverrides` above; the legacy
     // maps are derived views and must never be merged directly.
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
+    // Applied to the saved rules, not merged.
+    bobRuleChanges,
     projectAutoPullOverrides: _legacyAutoPull,
     projectScriptOverrides: _legacyScripts,
     ...patchForMerge
@@ -579,6 +596,9 @@ export function applyServerSettingsPatch(
             ),
           },
         }
+      : {}),
+    ...(bobRuleChanges !== undefined
+      ? { bobRules: applyBobRuleChanges(current.bobRules, bobRuleChanges) }
       : {}),
     ...(projectSettingsOverridesPatch !== undefined
       ? {

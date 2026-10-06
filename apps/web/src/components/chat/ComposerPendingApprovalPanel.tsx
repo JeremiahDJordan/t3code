@@ -14,6 +14,7 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
   className,
 }: ComposerPendingApprovalPanelProps) {
   const Detail = approval.requestKind === "mcp-elicitation" ? "span" : "code";
+  const warning = approval.options?.find((option) => option.warning)?.warning;
   const fallbackLabel =
     approval.requestKind === "mcp-elicitation"
       ? "App access approval"
@@ -63,6 +64,8 @@ export const ComposerPendingApprovalPanel = memo(function ComposerPendingApprova
           ? "Provider process is gone — interrupt or restart the run to respond."
           : approval.detail || fallbackLabel}
       </Detail>
+      {/* Shown as text too, since a touch screen never shows the buttons' tooltips. */}
+      {warning ? <span className="text-2xs text-warning">{warning}</span> : null}
     </span>
   );
 });
