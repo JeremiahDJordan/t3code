@@ -10,9 +10,9 @@ import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
-import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import {
   BOB_DEFAULT_MODEL,
   BobSettings,
@@ -22,8 +22,9 @@ import {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
-import { BOB_API_KEY_REQUIRED_MESSAGE } from "../acp/BobAcpSupport.ts";
-import { ProviderVersionCache } from "../providerMaintenance.ts";
+import { BOB_API_KEY_REQUIRED_MESSAGE } from "./acp/BobAcpSupport.ts";
+import { BOB_NETWORK_OPTION_ID } from "./acp/bobAutoJudge.ts";
+import { ProviderVersionCache } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
   BOB_MODE_OPTION_ID,
   BOB_SSO_UNCONFIRMED_MESSAGE,
@@ -34,7 +35,7 @@ import {
   makeBobUsageLimitsRefresh,
   MINIMUM_BOB_VERSION,
 } from "./BobProvider.ts";
-import { writeFakeCli } from "../../testUtils/fakeCli.ts";
+import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
 
@@ -52,6 +53,19 @@ describe("buildInitialBobProviderSnapshot", () => {
       const snapshot = yield* buildInitialBobProviderSnapshot(decodeBobSettings({}));
       expect(snapshot.enabled).toBe(false);
       expect(snapshot.status).toBe("disabled");
+    }),
+  );
+
+  it.effect("offers the Auto network choice only while the instance has a reviewer", () =>
+    Effect.gen(function* () {
+      const optionIds = (autoReviewer: "apple" | "off") =>
+        buildInitialBobProviderSnapshot(decodeBobSettings({ enabled: true, autoReviewer })).pipe(
+          Effect.map((snapshot) =>
+            snapshot.models[0]?.capabilities?.optionDescriptors?.map((option) => option.id),
+          ),
+        );
+      expect(yield* optionIds("apple")).toEqual([BOB_NETWORK_OPTION_ID]);
+      expect(yield* optionIds("off")).toEqual([]);
     }),
   );
 

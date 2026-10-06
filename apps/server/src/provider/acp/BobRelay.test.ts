@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { type BobRelayLink, makeBobRelays } from "./BobRelay.ts";
+import { type AdoptableBobRelay, type BobRelayLink, makeBobRelays } from "./BobRelay.ts";
 
 /** A link that records its spawn, for a host that records what it was asked to do. */
 function recordingLink(name: string, calls: Array<string>): BobRelayLink {
@@ -25,7 +25,7 @@ function recordingLink(name: string, calls: Array<string>): BobRelayLink {
 }
 
 describe("makeBobRelays", () => {
-  it.effect("takes over a Bob that approves its own tools only in Full access", () =>
+  it.effect("takes over a Bob only in the mode it was started for", () =>
     Effect.gen(function* () {
       const calls: Array<string> = [];
       const relays = makeBobRelays({
@@ -37,16 +37,24 @@ describe("makeBobRelays", () => {
           kill: (relayId) => Effect.sync(() => void calls.push(`stop ${relayId}`)),
         },
         instanceId: "bob",
-        adoptable: new Map([
-          ["task-1", { relayId: "relay-1", autoApprove: true }],
-          ["task-2", { relayId: "relay-2", autoApprove: true }],
-          ["task-3", { relayId: "relay-3", autoApprove: false }],
+        adoptable: new Map<string, AdoptableBobRelay>([
+          ["task-1", { relayId: "relay-1", autoApprove: true, mode: "full-access" }],
+          ["task-2", { relayId: "relay-2", autoApprove: true, mode: "full-access" }],
+          ["task-3", { relayId: "relay-3", autoApprove: false, mode: "auto-accept-edits" }],
+          ["task-4", { relayId: "relay-4", autoApprove: false, mode: "auto" }],
+          // Started by an older T3, which did not record its mode.
+          ["task-5", { relayId: "relay-5", autoApprove: false }],
         ]),
         ready: Effect.void,
       });
-      const spawn = (resumeSessionId: string, autoApprove: boolean) =>
+      const spawn = (resumeSessionId: string, mode: string) =>
         relays
-          .linkFor({ cwd: "/workspace", resumeSessionId, autoApprove })
+          .linkFor({
+            cwd: "/workspace",
+            resumeSessionId,
+            autoApprove: mode === "full-access",
+            mode,
+          })
           .spawner.spawn(ChildProcess.make("bob", ["acp"]))
           .pipe(
             Effect.scoped,
@@ -54,12 +62,14 @@ describe("makeBobRelays", () => {
           );
 
       // After a switch out of Full access, its Bob stops and one that asks starts instead.
-      assert.deepEqual(yield* spawn("task-1", false), ["stop relay-1", "start"]);
-      assert.deepEqual(yield* spawn("task-2", true), ["attach relay-2"]);
-      // A Bob that asks may be taken over in any mode.
-      assert.deepEqual(yield* spawn("task-3", false), ["attach relay-3"]);
+      assert.deepEqual(yield* spawn("task-1", "auto"), ["stop relay-1", "start"]);
+      assert.deepEqual(yield* spawn("task-2", "full-access"), ["attach relay-2"]);
+      // After any other switch too, since its commands run under the old mode's sandbox profile.
+      assert.deepEqual(yield* spawn("task-3", "approval-required"), ["stop relay-3", "start"]);
+      assert.deepEqual(yield* spawn("task-4", "auto"), ["attach relay-4"]);
+      assert.deepEqual(yield* spawn("task-5", "approval-required"), ["attach relay-5"]);
       // Each relay is taken over once.
-      assert.deepEqual(yield* spawn("task-2", true), ["start"]);
+      assert.deepEqual(yield* spawn("task-2", "full-access"), ["start"]);
     }),
   );
 });

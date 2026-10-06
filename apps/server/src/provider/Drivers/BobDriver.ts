@@ -9,6 +9,8 @@
  * @module provider/Drivers/BobDriver
  */
 import {
+  type BobRule,
+  type BobRuleScope,
   BobSettings,
   ProviderDriverKind,
   ProviderThreadId,
@@ -25,21 +27,23 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import * as Stream from "effect/Stream";
+import { HttpClient } from "effect/http";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeBobAdapterV2 } from "../../orchestration-v2/Adapters/BobAdapterV2.ts";
-import * as IdAllocator from "../../orchestration-v2/IdAllocator.ts";
-import * as ProviderContinuationRequests from "../../orchestration-v2/ProviderContinuationRequests.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/continuationRequests";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeBobTextGeneration } from "../../textGeneration/BobTextGeneration.ts";
 import * as ProcessRunner from "../../processRunner.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
-import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
-import { makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
+import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
+import { type BobAutoJudge, makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
 import {
   type AdoptableBobRelay,
   bobRelayHasTurn,
@@ -55,34 +59,34 @@ import {
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
   withBobSessionHostStatus,
-} from "../Layers/BobProvider.ts";
-import * as ProviderEventLoggers from "../Layers/ProviderEventLoggers.ts";
-import { readBobSubagentTranscript } from "../Layers/bobSubagentTranscript.ts";
+} from "../BobProvider.ts";
+import * as ProviderEventLoggers from "../ProviderEventLoggers.ts";
+import { readBobSubagentTranscript } from "../bobSubagentTranscript.ts";
 import {
   readBobConfiguredModel,
   readBobPinnedTeams,
   readBobUsageLimits,
   readBobUsageProfile,
-} from "../Layers/bobUsageLimits.ts";
+} from "../bobUsageLimits.ts";
 import {
   bobContextWindow,
   readBobTaskCosts,
   resolveBobTaskDatabasePath,
-} from "../Layers/bobTaskUsage.ts";
-import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+} from "../bobTaskUsage.ts";
+import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   type ProviderContinuationIdentity,
   type ProviderDriver,
   type ProviderInstance,
-} from "../ProviderDriver.ts";
-import { withInstanceIdentity } from "./instanceIdentity.ts";
-import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+} from "@t3tools/provider-core/server/driver";
+import { withInstanceIdentity } from "@t3tools/provider-core/server/instanceIdentity";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
-} from "../providerUpdateSettings.ts";
+} from "@t3tools/provider-core/server/snapshotSettings";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
 const decodeBobSettingsOption = Schema.decodeUnknownOption(BobSettings);
@@ -93,19 +97,10 @@ const MAINTENANCE_CAPABILITIES = makeManualOnlyProviderMaintenanceCapabilities({
   packageName: null,
 });
 
-/**
- * The Bob instances set to run Bob in tmux: those whose relays are theirs to take back. The
- * built-in instance takes its settings from `providers.bob` unless `providerInstances` has it.
- */
+/** The Bob instances set to run Bob in tmux: those whose relays are theirs to take back. */
 function tmuxBobInstanceIds(settings: ServerSettings): ReadonlySet<string> {
-  const instances: Record<string, { readonly driver: string; readonly config?: unknown }> = {
-    ...(!Object.hasOwn(settings.providerInstances, DRIVER_KIND)
-      ? { [DRIVER_KIND]: { driver: DRIVER_KIND, config: settings.providers.bob } }
-      : {}),
-    ...settings.providerInstances,
-  };
   return new Set(
-    Object.entries(instances).flatMap(([instanceId, instance]) =>
+    Object.entries(settings.providerInstances).flatMap(([instanceId, instance]) =>
       instance.driver === DRIVER_KIND &&
       Option.exists(
         decodeBobSettingsOption(instance.config ?? {}),
@@ -133,6 +128,7 @@ export type BobDriverEnv =
   | IdAllocator.IdAllocatorV2
   | Path.Path
   | ProviderEventLoggers.ProviderEventLoggers
+  | ProviderHost.ProviderHost
   | ServerConfig
   | ServerSettingsService;
 
@@ -153,7 +149,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettingsService;
-      const serverConfig = yield* ServerConfig;
+      const host = yield* ProviderHost.ProviderHost;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const loggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
@@ -184,7 +180,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
               const tmux = yield* TmuxServer.make.pipe(
                 Effect.provideServiceEffect(ProcessRunner.ProcessRunner, ProcessRunner.make()),
               );
-              return yield* makeBobRelayHost({ tmux, stateDir: serverConfig.stateDir });
+              return yield* makeBobRelayHost({ tmux, stateDir: host.paths.stateDir });
             }).pipe(
               Effect.mapError(
                 (cause) =>
@@ -225,7 +221,7 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       );
 
-      const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
+      const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, host.settings);
       const managedSnapshot = yield* makeManagedServerProvider<
         ProviderSnapshotSettings<BobSettings>
       >({
@@ -278,15 +274,47 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       const driverScope = yield* Effect.scope;
       // In Auto, the model that judges the tool calls the rules leave to what the user asked.
       const runFork = Effect.runForkWith(yield* Effect.context<never>());
-      const autoJudge = makeBobAutoJudgeForSettings({
-        settings: effectiveConfig,
-        environment: processEnv,
-        cacheDir: serverConfig.providerStatusCacheDir,
-        platform: yield* HostProcessPlatform,
-        httpClient,
-        log: (message) => void runFork(Effect.logWarning(message)),
+      const judgePlatform = yield* HostProcessPlatform;
+      const makeJudge = () =>
+        makeBobAutoJudgeForSettings({
+          settings: effectiveConfig,
+          environment: processEnv,
+          cacheDir: host.paths.providerStatusCacheDir,
+          platform: judgePlatform,
+          httpClient,
+          log: (message) => void runFork(Effect.logWarning(message)),
+        });
+      // A settings change rebuilds this driver while Bob's open sessions keep its adapter, so the
+      // reviewer closes once the driver and every Bob runtime holding it are done, and a runtime
+      // such a session starts later gets a new one.
+      let currentJudge = makeJudge();
+      let judgeHolders = 1;
+      const releaseJudge = Effect.suspend(() =>
+        --judgeHolders === 0 ? currentJudge.close : Effect.void,
+      );
+      yield* Scope.addFinalizer(driverScope, releaseJudge);
+      const firstJudge = currentJudge.judge;
+      const autoJudge: BobAutoJudge | undefined = firstJudge && {
+        name: firstJudge.name,
+        judge: (input) =>
+          Effect.suspend(
+            () =>
+              currentJudge.judge?.judge(input) ??
+              Effect.succeed({ decision: "ask" as const, reason: "no reviewer" }),
+          ),
+        extract: (text) =>
+          Effect.suspend(() => currentJudge.judge?.extract?.(text) ?? Effect.succeed(undefined)),
+        warm: Effect.suspend(() => currentJudge.judge?.warm ?? Effect.void),
+      };
+      // The user's permission rules, shared by every Bob instance and kept apart from this
+      // instance's settings, so a rule a card adds neither restarts Bob nor waits for a new thread.
+      const savedRules = (settings: {
+        bobRules: ReadonlyArray<BobRule>;
+        bobRuleScope: BobRuleScope;
+      }) => ({
+        rules: settings.bobRules,
+        scope: settings.bobRuleScope,
       });
-      yield* Scope.addFinalizer(driverScope, autoJudge.close);
       // Bob's relays from before this start: those no instance runs any more stop, this
       // instance's idle ones stop, and each still running a prompt gets a run to finish it in.
       const adoptable = new Map<string, AdoptableBobRelay>();
@@ -313,7 +341,11 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
               yield* relayHost.kill(relayId);
               continue;
             }
-            adoptable.set(meta.sessionId, { relayId, autoApprove: meta.autoApprove === true });
+            adoptable.set(meta.sessionId, {
+              relayId,
+              autoApprove: meta.autoApprove === true,
+              mode: meta.mode,
+            });
             if (meta.threadId !== undefined && meta.providerThreadId !== undefined) {
               owners.push({ threadId: meta.threadId, providerThreadId: meta.providerThreadId });
             }
@@ -359,11 +391,36 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         crypto,
         fileSystem,
         idAllocator,
-        serverConfig,
+        host,
         selfInvocation,
         onAvailableCommands,
         onAvailableModes,
-        autoJudge: autoJudge.judge,
+        autoJudge,
+        holdAutoJudge: Effect.acquireRelease(
+          Effect.sync(() => {
+            if (judgeHolders++ === 0) currentJudge = makeJudge();
+          }),
+          () => releaseJudge,
+        ).pipe(Effect.asVoid),
+        rules: {
+          get: serverSettings.getSettings.pipe(
+            Effect.map(savedRules),
+            Effect.orElseSucceed(() => ({ rules: [], scope: "thread" as const })),
+          ),
+          subscribe: serverSettings.subscribeChanges.pipe(Effect.map(Stream.map(savedRules))),
+          // Applied to the saved rules under the settings lock, beside edits from Settings.
+          add: (rule, scope) =>
+            serverSettings
+              .updateSettings({ bobRuleScope: scope, bobRuleChanges: { add: [rule] } })
+              .pipe(
+                Effect.as(true),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Could not save a Bob permission rule", cause).pipe(
+                    Effect.as(false),
+                  ),
+                ),
+              ),
+        },
         // Bob reads its model setting on every turn, so the window follows it. That window is
         // assumed, so a context larger than it proves it wrong and is reported without one.
         readTaskUsage: (sessionId) =>

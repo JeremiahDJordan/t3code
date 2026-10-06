@@ -58,6 +58,12 @@ export type ProviderApprovalDecision = typeof ProviderApprovalDecision.Type;
 
 export const ProviderApprovalOption = Schema.Struct({
   decision: ProviderApprovalDecision,
+  /**
+   * Tells apart choices that share a decision, such as one rule offered for a thread, a project
+   * or every project; the response names it. Clients show such choices as one split button,
+   * the first as its main action, keeping each label's end, where it says how it differs.
+   */
+  optionId: Schema.optional(TrimmedNonEmptyString),
   label: TrimmedNonEmptyString,
   /** Provider-supplied caution shown next to the option, such as a prompt injection warning. */
   warning: Schema.optional(TrimmedNonEmptyString),

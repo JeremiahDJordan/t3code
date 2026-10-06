@@ -1,12 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off
 /**
- * The rules T3's Auto mode reviews a Bob tool call by, before Bob runs it.
+ * The rules T3 reviews a Bob tool call by, before Bob runs it, in the thread's permission mode.
  *
- * Bob asks about every tool call but its reads, and T3 answers. In Auto, a call these rules find
- * routine runs without the user: a command that only reads, an edit inside the workspace away
- * from settings and secrets, a todo list update, or a subagent, whose own tool calls come here in
- * turn. A call that may be routine for the task, such as running the project's tests or a web
- * search, is left to review against what the user asked for. Everything else asks the user, and
+ * Bob asks about every tool call but its reads, and T3 answers. A call these rules find routine
+ * for the mode runs without the user: a command the sandbox bounds, an edit inside the workspace
+ * away from settings and secrets, a todo list update, or a subagent, whose own tool calls come
+ * here in turn. In Auto, a call that may be routine for the task, such as a web search, is left to
+ * review against what the user asked for. The user's own rules add commands that run outside the
+ * sandbox without asking, commands that always ask, and paths. Everything else asks the user, and
  * so does anything the rules cannot read with certainty: a false ask costs a click, a false allow
  * can cost the machine.
  *
@@ -25,7 +26,31 @@ export interface BobAutoReview {
   readonly verdict: BobAutoVerdict;
   /** Why, in a few words, for logs and for a reviewer. */
   readonly reason: string;
+  /** A command the user's rule lets run outside the sandbox. */
+  readonly outside?: true;
 }
+
+/** The user's rules for a thread, with paths absolute. */
+export interface BobUserRules {
+  /** Commands starting with these words run outside the sandbox without asking. */
+  readonly allowCommands: ReadonlyArray<string>;
+  /** Commands starting with these words always ask. */
+  readonly askCommands: ReadonlyArray<string>;
+  /** Folders commands may read. */
+  readonly read: ReadonlyArray<string>;
+  /** Folders commands may write in. */
+  readonly write: ReadonlyArray<string>;
+  /** Paths commands never touch, and Bob's own reads and edits of them ask. */
+  readonly private: ReadonlyArray<string>;
+}
+
+export const NO_BOB_USER_RULES: BobUserRules = {
+  allowCommands: [],
+  askCommands: [],
+  read: [],
+  write: [],
+  private: [],
+};
 
 const allow = (reason: string): BobAutoReview => ({ verdict: "allow", reason });
 const review = (reason: string): BobAutoReview => ({ verdict: "review", reason });
@@ -94,6 +119,9 @@ const PROTECTED_SEGMENTS = new Set([
   ".git",
   ".husky",
   ".githooks",
+  ".bob",
+  ".t3",
+  ".agents",
   ".claude",
   ".codex",
   ".cursor",
@@ -155,16 +183,18 @@ function canonicalPath(path: string): string | undefined {
   }
 }
 
-/** The workspace a call is reviewed against, and the user's home for `~`. */
+/** The workspace a call is reviewed against, the user's home for `~`, and the user's rules. */
 export interface BobAutoReviewContext {
   readonly workspace: string | null;
   readonly home?: string;
+  readonly rules?: BobUserRules;
 }
 
 class Places {
   private readonly home: string;
   private readonly realHome: string;
   readonly workspace: string | undefined;
+  readonly rules: BobUserRules;
   constructor(context: BobAutoReviewContext) {
     this.home = context.home ?? NodeOS.homedir();
     this.realHome = canonicalPath(this.home) ?? this.home;
@@ -172,6 +202,35 @@ class Places {
       context.workspace && NodePath.isAbsolute(context.workspace)
         ? canonicalPath(context.workspace)
         : undefined;
+    this.rules = context.rules ?? NO_BOB_USER_RULES;
+  }
+  /**
+   * Where `path` lies below one of `roots`: as written or resolved for a denial, so neither
+   * spelling slips past it, but only as resolved for a grant, so a symlink inside an opened
+   * folder cannot lead out of it. None outside them all.
+   */
+  private below(roots: ReadonlyArray<string>, path: string, grant: boolean): string | undefined {
+    const resolved = canonicalPath(path);
+    for (const root of roots) {
+      const real = canonicalPath(root) ?? root;
+      const found = grant
+        ? resolved && within(real, resolved)
+        : (within(root, path) ?? within(real, resolved ?? path));
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  /** Whether the user's rules keep `path` private. */
+  isPrivate(path: string): boolean {
+    return this.below(this.rules.private, path, false) !== undefined;
+  }
+  /** Where `path` lies in a folder the user's rules let commands write, or read. */
+  inRuleFolder(path: string, access: "read" | "write"): string | undefined {
+    return this.below(
+      access === "write" ? this.rules.write : [...this.rules.read, ...this.rules.write],
+      path,
+      true,
+    );
   }
   /** A path as written, from `base`, with `~` as the home folder; none for `~user`. */
   absolute(path: string, base: string): string | undefined {
@@ -202,9 +261,12 @@ class Places {
   namesSecret(word: string, base: string, shallow = false): boolean {
     const absolute = this.absolute(word, base);
     if (absolute === undefined) return namesSecret(word);
+    if (this.isPrivate(absolute)) return true;
     const relative = this.inWorkspace(absolute);
     if (relative !== undefined) return namesSecret(relative);
     const resolved = canonicalPath(absolute) ?? absolute;
+    // A folder the user let commands read holds nothing they count as secret.
+    if (this.inRuleFolder(absolute, "read") !== undefined) return false;
     if (namesSecret(word) || namesSecret(resolved)) return true;
     const fromHome = within(this.realHome, resolved);
     if (fromHome !== undefined) {
@@ -230,11 +292,15 @@ function within(root: string, path: string): string | undefined {
     : relative;
 }
 
-/** A path a call writes: in the workspace, and neither a secret nor protected. */
+/**
+ * A path a call writes: in the workspace or a folder the user lets commands write, and neither a
+ * secret nor protected.
+ */
 function reviewWrite(places: Places, path: string, base: string, verb: string): BobAutoReview {
   const absolute = places.absolute(path, base);
   if (absolute === undefined) return ask(`${verb} a path the rules cannot resolve`);
-  const relative = places.inWorkspace(absolute);
+  if (places.isPrivate(absolute)) return ask(`${verb} a path the user keeps private`);
+  const relative = places.inWorkspace(absolute) ?? places.inRuleFolder(absolute, "write");
   if (relative === undefined) return ask(`${verb} outside the workspace`);
   if (namesSecret(relative)) return ask(`${verb} secrets or settings`);
   if (namesProtected(relative))
@@ -359,6 +425,119 @@ function simpleCommands(tokens: ReadonlyArray<Token>): ReadonlyArray<SimpleComma
   if (words.length === 0) return undefined;
   commands.push({ words, piped: pipedIn });
   return commands;
+}
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/** A rule's words, as the lexer reads a command; none for a rule it cannot read. */
+function ruleWords(rule: string): ReadonlyArray<string> | undefined {
+  const tokens = tokenize(rule);
+  if (!tokens || tokens.length === 0) return undefined;
+  const words: Array<string> = [];
+  for (const token of tokens) {
+    if (token.type !== "word" || token.word.globbed) return undefined;
+    words.push(token.word.text);
+  }
+  return words;
+}
+
+/**
+ * The first of the user's rules a command starts with. A rule to run commands without asking
+ * matches only the words as written, with no variables before them, which could change what the
+ * command runs; a rule to ask also matches past variables and by the program's file name, or
+ * its path when the rule gives one, in any case, so no spelling slips past it.
+ */
+function matchedRule(
+  words: ReadonlyArray<Word>,
+  rules: ReadonlyArray<string>,
+  loose = false,
+): string | undefined {
+  let index = 0;
+  if (loose) while (index < words.length && ASSIGNMENT.test(words[index]!.text)) index += 1;
+  const texts = words.slice(index).map((word) => word.text);
+  return rules.find((rule) => {
+    const expected = ruleWords(rule);
+    return (
+      expected !== undefined &&
+      expected.length <= texts.length &&
+      expected.every(
+        (word, at) => word === texts[at] || (loose && at === 0 && sameProgram(word, texts[0]!)),
+      )
+    );
+  });
+}
+
+/** Whether a command runs the program a rule names, in any case, as the Mac's file system ignores it. */
+function sameProgram(rule: string, program: string): boolean {
+  const name = rule.includes("/") ? program : NodePath.basename(program);
+  return name.toLowerCase() === rule.toLowerCase();
+}
+
+/**
+ * The user's rule that lets a command line run outside the sandbox without asking: every
+ * command in it starts with such a rule, none with a rule to ask, and none changes folder.
+ */
+function allowedByUserRule(
+  command: string,
+  cwd: string | undefined,
+  places: Places,
+): string | undefined {
+  const rules = places.rules;
+  if (rules.allowCommands.length === 0 || command.length > 2_000) return undefined;
+  // The rule was given for the project's commands: run in it, on paths in it. A `..` in the
+  // folder is refused, since resolving it drops a symlink before it, which the kernel follows.
+  if (cwd !== undefined && segmentsOf(cwd).includes("..")) return undefined;
+  const base = cwd === undefined ? places.workspace : places.absolute(cwd, places.workspace ?? "/");
+  if (base === undefined || places.inWorkspace(base) === undefined) return undefined;
+  const tokens = tokenize(command);
+  const commands = tokens ? simpleCommands(tokens) : undefined;
+  if (!commands) return undefined;
+  const matched: Array<string> = [];
+  for (const { words } of commands) {
+    if (words[0]!.text === "cd" || matchedRule(words, rules.askCommands, true) !== undefined) {
+      return undefined;
+    }
+    const rule = matchedRule(words, rules.allowCommands);
+    if (rule === undefined) return undefined;
+    // Any argument naming a path, as written or through a symlink, stays in the workspace. A glob
+    // or a `..`, which the shell and the kernel resolve past a symlink, is not checked but refused,
+    // as is a flag with a path run on, as in `-o/tmp/out`, where no rule can tell the path apart.
+    if (words.slice(1).some((word) => word.globbed)) return undefined;
+    const attached = (text: string) => text.startsWith("-") && !text.includes("=");
+    if (words.slice(1).some((word) => attached(word.text) && /[/~]/.test(word.text))) {
+      return undefined;
+    }
+    for (const word of pathLikeWords(words.slice(1))) {
+      if (places.namesSecret(word, base)) return undefined;
+      if (segmentsOf(word).includes("..")) return undefined;
+      const path = places.absolute(word, base);
+      if (path === undefined) return undefined;
+      const named = /[/~]/.test(word) || exists(path);
+      if (named && places.inWorkspace(path) === undefined) return undefined;
+    }
+    matched.push(rule);
+  }
+  return [...new Set(matched)].join(", ");
+}
+
+/** Whether anything is at `path`, a dangling symlink included. */
+function exists(path: string): boolean {
+  try {
+    NodeFS.lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether a command line holds a command the user's rules ask about. */
+export function asksByUserRule(command: string, rules: BobUserRules): boolean {
+  const tokens = tokenize(command);
+  const commands = tokens ? simpleCommands(tokens) : undefined;
+  return (
+    commands?.some(({ words }) => matchedRule(words, rules.askCommands, true) !== undefined) ??
+    false
+  );
 }
 
 /**
@@ -568,12 +747,16 @@ function writeTargets(words: ReadonlyArray<Word>): ReadonlyArray<string> {
   });
 }
 
-/** Every word and flag value of a command, any of which may be a path. */
+/** Every word and the value of each flag or `NAME=value`, any of which may be a path. */
 function pathLikeWords(words: ReadonlyArray<Word>): ReadonlyArray<string> {
-  return words.map((word) => /^--?[^=]+=(.*)$/.exec(word.text)?.[1] ?? word.text);
+  return words.map(
+    (word) => /^(?:--?[^=]+|[A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(word.text)?.[1] ?? word.text,
+  );
 }
 
 function reviewSimpleCommand(places: Places, command: SimpleCommand, base: string): BobAutoReview {
+  const rule = matchedRule(command.words, places.rules.askCommands, true);
+  if (rule !== undefined) return ask(`runs ${rule}, which the user's rule asks about`);
   const [name, ...args] = command.words;
   const program = name!.text;
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(program)) return ask("sets environment variables");
@@ -826,6 +1009,7 @@ const OUTSIDE_SANDBOX = new Set([
   "shred",
   "srm",
   "trash",
+  "truncate",
   "eval",
   "xargs",
   "exec",
@@ -862,8 +1046,29 @@ const WRAPPERS = new Set([
   "stdbuf",
   "setsid",
 ]);
-/** Wrapper flags that take the next word as their value. */
-const WRAPPER_VALUE_FLAGS = /^-(u|C|S|s|k|i|o|e|n)$/;
+/**
+ * Each wrapper's options: those taking the next word as their value, and those standing alone.
+ * Any other option asks, since the rules could not tell which word runs.
+ */
+const WRAPPER_FLAGS: Readonly<
+  Record<string, { readonly value?: RegExp; readonly plain?: RegExp }>
+> = {
+  env: {
+    value: /^-[uCP]$/,
+    plain: /^(-[i0v]+|-|--(ignore-environment|null|debug)|--(unset|chdir)=\S+)$/,
+  },
+  nice: { value: /^-n$/, plain: /^(-n?-?\d+|--adjustment=-?\d+)$/ },
+  timeout: {
+    value: /^-[sk]$/,
+    plain: /^(-v|--(preserve-status|foreground|verbose)|--(signal|kill-after)=\S+|-[sk]\S+)$/,
+  },
+  stdbuf: { value: /^-[ioe]$/, plain: /^(-[ioe]\S+|--(input|output|error)=\S+)$/ },
+  time: { value: /^-[fo]$/, plain: /^-[lphav]+$/ },
+  caffeinate: { value: /^-[wt]$/, plain: /^-[dimsu]+$/ },
+  arch: { value: /^-(arch|d|e)$/, plain: /^-(32|64|c|h|i386|x86_64h?|arm64e?)$/ },
+  setsid: { plain: /^(-[cfw]+|--(ctty|fork|wait))$/ },
+  command: { plain: /^-[pvV]+$/ },
+};
 /** Package managers that install the project's dependencies when run with no command. */
 const BARE_INSTALLERS = new Set(["yarn", "pnpm", "bun"]);
 
@@ -873,30 +1078,53 @@ function reviewSandboxedCommand(
   base: string,
   depth: number,
 ): BobAutoReview {
+  const rule = matchedRule(words, places.rules.askCommands, true);
+  if (rule !== undefined) return ask(`runs ${rule}, which the user's rule asks about`);
   let index = 0;
   // `FOO=1 npm test`: what the variables change, the sandbox bounds.
-  while (index < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[index]!.text)) index += 1;
+  while (index < words.length && ASSIGNMENT.test(words[index]!.text)) index += 1;
   const name = words[index];
   if (name === undefined) return allow("sets variables");
   const args = words.slice(index + 1);
   const texts = args.map((word) => word.text);
-  const program = NodePath.basename(name.text);
+  // The Mac's file system ignores case, so `RM` and `SH` run rm and sh.
+  const program = NodePath.basename(name.text).toLowerCase();
+  // zsh expands `=rm` to rm's path.
+  if (name.text.startsWith("=")) return ask("runs a command by a name the shell expands");
   if (pathLikeWords(args).some((word) => places.namesSecret(word, base))) {
     return ask("touches secrets or settings");
   }
   if (WRAPPERS.has(program)) {
-    // Whatever the wrapper runs, a command that needs more than the sandbox asks.
-    if (args.some((word) => OUTSIDE_SANDBOX.has(NodePath.basename(word.text)))) {
+    // `env -S` splits its value into a command line the rules do not see.
+    if (program === "env" && texts.some((text) => /^(-[A-Za-z]*S|--split-string)/.test(text))) {
+      return ask("runs env with a command line in one word");
+    }
+    // Whatever the wrapper runs, a command that needs more than the sandbox asks, as does one the
+    // user's rules ask about.
+    // The program it runs is reviewed in turn, in any case; this catches what the parse misses.
+    const asked = new Set(places.rules.askCommands.map((rule) => ruleWords(rule)?.[0]));
+    if (
+      args.some(
+        (word) =>
+          OUTSIDE_SANDBOX.has(NodePath.basename(word.text)) ||
+          asked.has(NodePath.basename(word.text)),
+      )
+    ) {
       return ask(`runs ${program} around a command that needs more than the sandbox`);
     }
     let rest = -1;
+    const flags = WRAPPER_FLAGS[program] ?? {};
     for (let index = 0; index < args.length; index += 1) {
       const text = args[index]!.text;
-      if (WRAPPER_VALUE_FLAGS.test(text)) {
+      if (flags.value?.test(text)) {
         index += 1;
         continue;
       }
-      if (text.startsWith("-") || /^[\d.]+[smhd]?$/.test(text) || text.includes("=")) continue;
+      // `--` ends the options; the next word runs.
+      if (text === "--" || flags.plain?.test(text)) continue;
+      if (text.startsWith("-")) return ask(`runs ${program} with an option the rules do not know`);
+      if (program === "env" && ASSIGNMENT.test(text)) continue;
+      if (program === "timeout" && /^[\d.]+[smhd]?$/.test(text)) continue;
       rest = index;
       break;
     }
@@ -906,11 +1134,23 @@ function reviewSandboxedCommand(
   }
   if (OUTSIDE_SANDBOX.has(program))
     return ask(`runs ${program}, which needs more than the sandbox`);
+  // Moving work out of the workspace takes it away as `rm` would.
+  if (program === "mv") {
+    const moved = texts.filter((text) => !text.startsWith("-"));
+    const destination = moved.length >= 2 ? places.absolute(moved.at(-1)!, base) : base;
+    if (destination === undefined || places.inWorkspace(destination) === undefined) {
+      return ask("moves files out of the project");
+    }
+  }
   if (SHELLS.has(program)) {
-    const inline = texts.indexOf("-c");
+    // `-c` alone or among other short options, as in `bash -lc`; fish's `-C` runs a command too.
+    const inline = texts.findIndex((text) => /^-[A-Za-z]*c[A-Za-z]*$/.test(text));
+    if (texts.some((text) => /^(-[A-Za-z]*C|--(command|init-command))/.test(text))) {
+      return ask(`runs ${program} in a way the rules cannot follow`);
+    }
     if (inline < 0) return allow("runs a script in the sandbox");
     const script = texts[inline + 1];
-    return script === undefined || depth > 3
+    return script === undefined || script.startsWith("-") || depth > 3
       ? ask(`runs ${program} in a way the rules cannot follow`)
       : reviewSandboxedLine(places, script, base, depth + 1);
   }
@@ -922,9 +1162,13 @@ function reviewSandboxedCommand(
     return git.verdict === "allow" ? allow("reads the repository in the sandbox") : git;
   }
   if (program === "gh") {
+    // `--jq` and `--template` evaluate expressions that read the environment, outside the sandbox.
+    // Variables before it, such as `GH_PAGER`, or a wrapper around it change what runs outside.
+    if (index > 0 || depth > 0) return ask("reads from GitHub in a way that changes what runs");
     return ["pr", "issue", "run", "repo"].includes(texts[0] ?? "") &&
       GH_READS.has(texts[1] ?? "") &&
-      !texts.some((text) => /^(-[A-Za-z]*w[A-Za-z]*|--web(=.*)?)$/.test(text))
+      !texts.some((text) => /^(-[A-Za-z]*w[A-Za-z]*|--web(=.*)?)$/.test(text)) &&
+      !texts.some((text) => /^(-[A-Za-z]*[qt]|--jq|--template)/.test(text))
       ? review("reads from GitHub, outside the sandbox")
       : ask("acts on GitHub");
   }
@@ -964,6 +1208,11 @@ function reviewSandboxedLine(
     if (places.namesSecret(target!.text, base, true)) return ask("changes to a folder of secrets");
     base = next;
   }
+  // A read left to review runs outside the sandbox with the whole line, so it must stand alone:
+  // `gh pr view 1 | bash` would run what the pull request says as the user.
+  if (commands.length > 1 && reviews.some((entry) => entry.verdict === "review")) {
+    return ask("runs a read that needs the network with other commands");
+  }
   return strictest(reviews);
 }
 
@@ -982,6 +1231,264 @@ export function reviewBobCommandInSandbox(
   const start = cwd ?? places.workspace;
   if (start === undefined || !NodePath.isAbsolute(start)) return ask("no folder to run in");
   return reviewSandboxedLine(places, command, start, 0);
+}
+
+// --- Rules offered on a card -----------------------------------------------------------------
+
+/**
+ * Programs a card never offers a rule for, since a rule for one would run whatever it is given,
+ * or reach far past the project: shells, interpreters, wrappers, `sudo`, deleting, killing and
+ * the network. The user can still add one in Settings.
+ */
+const UNOFFERED_PROGRAMS = new Set([
+  ...SHELLS,
+  ...WRAPPERS,
+  "node",
+  "nodejs",
+  "python",
+  "python3",
+  "ruby",
+  "perl",
+  "php",
+  "lua",
+  "julia",
+  "Rscript",
+  "osascript",
+  "awk",
+  "gawk",
+  "mawk",
+  "nawk",
+  "sed",
+  "tsx",
+  "ts-node",
+  "tsm",
+  "babel-node",
+  "expect",
+  "find",
+  "parallel",
+  "watch",
+  "tmux",
+  "screen",
+  "script",
+  "vi",
+  "vim",
+  "nvim",
+  "emacs",
+  "ed",
+  "ex",
+  "pipx",
+  "gem",
+  "sudo",
+  "su",
+  "doas",
+  "eval",
+  "exec",
+  "xargs",
+  "source",
+  "npx",
+  "pnpx",
+  "bunx",
+  "uvx",
+  "rm",
+  "rmdir",
+  "dd",
+  "shred",
+  "srm",
+  "mkfs",
+  "kill",
+  "pkill",
+  "killall",
+  "chmod",
+  "chown",
+  "chflags",
+  "launchctl",
+  "open",
+  "security",
+  "defaults",
+  "ssh",
+  "scp",
+  "sftp",
+  "rsync",
+  "curl",
+  "wget",
+  "nc",
+  "ncat",
+  "socat",
+  "telnet",
+  "ftp",
+  // Whole cloud CLIs, which reach every resource the account can.
+  "aws",
+  "gcloud",
+  "az",
+  "helm",
+]);
+/** Programs whose next word picks what they do, so a rule names it too. */
+const SUBCOMMAND_PROGRAMS = new Set([
+  ...PACKAGE_MANAGERS,
+  "git",
+  "gh",
+  "docker",
+  "podman",
+  "kubectl",
+  "brew",
+  "pip",
+  "pip3",
+  "rustup",
+  "mise",
+  "make",
+  "just",
+  "task",
+  "gradle",
+  "mvn",
+  "terraform",
+]);
+/**
+ * Interpreters and multi-call tools by any version or spelling, such as `python3.12`, `node20`
+ * or `busybox`; matched lowercased, since the Mac's file system ignores case.
+ */
+const UNOFFERED_PROGRAM_PATTERN =
+  /^(python|pythonw|pypy|ipython|node|nodejs|ruby|jruby|irb|perl|raku|php|lua|luajit|r|rscript|julia|deno|bun|java|scala|groovy|kotlin|elixir|iex|erl|escript|ghc|ghci|runghc|tclsh|wish|pwsh|powershell|nu|xonsh|busybox|toybox|g?sed|g?awk|g?find|osascript|(ba|z|da|k|mk|pdk|a|fi|c|tc|ya)?sh)([-.]?\d[\d.]*)?(\.exe)?$/;
+/** Subcommands that run whatever they are given, or reach past the project. */
+const UNOFFERED_SUBCOMMANDS = new Set([
+  "gh alias",
+  "gh auth",
+  "gh secret",
+  "gh variable",
+  "gh extension",
+  "gh codespace",
+  "gh gist",
+  "gh repo delete",
+  "mise exec",
+  "mise x",
+  "mise run",
+  "mise watch",
+  "docker compose",
+  "podman compose",
+  "kubectl apply",
+  "kubectl delete",
+  "terraform apply",
+  "terraform destroy",
+  "brew install",
+  "pip install",
+  "pip3 install",
+  // Installing runs the package's own scripts.
+  "npm install",
+  "npm i",
+  "npm add",
+  "npm ci",
+  "pnpm add",
+  "pnpm install",
+  "pnpm i",
+  "yarn add",
+  "yarn install",
+  "bun add",
+  "bun install",
+  "bun i",
+  "cargo install",
+  "go install",
+  "uv pip",
+  "uv add",
+  "poetry add",
+  "poetry install",
+  "bundle add",
+  "bundle install",
+  "gh api",
+  "docker run",
+  "docker exec",
+  "podman run",
+  "podman exec",
+  "kubectl exec",
+  "npm exec",
+  "npm x",
+  "pnpm exec",
+  "pnpm dlx",
+  "yarn dlx",
+  "yarn exec",
+  "bun x",
+  "bun exec",
+  "vp exec",
+  "uv run",
+  "uv tool",
+  "deno run",
+  "deno eval",
+  "git config",
+]);
+/** Programs that run the project's own scripts or code, which Bob can edit. */
+const PROJECT_RUNNERS = new Set([
+  ...PACKAGE_MANAGERS,
+  "make",
+  "just",
+  "task",
+  "gradle",
+  "mvn",
+  "pytest",
+  "jest",
+  "vitest",
+  "mocha",
+  "tox",
+  "nox",
+  "rake",
+  "rspec",
+  "phpunit",
+]);
+const SUBCOMMAND = /^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
+
+/** A rule a card offers for the call it asks about, with a caution where it needs one. */
+export interface BobRuleSuggestion {
+  readonly kind: "allow-command" | "read" | "write";
+  /** The command's first words, or a folder. */
+  readonly value: string;
+  readonly warning?: string;
+}
+
+/**
+ * The rule a card offers for a command it asks about: the command's program, and the subcommand
+ * or script it runs, so later commands starting the same way run outside the sandbox without
+ * asking. None for a line of several commands, or for a program a rule would let do anything.
+ */
+export function suggestBobCommandRule(command: string): BobRuleSuggestion | undefined {
+  if (command.length > 2_000) return undefined;
+  const tokens = tokenize(command);
+  const commands = tokens ? simpleCommands(tokens) : undefined;
+  if (commands?.length !== 1) return undefined;
+  // A rule matches no command with variables before it, so none is offered for one.
+  const words = commands[0]!.words;
+  if (ASSIGNMENT.test(words[0]!.text)) return undefined;
+  const texts = words.map((word) => word.text);
+  const program = texts[0];
+  // The spelling an agent picks is the rule's, so an unusual case, which the Mac's file system
+  // runs as the usual program, gets none.
+  if (
+    program === undefined ||
+    words[0]!.globbed ||
+    !/^[a-z0-9][a-z0-9._+-]*$/.test(program) ||
+    UNOFFERED_PROGRAMS.has(program.toLowerCase()) ||
+    UNOFFERED_PROGRAM_PATTERN.test(program.toLowerCase())
+  ) {
+    return undefined;
+  }
+  const prefix = [program];
+  const next = () => {
+    const word = words[prefix.length];
+    if (word === undefined || word.globbed || !SUBCOMMAND.test(word.text)) return false;
+    prefix.push(word.text);
+    return true;
+  };
+  if (SUBCOMMAND_PROGRAMS.has(program.toLowerCase()) && !next()) return undefined;
+  // `npm run build` and `gh pr view` name what they run in their third word.
+  if ((PACKAGE_MANAGERS.has(program) && prefix[1] === "run") || program === "gh") {
+    if (!next()) return undefined;
+  }
+  if ([2, 3].some((length) => UNOFFERED_SUBCOMMANDS.has(prefix.slice(0, length).join(" ")))) {
+    return undefined;
+  }
+  return {
+    kind: "allow-command",
+    value: prefix.join(" "),
+    ...(PROJECT_RUNNERS.has(program)
+      ? { warning: "Runs the project's own scripts, which Bob can change, outside the sandbox." }
+      : {}),
+  };
 }
 
 // --- Tool calls -------------------------------------------------------------------------------
@@ -1058,7 +1565,31 @@ function publicPage(value: string): boolean {
     !/(^|[.-])\d{1,3}([.-]\d{1,3}){3}([.-]|$)/.test(host) &&
     !/\.(local|localdomain|internal|lan|home|corp|intranet|arpa)$/.test(host) &&
     !/(^|\.)(nip\.io|sslip\.io|xip\.io|localtest\.me|lvh\.me|vcap\.me|traefik\.me)$/.test(host) &&
-    plainText(decodeURIComponentSafe(`${url.pathname}${url.search}${url.hash}`), 300)
+    plainText(decodeURIComponentSafe(`${url.pathname}${url.search}${url.hash}`), 300) &&
+    !carriesSecret(url)
+  );
+}
+
+/** Words that say a search may hold a secret. */
+const SECRET_WORDS =
+  /\b(passwords?|passwd|passphrase|secrets?|tokens?|api[-_ ]?keys?|private[-_ ]?keys?|credentials?)\b/i;
+/** Query parameters that hold secrets by name. */
+const SECRET_PARAMETERS =
+  /^(token|access_token|id_token|refresh_token|api_?key|key|secret|password|passwd|auth|sig|signature|session|sessionid)$/i;
+
+/**
+ * Whether a URL's query or fragment may carry a secret: a parameter named like one, or a long
+ * value mixing letters and digits once separators are dropped, such as `AKIA-IOSF-ODNN-7EXA`.
+ */
+function carriesSecret(url: URL): boolean {
+  const tokenLike = (value: string) => {
+    const compact = value.replace(/[-_.~ ]/g, "");
+    return compact.length >= 16 && /\d/.test(compact) && /[A-Za-z]/.test(compact);
+  };
+  return (
+    [...url.searchParams].some(
+      ([name, value]) => SECRET_PARAMETERS.test(name) || tokenLike(value),
+    ) || tokenLike(decodeURIComponentSafe(url.hash.slice(1)))
   );
 }
 
@@ -1100,9 +1631,18 @@ export function reviewBobPermission(
         return ask("a command without a readable command line");
       }
       // A server or a watcher outlives the turn, and the sandbox would cut its network off.
-      if (raw.background === true) return ask("runs a command in the background");
-      if (!sandboxed)
-        return mode === "auto" ? reviewBobCommand(command, cwd, context) : ask("runs a command");
+      if (
+        raw.background === true ||
+        (typeof raw.background === "string" && !["", "false"].includes(raw.background))
+      ) {
+        return ask("runs a command in the background");
+      }
+      const rule = allowedByUserRule(command, cwd, new Places(context));
+      if (rule !== undefined) {
+        return { verdict: "allow", reason: `the user's rule runs ${rule}`, outside: true };
+      }
+      // Without a sandbox nothing bounds what a command does, whatever it looks like.
+      if (!sandboxed) return ask("runs a command without a sandbox");
       if (mode === "approval-required") {
         const read = reviewBobCommand(command, cwd, context);
         return read.verdict === "allow"
@@ -1117,7 +1657,14 @@ export function reviewBobPermission(
       if (mode === "approval-required") return ask("an edit");
       const places = new Places(context);
       if (places.workspace === undefined) return ask("an edit without a workspace");
-      const paths = editPaths(toolCall);
+      // A move writes wherever its other fields point, under whatever name Bob gives them.
+      const paths =
+        toolCall.kind === "move"
+          ? [
+              ...editPaths(toolCall),
+              ...Object.values(raw).filter((value) => typeof value === "string"),
+            ]
+          : editPaths(toolCall);
       if (paths.length === 0) return ask("an edit the rules cannot place");
       return strictest(paths.map((path) => reviewWrite(places, path, places.workspace!, "edits")));
     }
@@ -1125,7 +1672,9 @@ export function reviewBobPermission(
       if (!title.startsWith(BOB_WEB_SEARCH_TITLE) || !onlyKeys(raw, ["query", "max_results"])) {
         return ask("a tool Bob counts as a search");
       }
-      return typeof raw.query === "string" && plainText(raw.query, 200)
+      return typeof raw.query === "string" &&
+        plainText(raw.query, 200) &&
+        !SECRET_WORDS.test(raw.query)
         ? reviewed(review(`searches the web for ${JSON.stringify(raw.query)}`))
         : ask("searches the web for text that may carry a secret");
     case "fetch":

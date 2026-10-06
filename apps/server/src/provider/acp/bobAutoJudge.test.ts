@@ -12,6 +12,8 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import {
   AppleBobAutoJudge,
   appleBobAutoJudgeProgram,
+  bobRestrictionChunks,
+  bobMessageQuotes,
   bobAutoJudgePrompt,
   bobAutoJudgement,
   makeAppleBobAutoJudge,
@@ -19,31 +21,144 @@ import {
   readEndpointAnswer,
 } from "./bobAutoJudge.ts";
 
+/** Messages the user wrote, with their restrictions quoted or not. */
+const said = (...texts: ReadonlyArray<string>) => texts.map((text) => ({ text, extracted: false }));
+const quoted = (...texts: ReadonlyArray<string>) =>
+  texts.map((text) => ({ text, extracted: true }));
+/** Sentences the user wrote that forbid or allow the agent something. */
+const forbids = (text: string) => ({ kind: "forbids" as const, text });
+const allows = (text: string) => ({ kind: "allows" as const, text });
+
 describe("bobAutoJudgePrompt", () => {
-  it("shows the model the user's latest six messages whole, and the call", () => {
-    const call = "runs a command in the project folder: npm test";
+  const call = "runs a command in the project folder: npm test";
+
+  it("shows the call, what the user forbade or allowed, and their latest messages", () => {
     const prompt = bobAutoJudgePrompt({
-      userMessages: [
-        "first",
-        "no web searches for the rest of this task",
-        "b",
-        "c",
-        "d",
-        "e",
-        `look this up ${"x".repeat(3_900)} please`,
+      userMessages: said("opening", "b", "c", "d", "e", "f", "look up zod"),
+      standing: [
+        [forbids("Never search the web for this task.")],
+        [allows("You can search the web again.")],
       ],
       call,
     });
-    // A long message stays whole, and an earlier restriction stays beside it.
-    assert.include(prompt, "1. no web searches for the rest of this task");
-    assert.include(prompt, "please");
-    assert.notInclude(prompt, "first");
     // The call comes first, so the user's messages cannot pose as part of it.
     assert.isTrue(prompt?.startsWith(`The tool call: ${call}`));
+    assert.include(
+      prompt,
+      '- forbids: "Never search the web for this task."\n- allows: "You can search the web again."',
+    );
+    assert.include(prompt, "1. b\n");
+    assert.include(prompt, "6. look up zod");
+    assert.notInclude(prompt, "opening");
     assert.include(bobAutoJudgePrompt({ userMessages: [], call: "x" }), "(none)");
-    // Messages too long to show whole are not judged, rather than judged without some of them.
-    assert.isUndefined(bobAutoJudgePrompt({ userMessages: ["x".repeat(7_000)], call }));
-    assert.isUndefined(bobAutoJudgePrompt({ userMessages: ["no web", "y".repeat(5_999)], call }));
+  });
+
+  it("cuts or leaves out a long message only once its restrictions are quoted", () => {
+    const long = `look this up ${"x".repeat(9_000)} please`;
+    // Not quoted yet: the model would miss what the cut drops, so the call asks for now.
+    assert.isUndefined(bobAutoJudgePrompt({ userMessages: said("hi", long), call }));
+    const cut = bobAutoJudgePrompt({
+      userMessages: [...said("short and older"), ...quoted(long)],
+      call,
+    });
+    assert.include(cut, "look this up");
+    assert.include(cut, "please");
+    assert.include(cut, "characters not shown");
+    assert.isBelow(cut?.length ?? Infinity, 6_000);
+    // An older message that no longer fits is left out once quoted, and asks until then.
+    const older = `older ${"y".repeat(3_000)}`;
+    const newer = `newer ${"z".repeat(2_000)}`;
+    assert.isUndefined(bobAutoJudgePrompt({ userMessages: said(older, newer), call }));
+    const left = bobAutoJudgePrompt({
+      userMessages: [...quoted(older), ...said(newer)],
+      call,
+    });
+    assert.include(left, "1 earlier messages not shown");
+    assert.include(left, "newer");
+  });
+
+  it("counts a sentence the user repeated from when they last said it", () => {
+    const repeated = `Never touch the db folder. ${"a".repeat(70)}`;
+    const others = [1, 2, 3, 4].map((at) => [forbids(`Never touch ${at}. ${"b".repeat(460)}`)]);
+    const prompt = bobAutoJudgePrompt({
+      userMessages: said("go"),
+      standing: [[forbids(repeated)], ...others, [forbids(repeated)]],
+      call,
+    });
+    // Said last, it is newest, so it fits before the older ones fill the room.
+    assert.include(prompt, repeated);
+  });
+
+  it("drops a permission once a later message sets any restriction", () => {
+    const prompt = bobAutoJudgePrompt({
+      userMessages: said("go"),
+      standing: [
+        [allows("You can search the web."), forbids("Never touch db/.")],
+        [forbids("Do not search the web.")],
+        [allows("You may use curl.")],
+      ],
+      call,
+    });
+    assert.notInclude(prompt, "You can search the web.");
+    assert.include(prompt, "Never touch db/.");
+    assert.include(prompt, "Do not search the web.");
+    assert.include(prompt, "You may use curl.");
+  });
+
+  it("skips a sentence too long to fit, so older ones still show", () => {
+    const prompt = bobAutoJudgePrompt({
+      userMessages: said("go"),
+      standing: [
+        [forbids("Never push to main.")],
+        [forbids(`Never ${"y".repeat(1_900)}.`)],
+        [forbids(`Never ${"x".repeat(2_100)}.`)],
+      ],
+      call,
+    });
+    assert.include(prompt, "Never push to main.");
+    assert.include(prompt, "(2 more not shown)");
+  });
+
+  it("keeps the newest restrictions that fit, saying how many it leaves out", () => {
+    const standing = Array.from({ length: 100 }, (_, at) => [
+      forbids(`Never touch folder number ${at}.`),
+    ]);
+    const prompt = bobAutoJudgePrompt({ userMessages: said("go"), standing, call });
+    assert.include(prompt, "Never touch folder number 99.");
+    assert.notInclude(prompt, "Never touch folder number 0.");
+    assert.match(prompt ?? "", /\(\d+ more not shown\)/);
+  });
+});
+
+describe("quoting restrictions", () => {
+  it("reads a long message in overlapping parts, so a sentence split between two is whole in one", () => {
+    const restriction = "Never search\nthe web for this task.";
+    const text = `${"w".repeat(5_990)}${restriction}${"x".repeat(4_200)}`;
+    const chunks = bobRestrictionChunks(text);
+    assert.lengthOf(chunks, 2);
+    for (const chunk of chunks) assert.isAtMost(chunk.length, 6_000);
+    assert.notInclude(chunks[0], restriction);
+    assert.include(chunks[1], restriction);
+    assert.deepEqual(bobRestrictionChunks("short"), ["short"]);
+    assert.deepEqual(bobRestrictionChunks("  "), []);
+  });
+
+  it("keeps only quotes that are really in the message, in the order written", () => {
+    assert.deepEqual(
+      bobMessageQuotes("Fix it.  You can use npm.\nNever   search the web.\nThanks", {
+        restrictions: ["Never search the web.", "Never push to main."],
+        permissions: ["You can use npm.", "You may push to main."],
+      }),
+      [allows("You can use npm."), forbids("Never search the web.")],
+    );
+    // A sentence quoted as both counts as a restriction.
+    assert.deepEqual(
+      bobMessageQuotes("Do not use the network unless asked.", {
+        restrictions: ["Do not use the network unless asked."],
+        permissions: ["Do not use the network unless asked."],
+      }),
+      [forbids("Do not use the network unless asked.")],
+    );
   });
 });
 
@@ -96,7 +211,7 @@ describe("makeEndpointBobAutoJudge", () => {
       httpClient,
     });
   };
-  const input = { userMessages: ["run the tests"], call: "runs npm test" };
+  const input = { userMessages: said("run the tests"), call: "runs npm test" };
 
   it.effect("asks the model by chat completions and allows on its answer", () =>
     Effect.gen(function* () {
@@ -116,6 +231,48 @@ describe("makeEndpointBobAutoJudge", () => {
       assert.include(body.messages[1]?.content, "The tool call: runs npm test");
       assert.equal(sent?.authorization, "Bearer key");
     }),
+  );
+
+  it.effect(
+    "quotes what a message forbids or allows through the endpoint, keeping only real ones",
+    () =>
+      Effect.gen(function* () {
+        const judge = judgeWith(() =>
+          Response.json({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    restrictions: ["Never search the web."],
+                    permissions: ["You may push to main.", "Use npm freely."],
+                  }),
+                },
+              },
+            ],
+          }),
+        );
+        assert.deepEqual(yield* judge.extract!("Use npm freely. Never search the web."), [
+          allows("Use npm freely."),
+          forbids("Never search the web."),
+        ]);
+        const unreadable = judgeWith(() =>
+          Response.json({ choices: [{ message: { content: "Never search the web." } }] }),
+        );
+        assert.isUndefined(yield* unreadable.extract!("Never search the web."));
+        // A message with many keeps its first and last, so a paste cannot push out older ones.
+        const rules = Array.from({ length: 30 }, (_, at) => `Never touch file ${at}.`);
+        const flood = judgeWith(() =>
+          Response.json({
+            choices: [
+              { message: { content: JSON.stringify({ restrictions: rules, permissions: [] }) } },
+            ],
+          }),
+        );
+        assert.deepEqual(
+          yield* flood.extract!(rules.join(" ")),
+          [...rules.slice(0, 5), ...rules.slice(-5)].map(forbids),
+        );
+      }),
   );
 
   it.effect("asks the user when the endpoint fails or does not answer in time", () =>
@@ -152,8 +309,12 @@ require("node:fs").writeFileSync(__filename + ".pid", String(process.pid));
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 ${lines}
 require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
-  const { id, prompt } = JSON.parse(line);
+  const { id, kind, prompt } = JSON.parse(line);
   if (prompt.includes("crash")) process.exit(1);
+  if (kind === "extract") {
+    out({ type: "quotes", id, restrictions: prompt.split("\\n").filter((l) => l.includes("Never")).concat(["Made up."]), permissions: prompt.split("\\n").filter((l) => l.startsWith("You may")) });
+    return;
+  }
   out({ type: "verdict", id, action: "runs tests", requested: prompt.includes("npm test"), risky: false });
 });
 `,
@@ -169,12 +330,19 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
         platform: "darwin",
       });
       yield* judge.warm;
-      const run = { userMessages: ["run the tests"], call: "runs npm test" };
+      const run = { userMessages: said("run the tests"), call: "runs npm test" };
       assert.equal((yield* judge.judge(run)).decision, "allow");
       assert.equal((yield* judge.judge({ ...run, call: "runs make deploy" })).decision, "ask");
       // A program that dies mid-call asks, and the next call starts it again.
       assert.equal((yield* judge.judge({ ...run, call: "crash" })).decision, "ask");
       assert.equal((yield* judge.judge(run)).decision, "allow");
+      // It quotes what a message forbids or allows, part by part, keeping only what the user wrote.
+      const message = `Fix the login.\nNever push to main.\n${"x".repeat(7_000)}\nYou may use npm.\nNever touch db/.`;
+      assert.deepEqual(yield* judge.extract!(message), [
+        forbids("Never push to main."),
+        allows("You may use npm."),
+        forbids("Never touch db/."),
+      ]);
       yield* judge.close;
     }),
   );
@@ -192,7 +360,7 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
       );
       const judge = new AppleBobAutoJudge({ cacheDir, platform: "darwin", timeoutMs: 100 });
       await judge.start();
-      const run = { userMessages: ["run the tests"], call: "runs npm test" };
+      const run = { userMessages: said("run the tests"), call: "runs npm test" };
       const started = performance.now();
       const answers = await Promise.all([judge.judge(run), judge.judge(run), judge.judge(run)]);
       assert.deepEqual(
@@ -213,7 +381,7 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
       const warnings: Array<string> = [];
       const onWarning = (warning: Error) => warnings.push(warning.name);
       process.on("warning", onWarning);
-      const run = { userMessages: ["run the tests"], call: "runs npm test" };
+      const run = { userMessages: said("run the tests"), call: "runs npm test" };
       for (let call = 0; call < 15; call += 1) await judge.judge(run);
       await new Promise((resolve) => setImmediate(resolve));
       process.off("warning", onWarning);
@@ -230,14 +398,14 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
       const pid = Number(NodeFS.readFileSync(`${appleBobAutoJudgeProgram(cacheDir)}.pid`, "utf8"));
       yield* judge.close;
       assert.throws(() => process.kill(pid, 0));
-      const run = { userMessages: ["run the tests"], call: "runs npm test" };
+      const run = { userMessages: said("run the tests"), call: "runs npm test" };
       assert.equal((yield* judge.judge(run)).decision, "ask");
     }),
   );
 
   it.effect("asks the user when Apple's model is unavailable or the Mac is not one", () =>
     Effect.gen(function* () {
-      const run = { userMessages: ["run the tests"], call: "runs npm test" };
+      const run = { userMessages: said("run the tests"), call: "runs npm test" };
       const unavailable = makeAppleBobAutoJudge({
         cacheDir: fakeProgram(
           'out({ type: "unavailable", reason: "appleIntelligenceNotEnabled" }); process.exit(0);',

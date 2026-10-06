@@ -236,6 +236,7 @@ export interface ThreadDetailScreenProps {
   readonly onRespondToApproval: (
     requestId: RuntimeRequestId,
     decision: ProviderApprovalDecision,
+    optionId?: string,
   ) => Promise<unknown>;
   readonly onSelectUserInputOption: (
     requestId: RuntimeRequestId,
@@ -1349,6 +1350,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                       {props.activePendingApproval ? (
                         <PendingApprovalCard
                           canOperateThread={props.canOperateThread}
+                          key={props.activePendingApproval.requestId}
                           approval={props.activePendingApproval}
                           respondingApprovalId={props.respondingApprovalId}
                           onRespond={props.onRespondToApproval}

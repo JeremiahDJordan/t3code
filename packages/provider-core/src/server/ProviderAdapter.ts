@@ -434,6 +434,8 @@ export interface ProviderAdapterV2InterruptInput {
 export interface ProviderAdapterV2RuntimeRequestResponseInput {
   readonly requestId: RuntimeRequestId;
   readonly decision?: ProviderApprovalDecision;
+  /** The approval option chosen, when several share the decision. */
+  readonly optionId?: string;
   readonly answers?: ProviderUserInputAnswers;
   readonly response?: unknown;
 }

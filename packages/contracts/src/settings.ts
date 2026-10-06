@@ -15,6 +15,7 @@ import {
   OmittedWhenNull,
   PortSchema,
   ProjectId,
+  ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
 } from "./baseSchemas.ts";
@@ -792,7 +793,7 @@ export const BobSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Auto mode reviewer",
         description:
-          "In Auto, judges a tool call that may be routine, such as running the project's tests or a web search, against what you asked; anything else asks you. Apple's model runs on this Mac with Apple Intelligence on macOS 26 or later and the Xcode command line tools. Rules only asks you about those calls.",
+          "In Auto, judges a tool call that may be routine, such as a web search, against what you asked; anything else asks you. Apple's model runs on this Mac with Apple Intelligence on macOS 26 or later and the Xcode command line tools. Rules only asks you about those calls. Open threads keep the reviewer they started with until their Bob restarts.",
         providerSettingsForm: {
           control: "select",
           options: BOB_AUTO_REVIEWERS,
@@ -805,7 +806,7 @@ export const BobSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Reviewer endpoint",
         description:
-          "For an OpenAI-compatible reviewer: the base URL, such as Ollama's. A key in BOB_AUTO_REVIEW_API_KEY among this instance's environment variables is sent as a bearer token.",
+          "For an OpenAI-compatible reviewer: the base URL, such as Ollama's. In Auto, the messages you type and the tool calls it judges are sent there. A key in BOB_AUTO_REVIEW_API_KEY among this instance's environment variables is sent as a bearer token.",
         providerSettingsForm: {
           placeholder: "http://localhost:11434/v1",
           clearWhenEmpty: "omit",
@@ -837,6 +838,41 @@ export const BobSettings = makeProviderSettingsSchema(
   },
 );
 export type BobSettings = typeof BobSettings.Type;
+
+/**
+ * What a Bob permission rule lets through or holds back, outside Full access: commands starting
+ * with its words run outside the sandbox without asking (`allow-command`) or always ask
+ * (`ask-command`); sandboxed commands may read a folder (`read`) or write in it (`write`); or
+ * they never touch a path, and Bob's own edits of it ask (`private`). Bob reads with its own tools
+ * without asking, which no rule stops.
+ */
+export const BobRuleKind = Schema.Literals([
+  "allow-command",
+  "ask-command",
+  "read",
+  "write",
+  "private",
+]);
+export type BobRuleKind = typeof BobRuleKind.Type;
+export const BobRule = Schema.Struct({
+  kind: BobRuleKind,
+  /** A command's first words, such as `git commit`, or a path, where `~/` is the home folder. */
+  value: TrimmedNonEmptyString,
+  /** The project the rule applies in; every project when absent. */
+  projectId: Schema.optional(ProjectId),
+  /** The one thread the rule applies in, in its project. */
+  threadId: Schema.optional(ThreadId),
+});
+export type BobRule = typeof BobRule.Type;
+/** Whether two rules are the same rule, in the same place. */
+export const sameBobRule = (a: BobRule, b: BobRule): boolean =>
+  a.kind === b.kind &&
+  a.value === b.value &&
+  a.projectId === b.projectId &&
+  a.threadId === b.threadId;
+/** Where a rule added from an approval card applies. */
+export const BobRuleScope = Schema.Literals(["thread", "project", "global"]);
+export type BobRuleScope = typeof BobRuleScope.Type;
 
 /**
  * Antigravity ACP auth methods. Personal and Enterprise open a Google sign-in
@@ -1374,6 +1410,13 @@ export const ServerSettings = Schema.Struct({
   /** Whether the server-local Device panel setup flow has been completed. */
   deviceOnboardingCompleted: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   deviceHosts: SshDeviceHostConfigs.pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /**
+   * The user's permission rules for Bob, for every Bob instance, so a change neither restarts
+   * Bob nor waits for a new thread.
+   */
+  bobRules: Schema.Array(BobRule).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  /** The scope the user last chose for a rule from an approval card, offered first next time. */
+  bobRuleScope: BobRuleScope.pipe(Schema.withDecodingDefault(Effect.succeed("thread" as const))),
   sidebarAutoSettleAfterDays: Schema.NullOr(SidebarAutoSettleAfterDays).pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS)),
   ),
@@ -1707,6 +1750,14 @@ export const ServerSettingsPatch = Schema.Struct({
   enableDeviceSupport: Schema.optionalKey(Schema.Boolean),
   deviceOnboardingCompleted: Schema.optionalKey(Schema.Boolean),
   deviceHosts: Schema.optionalKey(SshDeviceHostConfigs),
+  /** Rules to add and remove, applied to the saved ones, so two writers never undo each other. */
+  bobRuleChanges: Schema.optionalKey(
+    Schema.Struct({
+      add: Schema.optionalKey(Schema.Array(BobRule)),
+      remove: Schema.optionalKey(Schema.Array(BobRule)),
+    }),
+  ),
+  bobRuleScope: Schema.optionalKey(BobRuleScope),
   sidebarAutoSettleAfterDays: Schema.optionalKey(Schema.NullOr(SidebarAutoSettleAfterDays)),
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),

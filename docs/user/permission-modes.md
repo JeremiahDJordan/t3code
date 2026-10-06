@@ -21,8 +21,9 @@ not prevent the agent from asking questions about the task.
 ## Provider differences
 
 Providers enforce permissions differently. Some read-only actions can proceed in **Supervised**.
-**Auto** uses automatic review on Codex, Claude, Cursor, and Grok; providers without an equivalent,
-including OpenCode and Antigravity, fall back to asking. On Grok, commands its review blocks come
+**Auto** uses automatic review on Codex, Claude, Cursor, and Grok, and T3 Code's own rules and
+reviewer on Bob Shell; providers without an equivalent, including OpenCode and Antigravity, fall
+back to asking. On Grok, commands its review blocks come
 to you for approval. On Bob Shell, as on Codex, commands run in a sandbox outside **Full
 access** on macOS, and what stays inside it runs without asking; see
 [Bob Shell approvals](./providers-bob.md#projects-and-approvals).
@@ -34,7 +35,8 @@ Grok offers no **Auto-accept edits**. A Grok thread already set to it runs in **
 file-change approvals offer **Allow all edits this session**. Its command approvals have no
 session-wide choice, because Grok would remember that command for the whole project.
 
-For Bob Shell, **Always allow this session** allows that tool for the rest of the session.
+For Bob Shell, **Always allow this session** allows that tool for the rest of the session; for
+commands and edits, cards offer Bob's permission rules instead.
 
 ACP Registry agents run their own tools in their own mode; T3 Code answers their approval requests
 by the permission mode. See [ACP Registry permissions](./providers-acp.md#permissions-and-terminals).

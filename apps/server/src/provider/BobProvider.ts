@@ -24,22 +24,26 @@ import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import * as HttpClient from "effect/unstable/http/HttpClient";
-import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import type { AcpSessionMode } from "../acp/AcpRuntimeModel.ts";
-import { BOB_TMUX_MISSING_MESSAGE } from "../acp/BobRelay.ts";
-import { ACP_SESSION_MODE_OPTION_ID } from "../acp/AcpSessionConfig.ts";
+import type { AcpSessionMode } from "@t3tools/provider-acp/server/runtimeModel";
+import { BOB_TMUX_MISSING_MESSAGE } from "./acp/BobRelay.ts";
+import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
+import { BOB_NETWORK_ASK, BOB_NETWORK_OPTION_ID } from "./acp/bobAutoJudge.ts";
 import {
   BOB_API_KEY_ALIAS_ENV,
   BOB_API_KEY_ENV,
   bobSignInMessage,
   bobSpawnEnvironment,
   readBobApiKey,
-} from "../acp/BobAcpSupport.ts";
+} from "./acp/BobAcpSupport.ts";
 import { type BobUsageProfile, isBobSsoLoginExpired, readBobSsoLogin } from "./bobUsageLimits.ts";
-import { createProviderVersionAdvisory, ProviderVersionCache } from "../providerMaintenance.ts";
+import {
+  createProviderVersionAdvisory,
+  ProviderVersionCache,
+} from "@t3tools/provider-core/server/maintenanceResolver";
 import {
   COMPACT_SLASH_COMMAND,
   DEFAULT_TIMEOUT_MS,
@@ -49,8 +53,8 @@ import {
   spawnAndCollect,
   type ProviderProbeResult,
   type ServerProviderDraft,
-} from "../providerSnapshot.ts";
-import type { ServerProviderShape } from "../Services/ServerProvider.ts";
+} from "@t3tools/provider-core/server/snapshotProbe";
+import type { ServerProviderShape } from "@t3tools/provider-core/server/snapshot";
 
 const BOB_PRESENTATION = {
   displayName: "Bob",
@@ -61,16 +65,41 @@ const BOB_PRESENTATION = {
   // Read from Bob's task database after each turn.
   reportsContextWindow: true,
 } as const;
-const EMPTY_CAPABILITIES = createModelCapabilities({ optionDescriptors: [] });
+/**
+ * The option a thread picks, while its instance has a reviewer, to have Auto ask about every web
+ * search, page fetch, GitHub read and skill instead of letting the reviewer allow them.
+ */
+const BOB_NETWORK_DESCRIPTOR: ProviderOptionDescriptor = {
+  id: BOB_NETWORK_OPTION_ID,
+  label: "Auto network",
+  type: "select",
+  options: [
+    {
+      id: "review",
+      label: "Reviewer decides",
+      description:
+        "In Auto, the reviewer may allow web searches, fetches and GitHub reads you asked for",
+      isDefault: true,
+    },
+    {
+      id: BOB_NETWORK_ASK,
+      label: "Always ask",
+      description: "In Auto, every web search, fetch, GitHub read and skill asks you",
+    },
+  ],
+  currentValue: "review",
+};
 
 // Bob picks its model itself and has no `session/set_model`, so T3 offers one entry for it and
 // no custom models, which Bob could not switch to.
-const BOB_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
+const bobBuiltInModels = (settings: BobSettings): ReadonlyArray<ServerProviderModel> => [
   {
     slug: BOB_DEFAULT_MODEL,
     name: "Bob (configured model)",
     isCustom: false,
-    capabilities: EMPTY_CAPABILITIES,
+    capabilities: createModelCapabilities({
+      optionDescriptors: settings.autoReviewer === "off" ? [] : [BOB_NETWORK_DESCRIPTOR],
+    }),
   },
 ];
 
@@ -81,7 +110,7 @@ const buildBobSnapshot = (settings: BobSettings, probe: ProviderProbeResult) =>
       presentation: BOB_PRESENTATION,
       enabled: settings.enabled,
       checkedAt: DateTime.formatIso(now),
-      models: BOB_BUILT_IN_MODELS,
+      models: bobBuiltInModels(settings),
       probe,
     }),
   );
@@ -318,7 +347,7 @@ function mergeBobModes(
   return [...merged.values()];
 }
 
-/** Bob's models with the Mode option, when Bob's sessions offered a choice of modes. */
+/** Bob's models with the Mode option first, when Bob's sessions offered a choice of modes. */
 function withBobModeOption(
   models: ReadonlyArray<ServerProviderModel>,
   modes: ReadonlyArray<AcpSessionMode>,
@@ -327,7 +356,12 @@ function withBobModeOption(
   if (!descriptor) return models;
   return models.map((model) =>
     model.slug === BOB_DEFAULT_MODEL
-      ? { ...model, capabilities: createModelCapabilities({ optionDescriptors: [descriptor] }) }
+      ? {
+          ...model,
+          capabilities: createModelCapabilities({
+            optionDescriptors: [descriptor, ...(model.capabilities?.optionDescriptors ?? [])],
+          }),
+        }
       : model,
   );
 }

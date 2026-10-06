@@ -7436,6 +7436,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             providerSessionId,
             requestId: command.requestId,
             ...(command.decision === undefined ? {} : { decision: command.decision }),
+            ...(command.optionId === undefined ? {} : { optionId: command.optionId }),
             ...(command.answers === undefined ? {} : { answers: command.answers }),
           },
         } satisfies PendingOrchestrationEffectV2,

@@ -13,7 +13,10 @@ import * as NodeOS from "node:os";
 
 import {
   type BobAuthMethod,
+  type BobRule,
+  type BobRuleScope,
   type BobSettings,
+  type ProjectId,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderThread,
@@ -21,6 +24,7 @@ import {
   type ProviderInstanceId,
   ProviderSetupError,
   type RunAttemptId,
+  type ThreadId,
   type TurnItemId,
 } from "@t3tools/contracts";
 import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -29,32 +33,33 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import type * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import type { ChildProcessSpawner } from "effect/unstable/process";
+import type { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
-import type * as ServerConfig from "../../config.ts";
+import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
   acpContentBlockDisplayText,
   type AcpSessionMode,
   type AcpToolCallState,
-} from "../../provider/acp/AcpRuntimeModel.ts";
+} from "@t3tools/provider-acp/server/runtimeModel";
 import {
   acpPermissionDisposition,
   type AcpPermissionDisposition,
-} from "../../provider/acp/AcpClientPolicy.ts";
-import { ACP_SESSION_MODE_OPTION_ID } from "../../provider/acp/AcpSessionConfig.ts";
+} from "@t3tools/provider-acp/server/clientPolicy";
+import { ACP_SESSION_MODE_OPTION_ID } from "@t3tools/provider-acp/server/sessionConfig";
 import {
   type BobRelayLink,
   type BobRelays,
   nativeBobToolCallId,
 } from "../../provider/acp/BobRelay.ts";
-import type * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
+import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   bobApprovesItsOwnTools,
   deleteBobSession,
@@ -63,26 +68,39 @@ import {
   moveBobTask,
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
-import type { BobAutoJudge } from "../../provider/acp/bobAutoJudge.ts";
+import {
+  BOB_NETWORK_ASK,
+  BOB_NETWORK_OPTION_ID,
+  type BobAutoJudge,
+  type BobUserQuote,
+} from "../../provider/acp/bobAutoJudge.ts";
 import {
   type BobPermissionMode,
+  type BobRuleSuggestion,
+  type BobUserRules,
+  asksByUserRule,
   describeBobToolCall,
   reviewBobPermission,
+  suggestBobCommandRule,
 } from "../../provider/acp/bobAutoReview.ts";
-import { type BobSandbox, makeBobSandbox } from "../../provider/acp/bobSandbox.ts";
-import { bobBudgetResetsAt } from "../../provider/Layers/bobUsageLimits.ts";
+import {
+  type BobSandbox,
+  bobSandboxFolderSuggestion,
+  makeBobSandbox,
+} from "../../provider/acp/bobSandbox.ts";
+import { bobBudgetResetsAt } from "../../provider/bobUsageLimits.ts";
 import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
-import type * as IdAllocator from "../IdAllocator.ts";
+import type * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
-import { providerMessageTextWithAttachmentPaths } from "../AttachmentPrompt.ts";
-import * as ProviderAdapter from "../ProviderAdapter.ts";
-import { makeProviderFailure } from "../ProviderFailure.ts";
+import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import {
   AcpProviderCapabilitiesV2,
   makeAcpAdapterV2,
   type AcpAdapterV2Flavor,
   type AcpAdapterV2SubagentUpdate,
-} from "./AcpAdapterV2.ts";
+} from "@t3tools/provider-acp/server/adapter";
 
 const BOB_PROVIDER = ProviderDriverKind.make("bob");
 /** Bob's default mode, which every turn starts from unless the thread picked another. */
@@ -92,7 +110,7 @@ export const BOB_EMPTY_REPLY_MESSAGE = "Bob ended its turn without replying.";
 /** Marks the failure the runtime wrapper raises for a turn Bob ended without output. */
 const BOB_EMPTY_REPLY_MARKER = "t3/bob-empty-reply";
 /** How many of the latest messages to Bob Auto's reviewer judges a call against. */
-const BOB_AUTO_REVIEW_REQUESTS = 3;
+const BOB_AUTO_REVIEW_REQUESTS = 6;
 /**
  * Whether the user wrote a message, rather than the server on their behalf, such as the "go on"
  * after a usage limit lifts.
@@ -107,9 +125,6 @@ function isUserWritten(message: {
     message.creationSource !== "provider"
   );
 }
-
-/** User messages kept for turns whose prompt has not reached Bob yet, across sessions. */
-const BOB_PENDING_USER_MESSAGES = 100;
 
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
@@ -296,20 +311,45 @@ const extractBobSubagentUpdate = (
 
 /**
  * The answers an approval card offers for Bob's request: only the ones Bob can take, so
- * "Always allow this session" appears only when Bob offers to remember the tool.
+ * "Always allow this session" appears only when Bob offers to remember the tool, and T3's own
+ * options to add a rule, which clients show as one split button.
  */
 function bobApprovalOptions(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): ReadonlyArray<ProviderApprovalOption> {
+  const bobs = request.options.filter((option) => !option.optionId.startsWith(BOB_RULE_OPTION));
   const offers = (kind: EffectAcpSchema.PermissionOption["kind"]) =>
-    request.options.some((option) => option.kind === kind && option.optionId.trim());
+    bobs.some((option) => option.kind === kind && option.optionId.trim());
+  const rules = request.options.flatMap((option): Array<ProviderApprovalOption> => {
+    if (bobRuleScopeOf(option.optionId) === undefined) return [];
+    const warning = option._meta?.["warning"];
+    return [
+      {
+        decision: "acceptAlways",
+        optionId: option.optionId,
+        label: option.name,
+        ...(typeof warning === "string" && warning.trim() ? { warning } : {}),
+      },
+    ];
+  });
   return [
     { decision: "cancel", label: "Cancel" },
     ...(offers("reject_once") ? [{ decision: "decline" as const, label: "Decline" }] : []),
     ...(offers("allow_always")
       ? [{ decision: "acceptForSession" as const, label: "Always allow this session" }]
       : []),
-    ...(offers("allow_once") ? [{ decision: "accept" as const, label: "Approve" }] : []),
+    ...rules,
+    ...(offers("allow_once")
+      ? [
+          {
+            decision: "accept" as const,
+            label: "Approve",
+            ...(request._meta?.[BOB_RUNS_OUTSIDE] === true
+              ? { warning: "Runs the command outside the sandbox, as you." }
+              : {}),
+          },
+        ]
+      : []),
   ];
 }
 
@@ -324,9 +364,11 @@ export function normalizeBobPermissionRequest(
   request: EffectAcpSchema.RequestPermissionRequest,
 ): EffectAcpSchema.RequestPermissionRequest {
   const kind = request.toolCall.kind;
+  // Options named like T3's own rule options are T3's to add, never Bob's.
+  const options = request.options.filter((option) => bobRuleScopeOf(option.optionId) === undefined);
   return kind === "edit" || kind === "delete" || kind === "move"
-    ? request
-    : { ...request, toolCall: { ...request.toolCall, kind: "other" } };
+    ? { ...request, options }
+    : { ...request, options, toolCall: { ...request.toolCall, kind: "other" } };
 }
 
 /**
@@ -417,6 +459,8 @@ export interface BobAdapterV2Hooks {
   ) => Effect.Effect<TaskTranscript>;
   /** In Auto, judges the tool calls the rules leave to what the user asked for. */
   readonly autoJudge?: BobAutoJudge | undefined;
+  /** Keeps the reviewer open while a Bob runtime, which outlives a settings change, runs. */
+  readonly holdAutoJudge?: Effect.Effect<void, never, Scope.Scope> | undefined;
 }
 
 /**
@@ -455,26 +499,133 @@ interface BobRuntimeState {
   steerCancelled: boolean;
   /** The user stopped the running prompt, which sends Bob nothing more in this turn. */
   stopped: boolean;
-  /** What the user asked Bob lately, in turns' messages and steers, latest last, for Auto. */
-  readonly requests: Array<string>;
+  /** The thread picked to be asked about every call left to Auto's reviewer, as of its turn. */
+  asksAboutNetwork: boolean;
+  /**
+   * What the user asked Bob lately, in turns' messages and steers, for Auto; the thread's, so a
+   * runtime started for the thread keeps it. Its revision counts them, so a judgement made while
+   * one came is not used.
+   */
+  readonly requests: BobUserRequests;
   /** The adapter's update handler, which takes the usage Bob does not report itself. */
   handler?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   captureProposedPlan?: (input: { readonly planMarkdown: string }) => Effect.Effect<void>;
-  /** What the next prompt's turn is, from the session wrapper. */
-  nextTurn?: BobTurnContext | undefined;
 }
 
 const bobRuntimeStates = new WeakMap<object, BobRuntimeState>();
 
 /** What a Bob session's next prompt does with a prompt Bob kept going while T3 restarted. */
 interface BobTurnContext {
+  /** The thread and project the turn belongs to, whose rules Bob's calls are answered by. */
+  readonly threadId: ThreadId;
+  readonly projectId: ProjectId;
+  /** The turn's message as Bob gets it, when the user wrote it, attachments included. */
+  readonly userRequest: string | undefined;
+  /** What the user typed, without attachments, which Auto's reviewer reads and quotes. */
+  readonly userText: string | undefined;
+  /** The thread picked to be asked about every call left to Auto's reviewer. */
+  readonly asksAboutNetwork: boolean;
   /** A run T3 started to finish the prompt Bob kept going while T3 restarted: never prompts Bob. */
   readonly adoptOnly: boolean;
   /** Its message only asks Bob to go on, which a prompt Bob kept going already does. */
   readonly skipTextAfterAdoption: boolean;
 }
+
+/**
+ * Each thread's next turn and its project, by thread id, which whichever runtime serves the
+ * thread reads: the generic adapter may replace a runtime as the turn starts.
+ */
+interface BobThreadTurns {
+  readonly next: Map<string, BobTurnContext>;
+  readonly projects: Map<string, ProjectId>;
+  /** What the user asked lately, which a runtime started for the thread keeps reading. */
+  readonly requests: Map<string, BobUserRequests>;
+}
+
+/**
+ * What the user typed to Bob in one message: its text, dropped once the reviewer needs only its
+ * quotes; what it forbade or allowed, once quoted; and the attempt at quoting it, while one runs.
+ */
+interface BobUserMessage {
+  text: string;
+  quotes: ReadonlyArray<BobUserQuote> | undefined;
+  quoting: Deferred.Deferred<void> | undefined;
+}
+
+/**
+ * What the user told Bob in a thread, for Auto's reviewer, oldest first: the latest messages, and
+ * older ones whose restrictions are kept or not quoted yet; and a count of changes, so a
+ * judgement made while one came is not used.
+ */
+interface BobUserRequests {
+  readonly messages: Array<BobUserMessage>;
+  revision: number;
+}
+
+/**
+ * How many restrictions a thread keeps, and how much text of older messages waits to be quoted,
+ * such as those sent outside Auto; past either the oldest go, as the reviewer's prompt drops its
+ * oldest restrictions.
+ */
+const BOB_STANDING_RESTRICTIONS = 200;
+const BOB_UNQUOTED_CHARACTERS = 50_000;
+/** How many threads' requests the adapter keeps; the least recently served go first. */
+const BOB_REQUEST_THREADS = 100;
+
+/** The text of a message's quotes of one kind. */
+const quoted = (quotes: ReadonlyArray<BobUserQuote>, kind: BobUserQuote["kind"]) =>
+  quotes.filter((quote) => quote.kind === kind).map((quote) => quote.text);
+
+/** Forgets what the reviewer no longer needs, keeping the latest messages whole. */
+function trimBobUserRequests(requests: BobUserRequests): void {
+  const latest = requests.messages.length - BOB_AUTO_REVIEW_REQUESTS;
+  let quotes = 0;
+  let unquoted = 0;
+  const kept: Array<BobUserMessage> = [];
+  for (let at = requests.messages.length - 1; at >= 0; at -= 1) {
+    const message = requests.messages[at]!;
+    if (at < latest) {
+      if (message.quotes === undefined) {
+        unquoted += message.text.length;
+        if (unquoted > BOB_UNQUOTED_CHARACTERS) continue;
+      } else {
+        if (message.quotes.length === 0 || quotes >= BOB_STANDING_RESTRICTIONS) continue;
+        message.text = "";
+      }
+    }
+    quotes += message.quotes?.length ?? 0;
+    kept.push(message);
+  }
+  requests.messages.splice(0, requests.messages.length, ...kept.toReversed());
+}
+/**
+ * How long a review waits for a message's restrictions to be quoted, about twenty parts of a long
+ * message on Apple's model, before it judges without them.
+ */
+const BOB_QUOTE_WAIT = "30 seconds";
+
+const makeBobUserRequests = (): BobUserRequests => ({ messages: [], revision: 0 });
+
+/** A thread's requests, or a runtime's own when it serves no thread. */
+function requestsOf(turns: BobThreadTurns, threadId: string | undefined): BobUserRequests {
+  if (threadId === undefined) return makeBobUserRequests();
+  const requests = turns.requests.get(threadId) ?? makeBobUserRequests();
+  turns.requests.delete(threadId);
+  turns.requests.set(threadId, requests);
+  for (const oldest of turns.requests.keys()) {
+    if (turns.requests.size <= BOB_REQUEST_THREADS) break;
+    turns.requests.delete(oldest);
+  }
+  return requests;
+}
+
+const makeBobThreadTurns = (): BobThreadTurns => ({
+  next: new Map(),
+  projects: new Map(),
+  requests: new Map(),
+});
 
 /** How Bob's session wrapper reaches the runtime of a Bob session, by Bob's task id. */
 interface BobSessionControl {
@@ -482,8 +633,8 @@ interface BobSessionControl {
    * Steers the running prompt with a message, which Auto's reviewer reads when the user wrote it;
    * false when no prompt is with Bob.
    */
-  readonly steer: (text: string, fromUser: boolean) => Effect.Effect<boolean>;
-  readonly prepareTurn: (turn: BobTurnContext) => Effect.Effect<void>;
+  /** Steers the running prompt with `text`; `userText` is what the user typed, if they wrote it. */
+  readonly steer: (text: string, userText: string | undefined) => Effect.Effect<boolean>;
   /** Tells a relay whose thread its Bob works for, so a T3 that restarts mid-turn finds it. */
   readonly describe: (owner: {
     readonly threadId: string;
@@ -562,9 +713,165 @@ function bobSandboxDenied(update: EffectAcpSchema.ToolCallUpdate): boolean {
       ? update.rawOutput
       : JSON.stringify(update.rawOutput ?? ""),
   ].join("\n");
-  return /operation not permitted|EPERM|EACCES|could not resolve host|ENOTFOUND|EAI_AGAIN|getaddrinfo|nodename nor servname|network is unreachable|couldn't connect to server|ECONNREFUSED/i.test(
+  return /sandbox-exec:|operation not permitted|EPERM|EACCES|could not resolve host|ENOTFOUND|EAI_AGAIN|getaddrinfo|nodename nor servname|network is unreachable|couldn't connect to server|ECONNREFUSED/i.test(
     output,
   );
+}
+
+/**
+ * The first absolute path a command the sandbox stopped names beside the denial, such as
+ * `open '/Users/me/.vercel/auth.json'` after `EPERM`, which a card offers to open.
+ */
+function bobSandboxDeniedPath(update: EffectAcpSchema.ToolCallUpdate): string | undefined {
+  const output = (update.content ?? [])
+    .map((content) =>
+      content.type === "content" && content.content.type === "text"
+        ? content.content.text.slice(-16_384)
+        : "",
+    )
+    .join("\n");
+  for (const line of output.split("\n")) {
+    if (!/operation not permitted|EPERM|EACCES/i.test(line)) continue;
+    const path = /(?:^|[\s'"`(:=])(\/[^\s'"`():,;]+)/.exec(line)?.[1];
+    if (path !== undefined) return path.replace(/[.]+$/, "");
+  }
+  return undefined;
+}
+
+/** The user's permission rules for Bob as settings keep them, shared by every Bob instance. */
+export interface BobSavedRules {
+  readonly rules: ReadonlyArray<BobRule>;
+  /** The scope a card offers first: the one the user picked last. */
+  readonly scope: BobRuleScope;
+}
+
+/** Where the adapter reads and saves the user's rules. */
+export interface BobRulesSource {
+  readonly get: Effect.Effect<BobSavedRules>;
+  /** Subscribes to changes, before a read, so none falls between the two. */
+  readonly subscribe: Effect.Effect<Stream.Stream<BobSavedRules>, never, Scope.Scope>;
+  /** Saves a rule a card added and remembers the scope picked; whether it was saved. */
+  readonly add: (rule: BobRule, scope: BobRuleScope) => Effect.Effect<boolean>;
+}
+
+/** The rules a Bob runtime answers by, and the thread and project they apply in. */
+interface BobRuntimeRules {
+  saved: BobSavedRules;
+  /** Counts changes, so a decision taken while the rules changed is taken again. */
+  revision: number;
+  /** The workspace, which rules' `./` paths start from. */
+  readonly workspace: string;
+  threadId: ThreadId | undefined;
+  projectId: ProjectId | undefined;
+  readonly home: string;
+  /** T3's home, whose folders a card never offers to open. */
+  readonly t3Home: string;
+  readonly source: BobRulesSource | undefined;
+  /** Applies the rules to the runtime's sandbox, once the runtime has one. */
+  refresh: () => void;
+}
+
+/**
+ * The rules that apply in a runtime's thread and project, with paths made absolute: `~/` from the
+ * home folder, and any other relative path, `./` or not, from the workspace, so none is dropped.
+ */
+function bobUserRules(rules: BobRuntimeRules): BobUserRules {
+  const applying = rules.saved.rules.filter(
+    (rule) =>
+      (rule.projectId === undefined || rule.projectId === rules.projectId) &&
+      (rule.threadId === undefined || rule.threadId === rules.threadId),
+  );
+  const values = (kind: BobRule["kind"]) =>
+    applying.filter((rule) => rule.kind === kind).map((rule) => rule.value);
+  const paths = (kind: BobRule["kind"]) =>
+    values(kind).flatMap((value) => {
+      if (value === "~" || value.startsWith("~/")) return [`${rules.home}${value.slice(1)}`];
+      // `~user` names another account's home, which no rule here reaches.
+      if (value.startsWith("~")) return [];
+      if (value.startsWith("/")) return [value];
+      if (value === ".") return [rules.workspace];
+      return [`${rules.workspace}/${value.startsWith("./") ? value.slice(2) : value}`];
+    });
+  return {
+    allowCommands: values("allow-command"),
+    askCommands: values("ask-command"),
+    read: paths("read"),
+    write: paths("write"),
+    private: paths("private"),
+  };
+}
+
+/**
+ * A path as a rule keeps it: from `./` in the workspace, so a project's rule follows it into each
+ * thread's worktree, and from `~/` in the home folder.
+ */
+function bobRulePath(path: string, home: string, workspace: string): string {
+  const under = (root: string) => (root.endsWith("/") ? root : `${root}/`);
+  if (path.startsWith(under(workspace))) return `./${path.slice(under(workspace).length)}`;
+  return path.startsWith(under(home)) ? `~/${path.slice(under(home).length)}` : path;
+}
+
+/** Marks a request whose approval runs the command outside the sandbox. */
+const BOB_RUNS_OUTSIDE = "t3RunsOutsideSandbox";
+
+/** Card options that add a rule are T3's own, beside Bob's, one per scope. */
+const BOB_RULE_OPTION = "t3-rule:";
+const BOB_RULE_SCOPES: ReadonlyArray<BobRuleScope> = ["thread", "project", "global"];
+const BOB_RULE_SCOPE_WORDS: Record<BobRuleScope, string> = {
+  thread: "in this thread",
+  project: "in this project",
+  global: "in every project",
+};
+
+function bobRuleScopeOf(optionId: string): BobRuleScope | undefined {
+  const scope = optionId.startsWith(BOB_RULE_OPTION)
+    ? optionId.slice(BOB_RULE_OPTION.length)
+    : undefined;
+  return BOB_RULE_SCOPES.find((candidate) => candidate === scope);
+}
+
+function bobRuleLabel(suggestion: BobRuleSuggestion, scope: BobRuleScope): string {
+  const where = BOB_RULE_SCOPE_WORDS[scope];
+  switch (suggestion.kind) {
+    case "allow-command":
+      return `Always allow \`${suggestion.value}\` ${where}`;
+    case "read":
+      return `Always allow reading ${suggestion.value} ${where}`;
+    case "write":
+      return `Always allow writing in ${suggestion.value} ${where}`;
+  }
+}
+
+/**
+ * Bob's request with T3's options to add a rule, one per scope, the one the user picked last
+ * first. A rule for the project needs the project known.
+ */
+function withRuleOptions(
+  request: EffectAcpSchema.RequestPermissionRequest,
+  suggestion: BobRuleSuggestion,
+  rules: BobRuntimeRules,
+): EffectAcpSchema.RequestPermissionRequest {
+  const scopes = [
+    rules.saved.scope,
+    ...BOB_RULE_SCOPES.filter((scope) => scope !== rules.saved.scope),
+  ].filter(
+    (scope) =>
+      rules.source !== undefined &&
+      (scope !== "thread" || rules.threadId !== undefined) &&
+      (scope !== "project" || rules.projectId !== undefined),
+  );
+  return {
+    ...request,
+    options: [
+      ...request.options,
+      ...scopes.map((scope) => ({
+        optionId: `${BOB_RULE_OPTION}${scope}`,
+        name: bobRuleLabel(suggestion, scope),
+        kind: "allow_once" as const,
+        ...(suggestion.warning === undefined ? {} : { _meta: { warning: suggestion.warning } }),
+      })),
+    ],
+  };
 }
 
 /** What a Bob runtime's wrapper works with beyond the runtime itself. */
@@ -586,11 +893,13 @@ interface BobRuntimeExtras {
         readonly sandbox: BobSandbox | undefined;
       }
     | undefined;
-  /**
-   * Turns' messages the user wrote, by the text Bob gets, counted until their prompts reach Bob;
-   * Auto's reviewer reads them.
-   */
-  readonly userMessages?: Map<string, number> | undefined;
+  /** The user's rules, outside Full access. */
+  readonly rules?: BobRuntimeRules | undefined;
+  /** The thread the runtime serves, whose next turn it takes from `turns`. */
+  readonly threadId?: string | undefined;
+  readonly turns?: BobThreadTurns | undefined;
+  /** The runtime's scope, which owns its work apart from the turn. */
+  readonly scope?: Scope.Scope | undefined;
 }
 
 /**
@@ -609,7 +918,10 @@ function wrapBobRuntime(
     terminated,
     mcpAuthorization,
     review: answering,
-    userMessages = new Map(),
+    rules,
+    threadId,
+    turns = makeBobThreadTurns(),
+    scope,
   }: BobRuntimeExtras = {},
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
   const state: BobRuntimeState = {
@@ -621,14 +933,87 @@ function wrapBobRuntime(
     steers: [],
     steerCancelled: false,
     stopped: false,
-    requests: [],
+    asksAboutNetwork: false,
+    requests: requestsOf(turns, threadId),
   };
   /** Keeps a message the user sent Bob for Auto's reviewer, which reads the latest few. */
-  const remember = (request: string) => {
-    if (!request) return;
-    state.requests.push(request);
-    state.requests.splice(0, state.requests.length - BOB_AUTO_REVIEW_REQUESTS);
-  };
+  const remember = (request: string) =>
+    Effect.suspend(() => {
+      if (!request) return Effect.void;
+      const requests = state.requests;
+      requests.revision += 1;
+      requests.messages.push({ text: request, quotes: undefined, quoting: undefined });
+      trimBobUserRequests(requests);
+      // The reviewer quotes its restrictions now, so they hold once it leaves the latest messages.
+      return quoteRestrictions;
+    });
+  /**
+   * In Auto, while the thread lets the reviewer decide, quotes what the messages not quoted yet
+   * forbid or allow, newest first, apart from the turn and within the runtime's life; nothing else
+   * sends the user's messages to the reviewer. At the first that fails the rest wait for the next
+   * message or review, so a reviewer that is down gets one request each time. A new quote changes
+   * what the reviewer judges by.
+   */
+  const quoteRestrictions = Effect.suspend(() => {
+    const requests = state.requests;
+    const extract = hooks.autoJudge?.extract;
+    if (
+      extract === undefined ||
+      answering?.mode !== "auto" ||
+      state.asksAboutNetwork ||
+      scope === undefined
+    ) {
+      return Effect.void;
+    }
+    const idle = requests.messages
+      .filter((message) => message.quotes === undefined && message.quoting === undefined)
+      .toReversed();
+    if (idle.length === 0) return Effect.void;
+    return Effect.gen(function* () {
+      const quoting = yield* Deferred.make<void>();
+      for (const message of idle) message.quoting = quoting;
+      yield* Effect.gen(function* () {
+        for (const message of idle) {
+          const quotes = yield* extract(message.text);
+          // What the reviewer took from each message, in the trace file for the Auto audit.
+          yield* Effect.logInfo(
+            quotes === undefined
+              ? "Auto's reviewer could not quote the user's message"
+              : "Auto's reviewer quoted the user's message",
+          ).pipe(
+            Effect.withSpan("bob.auto.quote", {
+              attributes: {
+                "bob.thread": threadId ?? "",
+                "bob.reviewer": hooks.autoJudge?.name ?? "",
+                "bob.characters": message.text.length,
+                "bob.quoted": quotes !== undefined,
+                ...(quotes === undefined
+                  ? {}
+                  : {
+                      "bob.forbids": quoted(quotes, "forbids"),
+                      "bob.allows": quoted(quotes, "allows"),
+                    }),
+              },
+            }),
+          );
+          if (quotes === undefined) return;
+          message.quotes = quotes;
+          message.quoting = undefined;
+          if (quotes.length > 0) requests.revision += 1;
+          trimBobUserRequests(requests);
+        }
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            for (const message of idle) {
+              if (message.quoting === quoting) message.quoting = undefined;
+            }
+          }).pipe(Effect.andThen(Deferred.succeed(quoting, undefined))),
+        ),
+        Effect.forkIn(scope),
+      );
+    });
+  });
   /**
    * Cancels the running prompt for waiting steers once Bob runs no tool call, so a tool call Bob
    * started finishes rather than being cancelled. Bob records tool results before it asks the
@@ -676,16 +1061,15 @@ function wrapBobRuntime(
       return result;
     });
   const control: BobSessionControl = {
-    steer: (text, fromUser) =>
+    steer: (text, userText) =>
       Effect.suspend(() => {
         if (!state.prompting) return Effect.succeed(false);
         state.steers.push(text);
-        if (fromUser) remember(text.trim());
-        return saveSteers.pipe(Effect.andThen(interruptForSteer), Effect.as(true));
-      }),
-    prepareTurn: (turn) =>
-      Effect.sync(() => {
-        state.nextTurn = turn;
+        return (userText === undefined ? Effect.void : remember(userText)).pipe(
+          Effect.andThen(saveSteers),
+          Effect.andThen(interruptForSteer),
+          Effect.as(true),
+        );
       }),
     describe: (owner) => (link ? link.setMeta(owner) : Effect.void),
   };
@@ -787,9 +1171,42 @@ function wrapBobRuntime(
    * allow once, so Bob does not remember the tool for later calls. In Auto, a call the rules leave
    * to review goes to the reviewer model, judged against what the user asked; a command it lets
    * through, which needs the network, runs outside the sandbox. None for a call the user decides,
-   * including one the user stopped the prompt during.
+   * including one the user stopped the prompt during. Each answer in Auto, and why, goes to the
+   * trace file as a `bob.auto.decision` span, which `scripts/bob-auto-audit.ts` reads.
    */
   const autoAnswer = (request: EffectAcpSchema.RequestPermissionRequest) =>
+    decideAuto(request).pipe(
+      Effect.tap((outcome) => {
+        if (outcome === undefined || answering?.mode !== "auto") return Effect.void;
+        return Effect.logInfo(
+          outcome.answer === undefined
+            ? "Auto asked about a Bob tool call"
+            : "Auto allowed a Bob tool call",
+        ).pipe(
+          Effect.withSpan("bob.auto.decision", {
+            attributes: {
+              "bob.thread": threadId ?? "",
+              "bob.tool_call": request.toolCall.toolCallId,
+              "bob.tool": request.toolCall.title ?? "",
+              "bob.kind": request.toolCall.kind ?? "other",
+              "bob.call": describeBobToolCall(request.toolCall, answering),
+              "bob.decision": outcome.answer === undefined ? "ask" : "allow",
+              "bob.by": outcome.by,
+              "bob.reason": outcome.reason,
+            },
+          }),
+        );
+      }),
+      Effect.map((outcome) => outcome?.answer),
+    );
+  /** Who answered a tool call in `decideAuto`, and why; no answer leaves it to the user. */
+  const asks = (by: string, reason: string) => ({ answer: undefined, by, reason });
+  const allows = (optionId: string, by: string, reason: string) => ({
+    answer: { outcome: { outcome: "selected" as const, optionId } },
+    by,
+    reason,
+  });
+  const decideAuto = (request: EffectAcpSchema.RequestPermissionRequest) =>
     Effect.gen(function* () {
       const reviewing = () => answering !== undefined && state.prompting && !state.stopped;
       const option = request.options.find((candidate) => candidate.kind === "allow_once");
@@ -797,42 +1214,70 @@ function wrapBobRuntime(
       // A sandbox whose shell went missing no longer bounds what Bob runs.
       const sandboxed = answering.sandbox?.ready() === true;
       const command = commandOf(request);
-      // The sandbox stopped this command before; the user decides whether it runs outside.
-      if (command !== undefined && sandboxCalls.deniedCommands.has(command)) return undefined;
+      const context =
+        rules === undefined ? answering : { ...answering, rules: bobUserRules(rules) };
       const decision = reviewBobPermission(request.toolCall, {
         mode: answering.mode,
         sandboxed,
-        context: answering,
+        context,
       });
-      let reason = decision.reason;
-      if (decision.verdict === "review") {
-        // Only the user's own request can call for such a call.
-        if (hooks.autoJudge === undefined || state.requests.length === 0) return undefined;
-        const judgement = yield* hooks.autoJudge.judge({
-          userMessages: [...state.requests],
-          call: describeBobToolCall(request.toolCall, answering),
-        });
-        yield* Effect.logDebug("Auto review of a Bob tool call").pipe(
-          Effect.annotateLogs({
-            tool: request.toolCall.title ?? "",
-            reviewer: hooks.autoJudge.name,
-            decision: judgement.decision,
-            reason: judgement.reason,
-          }),
-        );
-        if (judgement.decision !== "allow" || !reviewing()) return undefined;
-        reason = `${hooks.autoJudge.name}: ${judgement.reason}`;
+      if (decision.outside === true) {
         letOutOfSandbox(request);
-      } else if (decision.verdict !== "allow") {
-        return undefined;
+        return allows(option.optionId, "user rule", decision.reason);
       }
-      yield* Effect.logDebug("Bob tool call approved by its permission mode").pipe(
-        Effect.annotateLogs({ tool: request.toolCall.title ?? "", reason }),
-      );
-      if (command !== undefined && sandboxed && decision.verdict === "allow") {
+      // The sandbox stopped this command before; the user decides whether it runs outside.
+      if (command !== undefined && sandboxCalls.deniedCommands.has(command)) {
+        return asks("sandbox", "the sandbox stopped this command before");
+      }
+      if (decision.verdict === "review") {
+        // Only the user's own request can call for such a call, unless the thread asks about all.
+        if (hooks.autoJudge === undefined) return asks("rules", "no reviewer");
+        if (state.asksAboutNetwork)
+          return asks("rules", "the thread asks about every network call");
+        if (state.requests.messages.length === 0) return asks("rules", "no message from the user");
+        // Restrictions being quoted are waited for, so a long message does not make its turn's
+        // calls ask. A message still not quoted is judged by only while it is shown whole; one
+        // that left the latest messages unquoted asks, and is quoted again meanwhile.
+        const requests = state.requests;
+        yield* quoteRestrictions;
+        yield* Effect.forEach(
+          [...requests.messages],
+          (message) => (message.quoting ? Deferred.await(message.quoting) : Effect.void),
+          { discard: true },
+        ).pipe(Effect.timeout(BOB_QUOTE_WAIT), Effect.ignore);
+        const older = requests.messages.slice(0, -BOB_AUTO_REVIEW_REQUESTS);
+        if (
+          hooks.autoJudge.extract !== undefined &&
+          older.some((message) => message.quotes === undefined)
+        ) {
+          return asks("rules", "an older message is not quoted yet");
+        }
+        const asked = { requests: requests.revision, rules: rules?.revision };
+        const judgement = yield* hooks.autoJudge.judge({
+          userMessages: requests.messages
+            .slice(-BOB_AUTO_REVIEW_REQUESTS)
+            .map((message) => ({ text: message.text, extracted: message.quotes !== undefined })),
+          standing: requests.messages.flatMap((message) =>
+            message.quotes !== undefined && message.quotes.length > 0 ? [message.quotes] : [],
+          ),
+          call: describeBobToolCall(request.toolCall, context),
+        });
+        const reviewer = `reviewer (${hooks.autoJudge.name})`;
+        if (judgement.decision !== "allow") return asks(reviewer, judgement.reason);
+        // A message or a rule that came while the model judged may say otherwise.
+        const unchanged =
+          state.requests.revision === asked.requests && rules?.revision === asked.rules;
+        if (!reviewing() || !unchanged) {
+          return asks(reviewer, `allowed, then the request or rules changed: ${judgement.reason}`);
+        }
+        letOutOfSandbox(request);
+        return allows(option.optionId, reviewer, judgement.reason);
+      }
+      if (decision.verdict !== "allow") return asks("rules", decision.reason);
+      if (command !== undefined && sandboxed) {
         sandboxCalls.running.set(request.toolCall.toolCallId, command);
       }
-      return { outcome: { outcome: "selected" as const, optionId: option.optionId } };
+      return allows(option.optionId, "rules", decision.reason);
     });
   /**
    * The sandbox's bookkeeping for this Bob: commands running in it, by tool call, to notice one
@@ -841,15 +1286,20 @@ function wrapBobRuntime(
    */
   const sandboxCalls = {
     running: new Map<string, string>(),
-    deniedCommands: new Set<string>(),
+    /** Each with the path the sandbox stopped it at, where its output names one. */
+    deniedCommands: new Map<string, string | undefined>(),
     /** Each approved call's approval file, which its end lets go of. */
     approvedCalls: new Map<string, string>(),
   };
-  /** Lets a command run outside the sandbox once, as approved. */
+  /** Lets a command run outside the sandbox once, as approved, in the folder it asked to. */
   const letOutOfSandbox = (request: EffectAcpSchema.RequestPermissionRequest) => {
     const command = commandOf(request);
     if (command === undefined || answering?.sandbox === undefined) return;
-    const approval = answering.sandbox.approveOutside(command);
+    const base = answering.workspace ?? cwd;
+    const folder = asRecord(request.toolCall.rawInput)?.cwd;
+    const where =
+      typeof folder !== "string" ? base : folder.startsWith("/") ? folder : `${base}/${folder}`;
+    const approval = answering.sandbox.approveOutside(command, where);
     sandboxCalls.approvedCalls.set(request.toolCall.toolCallId, approval);
     sandboxCalls.deniedCommands.delete(command);
   };
@@ -866,7 +1316,100 @@ function wrapBobRuntime(
     if (command === undefined) return;
     sandboxCalls.running.delete(id);
     if (update.status === "failed" && bobSandboxDenied(update))
-      sandboxCalls.deniedCommands.add(command);
+      sandboxCalls.deniedCommands.set(command, bobSandboxDeniedPath(update));
+  };
+  /**
+   * The rule a card offers for a call it asks about: after the sandbox stopped a command at a
+   * folder it keeps closed, to open that folder; otherwise to run commands starting like it
+   * without asking.
+   */
+  const ruleFor = (
+    request: EffectAcpSchema.RequestPermissionRequest,
+  ): BobRuleSuggestion | undefined => {
+    const command = commandOf(request);
+    if (answering === undefined || rules === undefined || command === undefined) return undefined;
+    // A command the user's own rule asks about gets no rule that could not apply to it.
+    if (asksByUserRule(command, bobUserRules(rules))) return undefined;
+    const path = sandboxCalls.deniedCommands.get(command);
+    const folder =
+      path === undefined
+        ? undefined
+        : bobSandboxFolderSuggestion(path, {
+            home: rules.home,
+            workspace: answering.workspace ?? cwd,
+            t3Home: rules.t3Home,
+            rules: bobUserRules(rules),
+          });
+    return folder === undefined
+      ? suggestBobCommandRule(command)
+      : { kind: folder.kind, value: bobRulePath(folder.folder, rules.home, rules.workspace) };
+  };
+  /**
+   * A card option that adds a rule: T3 keeps the rule, for the thread or in settings, and answers
+   * Bob's request once. A command rule runs the command outside the sandbox; a folder rule runs it
+   * in the sandbox, which now opens the folder.
+   */
+  const addRule = (
+    request: EffectAcpSchema.RequestPermissionRequest,
+    suggestion: BobRuleSuggestion,
+    scope: BobRuleScope,
+  ) =>
+    Effect.gen(function* () {
+      const option = request.options.find((candidate) => candidate.kind === "allow_once");
+      if (rules === undefined || option === undefined) {
+        return { outcome: { outcome: "cancelled" as const } };
+      }
+      const rule: BobRule = {
+        kind: suggestion.kind,
+        value: suggestion.value,
+        ...(scope !== "global" && rules.projectId !== undefined
+          ? { projectId: rules.projectId }
+          : {}),
+        ...(scope === "thread" && rules.threadId !== undefined ? { threadId: rules.threadId } : {}),
+      };
+      // The rule applies once settings keep it; the user approved this run either way.
+      const saved = (yield* rules.source?.add(rule, scope) ?? Effect.succeed(false)) === true;
+      if (saved) {
+        rules.saved = { rules: [...rules.saved.rules, rule], scope };
+        rules.revision += 1;
+        rules.refresh();
+      }
+      const command = commandOf(request);
+      // A folder rule that could not be saved leaves the command in the sandbox, to ask again.
+      if (suggestion.kind === "allow-command") {
+        letOutOfSandbox(request);
+      } else if (saved && command !== undefined && answering?.sandbox?.ready() === true) {
+        sandboxCalls.deniedCommands.delete(command);
+        sandboxCalls.running.set(request.toolCall.toolCallId, command);
+      }
+      return { outcome: { outcome: "selected" as const, optionId: option.optionId } };
+    });
+  /** The user's answer on a card in Auto, beside Auto's decision to ask, for the audit. */
+  const recordUserAnswer = (
+    request: EffectAcpSchema.RequestPermissionRequest,
+    response: EffectAcpSchema.RequestPermissionResponse,
+  ) => {
+    if (answering?.mode !== "auto") return Effect.void;
+    const chosen = response.outcome.outcome === "selected" ? response.outcome.optionId : undefined;
+    const scope = typeof chosen === "string" ? bobRuleScopeOf(chosen) : undefined;
+    const kind = request.options.find((option) => option.optionId === chosen)?.kind;
+    const answer =
+      chosen === undefined
+        ? "cancelled"
+        : scope !== undefined
+          ? `rule (${scope})`
+          : kind?.startsWith("allow")
+            ? "allow"
+            : "reject";
+    return Effect.logInfo("The user answered a Bob tool call Auto asked about").pipe(
+      Effect.withSpan("bob.auto.answer", {
+        attributes: {
+          "bob.thread": threadId ?? "",
+          "bob.tool_call": request.toolCall.toolCallId,
+          "bob.answer": answer,
+        },
+      }),
+    );
   };
   /** A command the user approved on a card runs outside the sandbox, as Codex's do. */
   const userApproved = (
@@ -891,13 +1434,40 @@ function wrapBobRuntime(
     handleRequestPermission: (handler) =>
       runtime.handleRequestPermission((request, context) =>
         autoAnswer(request).pipe(
-          Effect.flatMap((answer) =>
-            answer === undefined
-              ? handler(normalizeBobPermissionRequest(request), context).pipe(
-                  Effect.tap((response) => userApproved(request, response)),
-                )
-              : Effect.succeed(answer),
-          ),
+          Effect.flatMap((answer) => {
+            if (answer !== undefined) return Effect.succeed(answer);
+            const suggestion = ruleFor(request);
+            const normalized = normalizeBobPermissionRequest(request);
+            const kind = request.toolCall.kind;
+            // Bob would remember "always" for the tool itself, past T3's rules, so commands and
+            // edits get T3's rules instead. An approved command runs outside the sandbox.
+            const remembered =
+              kind === "execute" || kind === "edit" || kind === "delete" || kind === "move";
+            const outside = answering?.sandbox !== undefined && commandOf(request) !== undefined;
+            const shown = {
+              ...normalized,
+              options: remembered
+                ? normalized.options.filter((option) => option.kind !== "allow_always")
+                : normalized.options,
+              ...(outside ? { _meta: { ...normalized._meta, [BOB_RUNS_OUTSIDE]: true } } : {}),
+            };
+            return handler(
+              suggestion === undefined || rules === undefined
+                ? shown
+                : withRuleOptions(shown, suggestion, rules),
+              context,
+            ).pipe(
+              Effect.tap((response) => recordUserAnswer(request, response)),
+              Effect.flatMap((response) => {
+                const chosen =
+                  response.outcome.outcome === "selected" ? response.outcome.optionId : undefined;
+                const scope = typeof chosen === "string" ? bobRuleScopeOf(chosen) : undefined;
+                return scope === undefined || suggestion === undefined
+                  ? userApproved(request, response).pipe(Effect.as(response))
+                  : addRule(request, suggestion, scope);
+              }),
+            );
+          }),
         ),
       ),
     // Bob advertises `session/load` but replays every message through it; resume restores the
@@ -934,17 +1504,19 @@ function wrapBobRuntime(
         state.lastReply = "";
         state.prompting = true;
         state.stopped = false;
-        const turn = state.nextTurn;
-        state.nextTurn = undefined;
+        const turn = threadId === undefined ? undefined : turns.next.get(threadId);
+        if (threadId !== undefined) turns.next.delete(threadId);
+        if (turn !== undefined && rules !== undefined) {
+          rules.projectId = turn.projectId;
+          rules.refresh();
+        }
+        if (turn !== undefined) state.asksAboutNetwork = turn.asksAboutNetwork;
         // The turn's message leads the prompt; it counts for Auto only when the user wrote it,
         // not a check-in, a notice or a wake.
         const first = payload.prompt.find((block) => block.type === "text");
         const request = first?.type === "text" ? bobUserRequest(first.text) : "";
-        const pending = userMessages.get(request) ?? 0;
-        if (pending > 0) {
-          if (pending === 1) userMessages.delete(request);
-          else userMessages.set(request, pending - 1);
-          remember(request);
+        if (turn?.userRequest !== undefined && turn.userRequest === request) {
+          yield* remember(turn.userText ?? "");
         }
         if (link) yield* link.turnStarted;
         let result: EffectAcpSchema.PromptResponse;
@@ -1023,6 +1595,7 @@ function openBobSandbox(
   options: BobAdapterV2Options,
   mode: BobPermissionMode,
   cwd: string,
+  rules: BobRuntimeRules,
 ): Effect.Effect<BobSandbox | undefined> {
   return Effect.try(() =>
     makeBobSandbox({
@@ -1031,11 +1604,12 @@ function openBobSandbox(
       home: options.environment.HOME ?? NodeOS.homedir(),
       platform: options.platform ?? "linux",
       shell: options.environment.SHELL,
-      cacheDir: options.serverConfig.providerStatusCacheDir,
-      stateDir: options.serverConfig.stateDir,
-      key: `${options.instanceId}\0${cwd}`,
+      cacheDir: options.host.paths.providerStatusCacheDir,
+      stateDir: options.host.paths.stateDir,
+      key: `${options.instanceId}\0${rules.threadId ?? ""}\0${cwd}`,
       temporaryFolders: [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp"],
       searchPath: options.environment.PATH,
+      rules: bobUserRules(rules),
     }),
   ).pipe(
     Effect.tapError((cause) => Effect.logWarning("Bob's sandbox could not be set up", cause)),
@@ -1046,6 +1620,8 @@ function openBobSandbox(
 export interface BobAdapterV2Options extends BobAdapterV2Hooks {
   /** The host's platform, which decides whether Bob's commands can run in a sandbox. */
   readonly platform?: NodeJS.Platform;
+  /** The user's permission rules; without them only a thread's own rules apply. */
+  readonly rules?: BobRulesSource;
   /** For an instance that runs Bob in tmux: the relays its Bob sessions run under. */
   readonly relays?: BobRelays;
   readonly instanceId: ProviderInstanceId;
@@ -1057,7 +1633,7 @@ export interface BobAdapterV2Options extends BobAdapterV2Hooks {
   readonly selfInvocation: SelfInvocation;
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
-  readonly serverConfig: ServerConfig.ServerConfig["Service"];
+  readonly host: ProviderHost.ProviderHostShape;
   readonly nativeLogging?: Parameters<typeof makeAcpAdapterV2>[0]["nativeLogging"];
   readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
 }
@@ -1065,7 +1641,7 @@ export interface BobAdapterV2Options extends BobAdapterV2Hooks {
 export function makeBobAcpAdapterFlavor(
   options: BobAdapterV2Options,
   sessions: Map<string, BobSessionControl> = new Map(),
-  userMessages: Map<string, number> = new Map(),
+  turns: BobThreadTurns = makeBobThreadTurns(),
 ): AcpAdapterV2Flavor {
   return {
     driver: BOB_PROVIDER,
@@ -1083,23 +1659,60 @@ export function makeBobAcpAdapterFlavor(
                   "SHA-256",
                   new TextEncoder().encode(mcpAuthorization.replace(/^Bearer\s+/, "")),
                 )
-                .pipe(Effect.map(Encoding.encodeHex), Effect.orDie)
+                .pipe(Effect.map(Hex.encode), Effect.orDie)
             : undefined;
         const link = options.relays?.linkFor({
           cwd: input.cwd,
           resumeSessionId: input.resumeSessionId,
           mcpTokenHash,
           autoApprove: bobApprovesItsOwnTools(runtimePolicy.runtimeMode),
+          mode: runtimePolicy.runtimeMode,
         });
         const terminated = yield* Deferred.make<void>();
         // Auto's reviewer model gets ready while Bob starts, so its first call does not wait.
+        if (options.holdAutoJudge !== undefined) yield* options.holdAutoJudge;
         if (runtimePolicy.runtimeMode === "auto" && options.autoJudge !== undefined) {
           yield* options.autoJudge.warm.pipe(Effect.forkDetach);
         }
         const mode = runtimePolicy.runtimeMode;
-        // Outside Full access Bob's commands run in a sandbox, read-only in Supervised.
+        // Subscribed before the rules are read, so no change falls between the two.
+        const changes =
+          mode === "full-access" ? undefined : yield* options.rules?.subscribe ?? Effect.void;
+        const rules: BobRuntimeRules | undefined =
+          mode === "full-access"
+            ? undefined
+            : {
+                saved: options.rules ? yield* options.rules.get : { rules: [], scope: "thread" },
+                revision: 0,
+                workspace: runtimePolicy.cwd ?? input.cwd,
+                threadId: input.threadId ?? undefined,
+                projectId: input.threadId ? turns.projects.get(input.threadId) : undefined,
+                home: options.environment.HOME ?? NodeOS.homedir(),
+                t3Home: options.host.paths.baseDir,
+                source: options.rules,
+                refresh: () => undefined,
+              };
+        // Outside Full access Bob's commands run in a sandbox, read-only in Supervised, which
+        // follows the user's rules as they change.
         const sandbox =
-          mode === "full-access" ? undefined : yield* openBobSandbox(options, mode, input.cwd);
+          rules === undefined || mode === "full-access"
+            ? undefined
+            : yield* openBobSandbox(options, mode, input.cwd, rules);
+        if (rules !== undefined) {
+          rules.refresh = () => sandbox?.update(bobUserRules(rules));
+          if (changes) {
+            yield* changes.pipe(
+              Stream.runForEach((saved) =>
+                Effect.sync(() => {
+                  rules.saved = saved;
+                  rules.revision += 1;
+                  rules.refresh();
+                }),
+              ),
+              Effect.forkScoped,
+            );
+          }
+        }
         const runtime = yield* makeBobAcpRuntime({
           ...input,
           onTermination: (error) =>
@@ -1117,7 +1730,10 @@ export function makeBobAcpAdapterFlavor(
           mcpAuthorization,
           review:
             mode === "full-access" ? undefined : { mode, workspace: runtimePolicy.cwd, sandbox },
-          userMessages,
+          rules,
+          threadId: input.threadId ?? undefined,
+          turns,
+          scope: yield* Effect.scope,
         });
       }),
     preferResumeSession: true,
@@ -1254,8 +1870,8 @@ function wrapBobSession(
     readonly noticeItemId: (nativeItemId: string) => TurnItemId;
   },
   sessions: ReadonlyMap<string, BobSessionControl>,
-  attachmentsDir: string,
-  userMessages: Map<string, number>,
+  resolveAttachmentPath: ProviderHost.ProviderHostShape["resolveAttachmentPath"],
+  turns: BobThreadTurns,
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
   let cwd = openedIn;
@@ -1347,10 +1963,11 @@ function wrapBobSession(
         const text = providerMessageTextWithAttachmentPaths({
           text: input.message.text,
           attachments: input.message.attachments,
-          attachmentsDir,
+          resolveAttachmentPath,
         });
         // Too late once Bob's prompt ended; the message then follows the turn instead.
-        if (steer === undefined || !(yield* steer(text, isUserWritten(input.message)))) {
+        const userText = isUserWritten(input.message) ? input.message.text.trim() : undefined;
+        if (steer === undefined || !(yield* steer(text, userText))) {
           return yield* new ProviderAdapter.ProviderAdapterSteerRunError({
             driver: BOB_PROVIDER,
             providerThreadId: input.providerThread.id,
@@ -1362,36 +1979,43 @@ function wrapBobSession(
     startTurn: (input) => {
       follow(input.runtimePolicy);
       // Auto's reviewer judges calls against what the user asked, never a check-in, a notice or
-      // another agent's message, so the runtime keeps the turn's text only when the user wrote it.
-      if (isUserWritten(input.message)) {
-        const text = providerMessageTextWithAttachmentPaths({
-          text: input.message.text,
-          attachments: input.message.attachments,
-          attachmentsDir,
-        }).trim();
-        userMessages.set(text, (userMessages.get(text) ?? 0) + 1);
-        for (const [old] of userMessages) {
-          if (userMessages.size <= BOB_PENDING_USER_MESSAGES) break;
-          userMessages.delete(old);
-        }
-      }
+      // another agent's message, so the turn tells its runtime its text only when the user wrote it.
+      const userRequest = isUserWritten(input.message)
+        ? providerMessageTextWithAttachmentPaths({
+            text: input.message.text,
+            attachments: input.message.attachments,
+            resolveAttachmentPath,
+          }).trim()
+        : undefined;
+      // Only what the user typed is quoted, never an attachment's path or text.
+      const userText = userRequest === undefined ? undefined : input.message.text.trim();
       const mode = modes.missing(input);
       if (mode !== undefined) missingModes.set(input.attemptId, { input, mode });
-      const taskId = bobTaskId(input.providerThread);
       // A wake T3 starts for a prompt Bob kept going while T3 restarted carries no request of its
       // own, and upstream's restart continuation only asks Bob to go on.
       const isWake =
         input.message.createdBy === "agent" && input.message.creationSource === "provider";
-      const prepare =
-        taskId === undefined
-          ? Effect.void
-          : (sessions.get(taskId)?.prepareTurn({
-              adoptOnly: isWake,
-              skipTextAfterAdoption: isWake || input.restartContinuationOfRunId !== undefined,
-            }) ?? Effect.void);
-      return prepare.pipe(Effect.andThen(session.startTurn(input))).pipe(
+      // Whichever runtime serves the thread takes the turn, one started for it included.
+      turns.next.set(input.threadId, {
+        threadId: input.threadId,
+        projectId: input.appThread.projectId,
+        userRequest,
+        userText,
+        asksAboutNetwork:
+          input.modelSelection.options?.find((option) => option.id === BOB_NETWORK_OPTION_ID)
+            ?.value === BOB_NETWORK_ASK,
+        adoptOnly: isWake,
+        skipTextAfterAdoption: isWake || input.restartContinuationOfRunId !== undefined,
+      });
+      turns.projects.set(input.threadId, input.appThread.projectId);
+      return session.startTurn(input).pipe(
         Effect.mapError(explainSetup),
-        Effect.tapError(() => Effect.sync(() => missingModes.delete(input.attemptId))),
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            missingModes.delete(input.attemptId);
+            turns.next.delete(input.threadId);
+          }),
+        ),
       );
     },
     // Bob resumes a task only in the folder it started in, so a thread that moved copies its
@@ -1488,8 +2112,7 @@ export function makeBobAdapterV2(
   const offeredModes = new Map<string, ReadonlySet<string>>();
   // Each Bob session's runtime, by Bob's task id.
   const sessions = new Map<string, BobSessionControl>();
-  // Turns' messages the user wrote, as Bob gets them, counted until their prompts reach Bob.
-  const userMessages = new Map<string, number>();
+  const turns = makeBobThreadTurns();
   const adapter = makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: makeBobAcpAdapterFlavor(
@@ -1501,12 +2124,12 @@ export function makeBobAdapterV2(
         },
       },
       sessions,
-      userMessages,
+      turns,
     ),
     crypto: options.crypto,
     fileSystem: options.fileSystem,
     idAllocator: options.idAllocator,
-    serverConfig: options.serverConfig,
+    host: options.host,
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.continuationRequests === undefined
@@ -1566,8 +2189,8 @@ export function makeBobAdapterV2(
             explainSetup,
             modes,
             sessions,
-            options.serverConfig.attachmentsDir,
-            userMessages,
+            options.host.resolveAttachmentPath,
+            turns,
           ),
         ),
       ),

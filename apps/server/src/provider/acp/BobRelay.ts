@@ -53,6 +53,8 @@ const BobRelayMeta = Schema.Struct({
   steers: Schema.optional(Schema.Array(Schema.String)),
   /** Bob was started with `--auto-approve` and asks about none of its tools. */
   autoApprove: Schema.optional(Schema.Boolean),
+  /** The permission mode Bob was started for, whose sandbox profile its commands run under. */
+  mode: Schema.optional(Schema.String),
 });
 type BobRelayMeta = typeof BobRelayMeta.Type;
 
@@ -790,6 +792,8 @@ export interface BobRelays {
     readonly mcpTokenHash?: string | undefined;
     /** Whether the Bob this runtime starts approves its own tools, as in Full access. */
     readonly autoApprove: boolean;
+    /** The permission mode the runtime answers in, whose sandbox profile Bob's commands need. */
+    readonly mode: string;
   }) => BobRelayLink;
 }
 
@@ -798,6 +802,8 @@ export interface AdoptableBobRelay {
   readonly relayId: string;
   /** Its Bob approves its own tools, so only a runtime in Full access takes it over. */
   readonly autoApprove: boolean;
+  /** The mode its Bob was started for; none from a relay an older T3 started. */
+  readonly mode?: string | undefined;
 }
 
 /**
@@ -812,7 +818,7 @@ export function makeBobRelays(input: {
   readonly ready: Effect.Effect<void>;
 }): BobRelays {
   return {
-    linkFor: ({ cwd, resumeSessionId, mcpTokenHash, autoApprove }) => {
+    linkFor: ({ cwd, resumeSessionId, mcpTokenHash, autoApprove, mode }) => {
       let chosen: BobRelayLink | undefined;
       /** The link to spawn through, after stopping a relay this runtime must not take over. */
       const choose = (): { readonly link: BobRelayLink; readonly before: Effect.Effect<void> } => {
@@ -820,6 +826,7 @@ export function makeBobRelays(input: {
           input.host.link({
             instanceId: input.instanceId,
             cwd,
+            mode,
             ...(mcpTokenHash === undefined ? {} : { mcpTokenHash }),
           });
         const kept =
@@ -828,9 +835,10 @@ export function makeBobRelays(input: {
           return { link: fresh(), before: Effect.void };
         }
         input.adoptable.delete(resumeSessionId);
-        // A Bob started in Full access approves its own tools, which only Full access allows:
-        // after a switch to another mode it stops, and a Bob that asks starts in its place.
-        if (kept.autoApprove && !autoApprove) {
+        // A Bob started in Full access approves its own tools, which only Full access allows, and
+        // one started in another mode runs its commands under that mode's sandbox profile: after
+        // a switch it stops, and a Bob for the new mode starts in its place.
+        if ((kept.autoApprove && !autoApprove) || (kept.mode !== undefined && kept.mode !== mode)) {
           return { link: fresh(), before: input.host.kill(kept.relayId).pipe(Effect.ignore) };
         }
         return { link: input.host.attach(kept.relayId), before: Effect.void };

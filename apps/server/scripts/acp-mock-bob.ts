@@ -15,10 +15,11 @@
  * (logged as `_mock/released`) and then keeps the prompt open until `session/cancel`, and
  * "finish later", whose tool call runs until that file exists (also logged) and which then
  * replies, and
- * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins, and
+ * "spend too much", which Bob's gateway refuses as over the team's monthly Bobcoins,
+ * "exit now", which ends Bob's process mid-prompt, and
  * "ask about <tools>", which asks permission for each tool named (edit, edit-config, edit-outside, execute, ls,
- * test, search, fetch, todo, subagent, read, and an MCP tool for any other name) as Bob asks, logs
- * each answer as `_mock/permission` and replies with them.
+ * test, test-denied, tool-denied, commit, search, fetch, todo, subagent, read, and an MCP tool for
+ * any other name) as Bob asks, logs each answer as `_mock/permission` and replies with them.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
@@ -222,7 +223,13 @@ function handle(method: string, params: Json): Json {
         // The shell Bob would run commands with, which T3 may point at its sandbox.
         NodeFS.appendFileSync(
           requestLogPath,
-          `${JSON.stringify({ method: "_mock/env", params: { SHELL: process.env.SHELL ?? "" } })}\n`,
+          `${JSON.stringify({
+            method: "_mock/env",
+            params: {
+              SHELL: process.env.SHELL ?? "",
+              PROFILE: process.env.T3_BOB_SANDBOX_PROFILE ?? "",
+            },
+          })}\n`,
         );
       }
       return {
@@ -422,6 +429,15 @@ function askedTool(name: string, cwd: string): Json {
     case "test-denied":
       // Runs, and fails as the sandbox stops it.
       return { kind: "execute", title: "npm run e2e", rawInput: { command: "npm run e2e" } };
+    case "tool-denied":
+      // Runs, and fails as the sandbox stops it reading its settings in a hidden folder.
+      return { kind: "execute", title: "fake-tool sync", rawInput: { command: "fake-tool sync" } };
+    case "commit":
+      return {
+        kind: "execute",
+        title: 'git commit -m "Notes"',
+        rawInput: { command: 'git commit -m "Notes"' },
+      };
     case "search":
       return {
         kind: "search",
@@ -482,7 +498,8 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
       const found = NodeFS.existsSync(approvals)
         ? NodeFS.readdirSync(approvals).map((name) => {
             const path = `${approvals}/${name}`;
-            const text = NodeFS.readFileSync(path, "utf8");
+            // The folder it was approved in, then the command.
+            const text = NodeFS.readFileSync(path, "utf8").split("\n").slice(1).join("\n");
             if (text === (asked.rawInput as { command?: string }).command) NodeFS.rmSync(path);
             return text;
           })
@@ -492,7 +509,11 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
         `${JSON.stringify({ method: "_mock/approvals", params: { tool, found } })}\n`,
       );
     }
-    const denied = tool === "test-denied" && chosen.startsWith("allow");
+    const denied = (tool === "test-denied" || tool === "tool-denied") && chosen.startsWith("allow");
+    const deniedText =
+      tool === "tool-denied"
+        ? `Error: EPERM: operation not permitted, open '${process.env.HOME ?? ""}/.fake-tool/config.json'`
+        : "Error: listen EPERM: operation not permitted";
     notify(sessionId, {
       sessionUpdate: "tool_call_update",
       toolCallId,
@@ -502,7 +523,7 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
             content: [
               {
                 type: "content",
-                content: { type: "text", text: "Error: listen EPERM: operation not permitted" },
+                content: { type: "text", text: deniedText },
               },
             ],
           }
@@ -557,6 +578,13 @@ lines.on("line", (line) => {
   ) {
     finishLater(message.id, String(message.params?.sessionId));
     return;
+  }
+  // Bob's process dies mid-prompt, so T3 starts another for the next turn.
+  if (
+    message.method === "session/prompt" &&
+    promptText(message.params?.prompt).includes("exit now")
+  ) {
+    process.exit(1);
   }
   const asked = /ask about ([a-z ,-]+)/.exec(promptText(message.params?.prompt));
   if (message.method === "session/prompt" && message.id !== undefined && asked) {

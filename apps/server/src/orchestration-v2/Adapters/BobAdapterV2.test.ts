@@ -16,7 +16,12 @@ import {
   ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
+  type BobRule,
+  type BobRuleScope,
+  type ChatAttachment,
   type OrchestrationV2ProviderThread,
+  type ProviderApprovalDecision,
+  type ProviderApprovalOption,
   type ProviderTurnId,
   RunAttemptId,
   RunId,
@@ -28,6 +33,7 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -36,24 +42,31 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpServer } from "effect/unstable/http";
-import * as NetAddress from "effect/unstable/net/NetAddress";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { HttpServer } from "effect/http";
+import * as NetAddress from "effect/net/NetAddress";
+import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { layerTestProviderHost } from "@t3tools/provider-testing/host";
+
 import * as ServerConfig from "../../config.ts";
 import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
-import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
 import { BOB_SSO_SIGN_IN_MESSAGE } from "../../provider/acp/BobAcpSupport.ts";
-import type { BobAutoJudge, BobAutoJudgeInput } from "../../provider/acp/bobAutoJudge.ts";
+import type {
+  BobAutoJudge,
+  BobAutoJudgeInput,
+  BobUserQuote,
+} from "../../provider/acp/bobAutoJudge.ts";
 import { bobSandboxAvailable } from "../../provider/acp/bobSandbox.ts";
-import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
-import * as IdAllocator from "../IdAllocator.ts";
-import * as ProviderAdapter from "../ProviderAdapter.ts";
-import { makeProviderFailure } from "../ProviderFailure.ts";
+import { execScriptSource, writeFakeCli } from "@t3tools/provider-testing/fakeCli";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProcessRunner from "../../processRunner.ts";
 import {
   bobRelayHasTurn,
@@ -64,9 +77,10 @@ import {
   readBobRelayMeta,
 } from "../../provider/acp/BobRelay.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
-import { type ProviderAdapterV2Event, ProviderAdapterV2RuntimePolicy } from "../ProviderAdapter.ts";
+import { type ProviderAdapterV2Event, ProviderAdapterV2RuntimePolicy } from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   BOB_EMPTY_REPLY_MESSAGE,
+  type BobRulesSource,
   decodeBobTitle,
   makeBobAcpAdapterFlavor,
   makeBobAdapterV2,
@@ -108,7 +122,7 @@ const flavor = makeBobAcpAdapterFlavor({
   selfInvocation: undefined as never,
   fileSystem: undefined as never,
   idAllocator: undefined as never,
-  serverConfig: undefined as never,
+  host: undefined as never,
 });
 
 function permissionRequest(
@@ -311,6 +325,7 @@ const sessionLayer = Layer.mergeAll(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-bob-v2-adapter-" }).pipe(
     Layer.provide(NodeServices.layer),
   ),
+  layerTestProviderHost().pipe(Layer.provide(NodeServices.layer)),
 );
 
 interface BobRequest {
@@ -322,6 +337,17 @@ interface BobRequest {
  * Opens the V2 adapter against the mock Bob, which records every request and keeps its tasks in a
  * file every mock Bob shares, as real Bobs share their task database.
  */
+/** A sentence the fake reviewer quotes as forbidding or allowing the agent something. */
+const forbids = (text: string): BobUserQuote => ({ kind: "forbids", text });
+const allows = (text: string): BobUserQuote => ({ kind: "allows", text });
+/** The fake reviewer's quotes of a message: lines starting "Never" forbid, "You may" allow. */
+const quotesOf = (text: string): ReadonlyArray<BobUserQuote> =>
+  text
+    .split("\n")
+    .flatMap((line) =>
+      line.startsWith("Never") ? [forbids(line)] : line.startsWith("You may") ? [allows(line)] : [],
+    );
+
 const openBob = (input: {
   readonly mockEnv?: Record<string, string>;
   /** Bob's task usage by reading, the first when a session opens. */
@@ -340,6 +366,10 @@ const openBob = (input: {
   readonly autoJudge?: BobAutoJudge;
   /** The host's platform; macOS runs Bob's commands in a sandbox. */
   readonly platform?: NodeJS.Platform;
+  /** The user's saved permission rules. */
+  readonly rules?: BobRulesSource;
+  /** The thread's Auto network choice. */
+  readonly network?: "review" | "ask";
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -377,9 +407,10 @@ const openBob = (input: {
       selfInvocation: yield* resolveSelfInvocation(),
       fileSystem,
       idAllocator: yield* IdAllocator.IdAllocatorV2,
-      serverConfig: yield* ServerConfig.ServerConfig,
+      host: yield* ProviderHost.ProviderHost,
       ...(input.autoJudge ? { autoJudge: input.autoJudge } : {}),
       ...(input.platform ? { platform: input.platform } : {}),
+      ...(input.rules ? { rules: input.rules } : {}),
       onAvailableCommands: (available, cwd) =>
         Effect.sync(() => {
           commands.push({ names: available.map((command) => command.name), cwd });
@@ -408,10 +439,14 @@ const openBob = (input: {
         : {}),
     });
     const threadId = ThreadId.make("thread-bob-turn");
+    const options = [
+      ...(input.mode ? [{ id: "_t3/session-mode", value: input.mode }] : []),
+      ...(input.network ? [{ id: "_t3/bob-network", value: input.network }] : []),
+    ];
     const modelSelection = {
       instanceId,
       model: "bob-default",
-      ...(input.mode ? { options: [{ id: "_t3/session-mode", value: input.mode }] } : {}),
+      ...(options.length > 0 ? { options } : {}),
     };
     const policyFor = (cwd: string, interactionMode: "default" | "plan" = "default") =>
       ProviderAdapterV2RuntimePolicy.make({
@@ -450,6 +485,7 @@ const openBob = (input: {
         readonly wake?: boolean;
         /** The message is the server's, such as a check-in, not a user's. */
         readonly fromServer?: boolean;
+        readonly attachments?: ReadonlyArray<ChatAttachment>;
       } = {},
     ) =>
       Effect.gen(function* () {
@@ -503,7 +539,7 @@ const openBob = (input: {
               options.wake === true ? "provider" : options.fromServer === true ? "server" : "web",
             messageId: MessageId.make(`message-bob-${turn}`),
             text,
-            attachments: [],
+            attachments: options.attachments ?? [],
           },
           modelSelection,
           runtimePolicy,
@@ -733,16 +769,22 @@ describe("BobAdapterV2 turns", () => {
   const askAbout = (
     runtimeMode: RuntimeMode,
     tools: string,
-    decisions: ReadonlyArray<"accept" | "decline">,
+    decisions: ReadonlyArray<
+      | "accept"
+      | "decline"
+      | { readonly decision: ProviderApprovalDecision; readonly optionId: string }
+    >,
     autoJudge?: BobAutoJudge,
     fromServer = false,
     platform?: NodeJS.Platform,
+    rules?: BobRulesSource,
   ) =>
     Effect.gen(function* () {
       const bob = yield* openBob({
         runtimeMode,
         ...(autoJudge ? { autoJudge } : {}),
         ...(platform ? { platform } : {}),
+        ...(rules ? { rules } : {}),
       });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
@@ -751,6 +793,10 @@ describe("BobAdapterV2 turns", () => {
         runtimePolicy: bob.policyFor(bob.workspace),
       });
       const asked: Array<string> = [];
+      // The rule options each card offered, as the client shows them.
+      const offered: Array<ReadonlyArray<ProviderApprovalOption>> = [];
+      // Every option each card offered.
+      const cards: Array<ReadonlyArray<ProviderApprovalOption>> = [];
       const events = yield* bob.runTurn(session, providerThread, `ask about ${tools}`, {
         fromServer,
         whileRunning: ({ nextEvent }) =>
@@ -763,10 +809,26 @@ describe("BobAdapterV2 turns", () => {
               ) {
                 event = yield* nextEvent;
               }
-              asked.push(event.runtimeRequest.kind);
+              const request = event.runtimeRequest;
+              asked.push(request.kind);
+              // The card follows its request.
+              let item = yield* nextEvent;
+              while (
+                item.type !== "turn_item.updated" ||
+                item.turnItem.type !== "approval_request" ||
+                item.turnItem.requestId !== request.id
+              ) {
+                item = yield* nextEvent;
+              }
+              cards.push(item.turnItem.options ?? []);
+              offered.push(
+                (item.turnItem.options ?? []).filter(
+                  (option) => option.decision === "acceptAlways",
+                ),
+              );
               yield* session.respondToRuntimeRequest({
-                requestId: event.runtimeRequest.id,
-                decision,
+                requestId: request.id,
+                ...(typeof decision === "string" ? { decision } : decision),
               });
             }
           }),
@@ -776,26 +838,603 @@ describe("BobAdapterV2 turns", () => {
         .requests()
         .filter((request) => request.method === "_mock/permission")
         .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`);
-      return { asked, answers, bob };
+      return { asked, answers, bob, offered, cards };
     });
+
+  /** Saved rules a test starts from, recording what a card saves. */
+  const savedRules = (scope: BobRuleScope, rules: ReadonlyArray<BobRule> = [], saves = true) => {
+    const added: Array<{ readonly rule: BobRule; readonly scope: BobRuleScope }> = [];
+    const source: BobRulesSource = {
+      get: Effect.succeed({ rules, scope }),
+      subscribe: Effect.succeed(Stream.empty),
+      add: (rule, picked) =>
+        Effect.sync(() => {
+          added.push({ rule, scope: picked });
+          return saves;
+        }),
+    };
+    return { source, added };
+  };
+
+  it.effect(
+    "offers a rule for a command it asks about, the scope picked last first, and then runs it without asking",
+    () =>
+      Effect.gen(function* () {
+        const { source, added } = savedRules("project");
+        const { answers, asked, offered } = yield* askAbout(
+          "auto-accept-edits",
+          "commit commit",
+          [{ decision: "acceptAlways", optionId: "t3-rule:project" }],
+          undefined,
+          false,
+          "linux",
+          source,
+        );
+        assert.deepEqual(asked, ["command"]);
+        assert.deepEqual(
+          offered[0]?.map((option) => [option.optionId, option.label]),
+          [
+            ["t3-rule:project", "Always allow `git commit` in this project"],
+            ["t3-rule:thread", "Always allow `git commit` in this thread"],
+            ["t3-rule:global", "Always allow `git commit` in every project"],
+          ],
+        );
+        // The rule is saved for the thread's project, and the second commit runs on it.
+        assert.equal(added.length, 1);
+        assert.deepInclude(added[0]?.rule, { kind: "allow-command", value: "git commit" });
+        assert.isDefined(added[0]?.rule?.projectId);
+        assert.equal(added[0]?.scope, "project");
+        assert.deepEqual(answers, ["commit=allow", "commit=allow"]);
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("approves once when the rule cannot be saved, and asks again next time", () =>
+    Effect.gen(function* () {
+      const { source } = savedRules("thread", [], false);
+      const { answers, asked } = yield* askAbout(
+        "auto-accept-edits",
+        "commit commit",
+        [{ decision: "acceptAlways", optionId: "t3-rule:thread" }, "decline"],
+        undefined,
+        false,
+        "linux",
+        source,
+      );
+      assert.deepEqual(asked, ["command", "command"]);
+      assert.deepEqual(answers, ["commit=allow", "commit=reject"]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("approves once a choice to always allow sent without its option", () =>
+    Effect.gen(function* () {
+      const { source, added } = savedRules("thread");
+      const { answers } = yield* askAbout(
+        "auto-accept-edits",
+        "commit commit",
+        [
+          { decision: "acceptAlways", optionId: "unknown" },
+          // A decline naming a rule's option still declines.
+          { decision: "decline", optionId: "t3-rule:thread" },
+        ],
+        undefined,
+        false,
+        "linux",
+        source,
+      );
+      assert.deepEqual(answers, ["commit=allow", "commit=reject"]);
+      assert.deepEqual(added, []);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect.skipIf(!sandboxAvailable)(
+    "says an approved command runs outside the sandbox, and leaves Bob's own always to its rules",
+    () =>
+      Effect.gen(function* () {
+        const { source } = savedRules("thread");
+        const { cards } = yield* askAbout(
+          "auto-accept-edits",
+          "commit",
+          ["decline"],
+          undefined,
+          false,
+          "darwin",
+          source,
+        );
+        const approve = cards[0]?.find((option) => option.decision === "accept");
+        assert.include(approve?.warning, "outside the sandbox");
+        assert.isUndefined(cards[0]?.find((option) => option.decision === "acceptForSession"));
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("asks when a rule changes while the reviewer judges", () =>
+    Effect.gen(function* () {
+      const changes = yield* Queue.unbounded<{
+        readonly rules: ReadonlyArray<BobRule>;
+        readonly scope: BobRuleScope;
+      }>();
+      const source: BobRulesSource = {
+        get: Effect.succeed({ rules: [], scope: "thread" }),
+        subscribe: Effect.succeed(Stream.fromQueue(changes)),
+        add: () => Effect.succeed(true),
+      };
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        // The user adds a rule while the model thinks, and the model then allows.
+        judge: () =>
+          Queue.offer(changes, {
+            rules: [{ kind: "ask-command", value: "gh" }],
+            scope: "thread",
+          }).pipe(
+            Effect.andThen(Effect.yieldNow),
+            Effect.as({ decision: "allow" as const, reason: "test" }),
+          ),
+      };
+      const { answers } = yield* askAbout(
+        "auto",
+        "search",
+        ["decline"],
+        judge,
+        false,
+        "linux",
+        source,
+      );
+      assert.deepEqual(answers, ["search=reject"]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "answers by the project's rules and the user's request in a Bob started for a new turn",
+    () =>
+      Effect.gen(function* () {
+        const { source } = savedRules("thread", [
+          { kind: "private", value: "./notes.md", projectId: ProjectId.make("project-bob-turn") },
+        ]);
+        const judged: Array<BobAutoJudgeInput> = [];
+        const judge: BobAutoJudge = {
+          name: "a test reviewer",
+          warm: Effect.void,
+          judge: (input) =>
+            Effect.sync(() => {
+              judged.push(input);
+              return { decision: "ask" as const, reason: "test" };
+            }),
+        };
+        const bob = yield* openBob({
+          runtimeMode: "auto",
+          platform: "linux",
+          rules: source,
+          autoJudge: judge,
+        });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        // Bob's process dies, so the next turn runs in a Bob started for it.
+        yield* bob.runTurn(session, providerThread, "exit now");
+        yield* bob.runTurn(session, providerThread, "ask about edit search", {
+          whileRunning: ({ nextEvent }) =>
+            Effect.gen(function* () {
+              for (let answered = 0; answered < 2; answered += 1) {
+                let event = yield* nextEvent;
+                while (
+                  event.type !== "runtime_request.updated" ||
+                  event.runtimeRequest.status !== "pending"
+                ) {
+                  event = yield* nextEvent;
+                }
+                yield* session.respondToRuntimeRequest({
+                  requestId: event.runtimeRequest.id,
+                  decision: "decline",
+                });
+              }
+            }),
+        });
+        const answers = bob
+          .requests()
+          .filter((request) => request.method === "_mock/permission")
+          .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`);
+        // The project's private file asks, and the reviewer reads the user's request, with what
+        // they asked the Bob before.
+        assert.deepEqual(answers, ["edit=reject", "search=reject"]);
+        assert.deepEqual(
+          judged[0]?.userMessages.map((message) => message.text),
+          ["exit now", "ask about edit search"],
+        );
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("keeps the user's restrictions before the reviewer after their message is gone", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "ask" as const, reason: "test" };
+          }),
+        extract: (text) => Effect.succeed(quotesOf(text)),
+      };
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(session, providerThread, "Never search the web for this task.");
+      for (const turn of [1, 2, 3, 4, 5, 6]) {
+        yield* bob.runTurn(session, providerThread, `keep going ${turn}`);
+      }
+      yield* bob.runTurn(session, providerThread, "ask about search", {
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            let event = yield* nextEvent;
+            while (
+              event.type !== "runtime_request.updated" ||
+              event.runtimeRequest.status !== "pending"
+            ) {
+              event = yield* nextEvent;
+            }
+            yield* session.respondToRuntimeRequest({
+              requestId: event.runtimeRequest.id,
+              decision: "decline",
+            });
+          }),
+      });
+      // The message left the latest six, and its restriction is still there.
+      assert.notInclude(
+        judged[0]?.userMessages.map((message) => message.text) ?? [],
+        "Never search the web for this task.",
+      );
+      assert.deepEqual(judged[0]?.standing, [[forbids("Never search the web for this task.")]]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("keeps what the user allowed beside what they forbade, from what they typed only", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const read: Array<string> = [];
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "ask" as const, reason: "test" };
+          }),
+        extract: (text) =>
+          Effect.sync(() => {
+            read.push(text);
+            return quotesOf(text);
+          }),
+      };
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(session, providerThread, "Never search the web for this task.");
+      // A pasted file is not the user's words, whatever it says.
+      yield* bob.runTurn(session, providerThread, "You may search the web again.", {
+        attachments: [
+          {
+            type: "file",
+            id: "pasted-1",
+            name: "Never touch the db folder.txt",
+            mimeType: "text/plain",
+            sizeBytes: 40,
+            source: { _tag: "pasted-text" },
+          },
+        ],
+      });
+      for (const turn of [1, 2, 3, 4, 5, 6]) {
+        yield* bob.runTurn(session, providerThread, `keep going ${turn}`);
+      }
+      yield* bob.runTurn(session, providerThread, "ask about search", {
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            let event = yield* nextEvent;
+            while (
+              event.type !== "runtime_request.updated" ||
+              event.runtimeRequest.status !== "pending"
+            ) {
+              event = yield* nextEvent;
+            }
+            yield* session.respondToRuntimeRequest({
+              requestId: event.runtimeRequest.id,
+              decision: "decline",
+            });
+          }),
+      });
+      assert.deepEqual(judged[0]?.standing, [
+        [forbids("Never search the web for this task.")],
+        [allows("You may search the web again.")],
+      ]);
+      assert.deepEqual(read.slice(0, 2), [
+        "Never search the web for this task.",
+        "You may search the web again.",
+      ]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "asks about every call left to review in a thread that picked to, quoting nothing",
+    () =>
+      Effect.gen(function* () {
+        let judged = 0;
+        let quoted = 0;
+        const judge: BobAutoJudge = {
+          name: "a test reviewer",
+          warm: Effect.void,
+          judge: () =>
+            Effect.sync(() => {
+              judged += 1;
+              return { decision: "allow" as const, reason: "test" };
+            }),
+          extract: (text) =>
+            Effect.sync(() => {
+              quoted += 1;
+              return quotesOf(text);
+            }),
+        };
+        const bob = yield* openBob({
+          runtimeMode: "auto",
+          platform: "linux",
+          autoJudge: judge,
+          network: "ask",
+        });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        yield* bob.runTurn(session, providerThread, "ask about search", {
+          whileRunning: ({ nextEvent }) =>
+            Effect.gen(function* () {
+              let event = yield* nextEvent;
+              while (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              ) {
+                event = yield* nextEvent;
+              }
+              yield* session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: "decline",
+              });
+            }),
+        });
+        const answers = bob
+          .requests()
+          .filter((request) => request.method === "_mock/permission")
+          .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`);
+        assert.deepEqual(answers, ["search=reject"]);
+        assert.equal(judged, 0);
+        assert.equal(quoted, 0);
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("keeps the user's restrictions in the order they wrote them", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const slow = yield* Deferred.make<void>();
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "ask" as const, reason: "test" };
+          }),
+        // The first message's restrictions are quoted after the second's.
+        extract: (text) =>
+          (text.includes("network") ? Deferred.await(slow) : Effect.void).pipe(
+            Effect.as(quotesOf(text)),
+          ),
+      };
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(session, providerThread, "Never use the network.");
+      yield* bob.runTurn(session, providerThread, "Never touch the db folder.");
+      yield* Deferred.succeed(slow, undefined);
+      for (const turn of [1, 2, 3, 4, 5, 6]) {
+        yield* bob.runTurn(session, providerThread, `keep going ${turn}`);
+      }
+      yield* bob.runTurn(session, providerThread, "ask about search", {
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            let event = yield* nextEvent;
+            while (
+              event.type !== "runtime_request.updated" ||
+              event.runtimeRequest.status !== "pending"
+            ) {
+              event = yield* nextEvent;
+            }
+            yield* session.respondToRuntimeRequest({
+              requestId: event.runtimeRequest.id,
+              decision: "decline",
+            });
+          }),
+      });
+      assert.deepEqual(judged[0]?.standing, [
+        [forbids("Never use the network.")],
+        [forbids("Never touch the db folder.")],
+      ]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("quotes the user's restrictions only in Auto, once per message while it fails", () =>
+    Effect.gen(function* () {
+      const quoted: Array<string> = [];
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: () => Effect.succeed({ decision: "ask" as const, reason: "test" }),
+        // The reviewer is down.
+        extract: (text) =>
+          Effect.sync(() => {
+            quoted.push(text);
+            return undefined;
+          }),
+      };
+      for (const runtimeMode of ["auto-accept-edits", "auto"] as const) {
+        const bob = yield* openBob({ runtimeMode, platform: "linux", autoJudge: judge });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        for (const turn of [1, 2, 3, 4]) {
+          yield* bob.runTurn(session, providerThread, `${runtimeMode} ${turn}`);
+        }
+      }
+      // Nothing outside Auto, and in Auto the newest message once each, not every failed one.
+      assert.deepEqual(quoted, ["auto 1", "auto 2", "auto 3", "auto 4"]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("stops quoting the user's restrictions when its Bob closes", () =>
+    Effect.gen(function* () {
+      let stopped = false;
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: () => Effect.succeed({ decision: "ask" as const, reason: "test" }),
+        extract: () =>
+          Effect.never.pipe(
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                stopped = true;
+              }),
+            ),
+          ),
+      };
+      yield* Effect.gen(function* () {
+        const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        yield* bob.runTurn(session, providerThread, "Never search the web.");
+      }).pipe(Effect.scoped);
+      assert.isTrue(stopped);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("waits for the user's restrictions being quoted before reviewing a call", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      let quotes = 0;
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "ask" as const, reason: "test" };
+          }),
+        // The first quote fails, and the one the review starts again takes a moment.
+        extract: (text) =>
+          quotes++ === 0
+            ? Effect.succeed(undefined)
+            : Effect.yieldNow.pipe(Effect.as(quotesOf(text))),
+      };
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(
+        session,
+        providerThread,
+        "Never search the web for this task.\nask about search",
+        {
+          whileRunning: ({ nextEvent }) =>
+            Effect.gen(function* () {
+              let event = yield* nextEvent;
+              while (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              ) {
+                event = yield* nextEvent;
+              }
+              yield* session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: "decline",
+              });
+            }),
+        },
+      );
+      assert.deepEqual(judged[0]?.standing, [[forbids("Never search the web for this task.")]]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("keeps private a path the user's rule names without ./", () =>
+    Effect.gen(function* () {
+      const { source } = savedRules("global", [{ kind: "private", value: "notes.md" }]);
+      const { answers } = yield* askAbout(
+        "auto-accept-edits",
+        "edit",
+        ["decline"],
+        undefined,
+        false,
+        "linux",
+        source,
+      );
+      assert.deepEqual(answers, ["edit=reject"]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("offers no rule for a command a rule would let do anything", () =>
+    Effect.gen(function* () {
+      const { source } = savedRules("thread");
+      const { offered } = yield* askAbout(
+        "auto-accept-edits",
+        "execute",
+        ["decline"],
+        undefined,
+        false,
+        "linux",
+        source,
+      );
+      assert.deepEqual(offered, [[]]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
 
   it.effect("in Auto, runs what the review allows and asks about the rest", () =>
     Effect.gen(function* () {
-      const { asked, answers } = yield* askAbout(
-        "auto",
-        "edit ls todo execute search edit-outside test",
-        ["accept", "decline", "decline", "accept"],
-      );
-      // A web search shows as the tool it is, not as a file read.
-      assert.deepEqual(asked, ["command", "command", "file-change", "command"]);
+      const { asked, answers } = yield* askAbout("auto", "edit ls todo search edit-outside", [
+        "accept",
+        "decline",
+        "decline",
+      ]);
+      // Without a sandbox every command asks; a web search shows as the tool it is, not as a
+      // file read.
+      assert.deepEqual(asked, ["command", "command", "file-change"]);
       assert.deepEqual(answers, [
         "edit=allow",
         "ls=allow",
         "todo=allow",
-        "execute=allow",
         "search=reject",
         "edit-outside=reject",
-        "test=allow",
       ]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
@@ -829,7 +1468,10 @@ describe("BobAdapterV2 turns", () => {
         judged.map((input) => input.call),
         ['searches the web for "t3 code"', 'fetches "https://example.com"'],
       );
-      assert.deepEqual(judged[0]?.userMessages, ["ask about search fetch execute"]);
+      assert.deepEqual(
+        judged[0]?.userMessages.map((message) => message.text),
+        ["ask about search fetch execute"],
+      );
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
@@ -846,8 +1488,8 @@ describe("BobAdapterV2 turns", () => {
           }),
       };
       // A check-in or a notice the server sent is no request of the user's.
-      const fromServer = yield* askAbout("auto", "search ls", ["decline"], allowAll, true);
-      assert.deepEqual(fromServer.answers, ["search=reject", "ls=allow"]);
+      const fromServer = yield* askAbout("auto", "search todo", ["decline"], allowAll, true);
+      assert.deepEqual(fromServer.answers, ["search=reject", "todo=allow"]);
       assert.lengthOf(judged, 0);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
@@ -943,6 +1585,43 @@ describe("BobAdapterV2 turns", () => {
   );
 
   it.effect.skipIf(!sandboxAvailable)(
+    "offers to open the folder the sandbox stopped a command at, and runs it in the sandbox then",
+    () =>
+      Effect.gen(function* () {
+        const { source, added } = savedRules("thread");
+        const { answers, offered, bob } = yield* askAbout(
+          "auto-accept-edits",
+          "tool-denied tool-denied",
+          [{ decision: "acceptAlways", optionId: "t3-rule:thread" }],
+          undefined,
+          false,
+          "darwin",
+          source,
+        );
+        assert.equal(offered[0]?.[0]?.label, "Always allow reading ~/.fake-tool in this thread");
+        // The rule is kept for the thread, in its project.
+        assert.equal(added.length, 1);
+        assert.deepInclude(added[0]?.rule, { kind: "read", value: "~/.fake-tool" });
+        assert.isDefined(added[0]?.rule.threadId);
+        assert.isDefined(added[0]?.rule.projectId);
+        assert.equal(added[0]?.scope, "thread");
+        assert.deepEqual(answers, ["tool-denied=allow", "tool-denied=allow"]);
+        // The second run went into the sandbox, which now reads the folder.
+        const approvals = bob
+          .requests()
+          .filter((request) => request.method === "_mock/approvals")
+          .map((request) => request.params.found);
+        assert.deepEqual(approvals, [[], []]);
+        const profile = bob.requests().find((request) => request.method === "_mock/env")
+          ?.params.PROFILE;
+        assert.include(
+          NodeFS.readFileSync(String(profile), "utf8"),
+          NodePath.join(NodeFS.realpathSync(process.env.HOME ?? "/"), ".fake-tool"),
+        );
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect.skipIf(!sandboxAvailable)(
     "asks before running again a command the sandbox stopped, and lets the approved run out once",
     () =>
       Effect.gen(function* () {
@@ -957,8 +1636,8 @@ describe("BobAdapterV2 turns", () => {
         assert.deepEqual(answers, ["test-denied=allow", "test-denied=allow"]);
         assert.deepEqual(asked, ["command"]);
         // Its approval is gone once the approved run ended.
-        const config = yield* ServerConfig.ServerConfig;
-        const approvals = NodePath.join(config.stateDir, "bob-sandbox", "approvals");
+        const host = yield* ProviderHost.ProviderHost;
+        const approvals = NodePath.join(host.paths.stateDir, "bob-sandbox", "approvals");
         assert.deepEqual(
           NodeFS.readdirSync(approvals, { recursive: true, withFileTypes: true }).filter((entry) =>
             entry.isFile(),

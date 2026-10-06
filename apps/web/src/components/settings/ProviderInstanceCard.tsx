@@ -57,6 +57,7 @@ import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
+import { BobRulesSection } from "./BobRulesSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
@@ -1167,6 +1168,21 @@ export function ProviderInstanceCard({
           projects={acpProjects}
           readOnly={readOnly}
         />
+      ) : null}
+
+      {environmentId !== undefined && instance.driver === "bob" ? (
+        <SettingsSection
+          title="Permission rules"
+          inert={readOnly}
+          aria-disabled={readOnly || undefined}
+          className={readOnly ? "opacity-50 select-none" : undefined}
+        >
+          <BobRulesSection
+            environmentId={environmentId}
+            projects={acpProjects}
+            readOnly={readOnly}
+          />
+        </SettingsSection>
       ) : null}
 
       {driverOption !== undefined ? (

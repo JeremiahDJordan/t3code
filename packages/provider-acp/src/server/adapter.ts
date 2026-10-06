@@ -131,6 +131,8 @@ const ACP_DEFERRED_FINALIZE_DEBOUNCE: Duration.Input = "3000 millis";
 
 export interface AcpAdapterV2RuntimeInput {
   readonly cwd: string;
+  /** The thread the runtime serves, when it serves one. */
+  readonly threadId?: ThreadId | null;
   /**
    * Policy the session opened with. A runtime-mode change reopens the session,
    * so flavors that encode permissions in the launch command (Grok) read it here.
@@ -1078,14 +1080,29 @@ function completedAtForStatus(status: ProjectedToolStatus, now: DateTime.Utc): D
   return status === "completed" || status === "failed" || status === "interrupted" ? now : null;
 }
 
+/** The user's answer to an approval card: its decision, and the option when several share it. */
+interface AcpApprovalAnswer {
+  readonly decision: ProviderApprovalDecision;
+  readonly optionId?: string;
+}
+
 function selectPermissionOptionId(
   request: EffectAcpSchema.RequestPermissionRequest,
   decision: Exclude<ProviderApprovalDecision, "cancel">,
+  optionId?: string,
 ): string | undefined {
+  // A card option naming one of the agent's own options answers with it, when it says the same.
+  const named = request.options.find((option) => option.optionId === optionId);
+  const allows = decision !== "decline";
+  if (optionId !== undefined && named?.kind.startsWith(allows ? "allow" : "reject")) {
+    return named.optionId;
+  }
+  // Without the option it chose, as from a client that predates them, an approval for always
+  // approves this once, which every agent offers.
   const kind =
     decision === "acceptForSession"
       ? "allow_always"
-      : decision === "accept"
+      : decision === "accept" || decision === "acceptAlways"
         ? "allow_once"
         : "reject_once";
   return request.options.find((option) => option.kind === kind)?.optionId.trim() || undefined;
@@ -1446,7 +1463,7 @@ type PendingRuntimeRequest = {
 } & (
   | {
       readonly type: "approval";
-      readonly decision: Deferred.Deferred<ProviderApprovalDecision>;
+      readonly decision: Deferred.Deferred<AcpApprovalAnswer>;
     }
   | {
       readonly type: "user_input";
@@ -2104,6 +2121,7 @@ export function makeAcpAdapterV2(
           const mcpContext = acpMcpContext(threadId, self);
           return {
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
+            threadId,
             runtimePolicy: input.runtimePolicy,
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
@@ -4764,7 +4782,7 @@ export function makeAcpAdapterV2(
             providerTurnId: context.providerTurnId,
             nativeRequestId,
           });
-          const decision = yield* Deferred.make<ProviderApprovalDecision>();
+          const decision = yield* Deferred.make<AcpApprovalAnswer>();
           const nativeResponseAcknowledgement = yield* Deferred.make<
             void,
             EffectAcpErrors.AcpError
@@ -5067,7 +5085,7 @@ export function makeAcpAdapterV2(
             (request) =>
               Effect.gen(function* () {
                 const cancelled = yield* request.type === "approval"
-                  ? Deferred.succeed(request.decision, "cancel")
+                  ? Deferred.succeed(request.decision, { decision: "cancel" })
                   : Deferred.succeed(request.answers, null);
                 if (!cancelled) return;
 
@@ -5745,7 +5763,7 @@ export function makeAcpAdapterV2(
                 transportRequestId: pendingTransportRequestId,
               } = admitted.value.pending;
               const parsedPermission = parsePermissionRequest(params);
-              const decision = yield* Deferred.await(pendingDecision).pipe(
+              const answer = yield* Deferred.await(pendingDecision).pipe(
                 Effect.ensuring(
                   runRuntimeCallbackAtGeneration(
                     handlerGeneration,
@@ -5759,6 +5777,7 @@ export function makeAcpAdapterV2(
                   ).pipe(Effect.asVoid),
                 ),
               );
+              const decision = answer.decision;
               if (
                 parsedPermission.kind !== "unknown" &&
                 (decision === "accept" || decision === "acceptForSession")
@@ -5773,7 +5792,7 @@ export function makeAcpAdapterV2(
                 if (decision === "cancel") {
                   return { outcome: { outcome: "cancelled" } } as const;
                 }
-                const optionId = selectPermissionOptionId(params, decision);
+                const optionId = selectPermissionOptionId(params, decision, answer.optionId);
                 return optionId === undefined
                   ? ({ outcome: { outcome: "cancelled" } } as const)
                   : ({ outcome: { outcome: "selected", optionId } } as const);
@@ -6322,9 +6341,14 @@ export function makeAcpAdapterV2(
           const modeSelection = hasNativeConfigWithSyntheticModeId
             ? undefined
             : optionSelections.find((selection) => selection.id === ACP_SESSION_MODE_OPTION_ID);
-          const configSelections = hasNativeConfigWithSyntheticModeId
-            ? optionSelections
-            : optionSelections.filter((selection) => selection.id !== ACP_SESSION_MODE_OPTION_ID);
+          const configSelections = (
+            hasNativeConfigWithSyntheticModeId
+              ? optionSelections
+              : optionSelections.filter((selection) => selection.id !== ACP_SESSION_MODE_OPTION_ID)
+          ).filter(
+            // An option of T3's own, such as Bob's network choice, is not the agent's to set.
+            (selection) => !selection.id.startsWith("_t3/") || availableConfigIds.has(selection.id),
+          );
           // Probe-time descriptors are a per-model union, so a stored
           // selection can reference an option the live session does not
           // expose (Kilo advertises per-model "effort" descriptors while its
@@ -7257,7 +7281,7 @@ export function makeAcpAdapterV2(
               requests,
               (request) =>
                 request.type === "approval"
-                  ? Deferred.succeed(request.decision, "cancel").pipe(Effect.ignore)
+                  ? Deferred.succeed(request.decision, { decision: "cancel" }).pipe(Effect.ignore)
                   : Deferred.succeed(request.answers, null).pipe(Effect.ignore),
               { discard: true },
             );
@@ -7773,7 +7797,12 @@ export function makeAcpAdapterV2(
                             driver,
                             detail: `ACP approval request ${requestInput.requestId} requires a decision`,
                           })
-                        : yield* Deferred.succeed(pending.decision, requestInput.decision);
+                        : yield* Deferred.succeed(pending.decision, {
+                            decision: requestInput.decision,
+                            ...(requestInput.optionId === undefined
+                              ? {}
+                              : { optionId: requestInput.optionId }),
+                          });
                   if (!settled) {
                     return yield* new ProviderAdapter.ProviderAdapterProtocolError({
                       driver,

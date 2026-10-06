@@ -4,9 +4,12 @@ import type {
   ProviderApprovalOption,
   RuntimeRequestId,
 } from "@t3tools/contracts";
-import { View } from "react-native";
+import { useState } from "react";
+import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
+import { SymbolView } from "../../components/AppSymbol";
+import { ControlPillMenu } from "../../components/ControlPillMenu";
 import type { PendingApproval } from "../../lib/threadActivity";
 
 export interface PendingApprovalCardProps {
@@ -16,6 +19,7 @@ export interface PendingApprovalCardProps {
   readonly onRespond: (
     requestId: RuntimeRequestId,
     decision: ProviderApprovalDecision,
+    optionId?: string,
   ) => Promise<unknown>;
 }
 
@@ -28,11 +32,21 @@ const DEFAULT_APPROVAL_OPTIONS: ReadonlyArray<ProviderApprovalOption> = [
 export function PendingApprovalCard(props: PendingApprovalCardProps) {
   const options: ReadonlyArray<ProviderApprovalOption> =
     props.approval.options ?? DEFAULT_APPROVAL_OPTIONS;
-  const warning = options.find((option) => option.warning)?.warning;
+  // Choices that share a decision, told apart by their ids, show as one split button.
+  const choices = options.filter((option) => option.optionId !== undefined);
+  const plain = options.filter((option) => option.optionId === undefined);
+  const [selectedId, setSelectedId] = useState(choices[0]?.optionId);
+  const selected = choices.find((option) => option.optionId === selectedId) ?? choices[0];
+  const warning = (selected?.warning ? selected : plain.find((option) => option.warning))?.warning;
   // Opaque for the same reason as PendingUserInputCard: nothing blurs the feed
   // behind this card, so a translucent surface bleeds messages through it.
   const canRespond = props.approval.responseCapability === "live";
-  const disabled = !canRespond || props.respondingApprovalId === props.approval.requestId;
+  const disabled =
+    !canRespond ||
+    !props.canOperateThread ||
+    props.respondingApprovalId === props.approval.requestId;
+  const respond = (option: ProviderApprovalOption) =>
+    void props.onRespond(props.approval.requestId, option.decision, option.optionId);
   return (
     <View className="gap-2.5 rounded-[20px] border border-border bg-card-alt p-4">
       <Text className="font-t3-bold text-2xs uppercase tracking-[1.1px] text-foreground-secondary">
@@ -56,7 +70,7 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
         <Text className="font-sans text-xs leading-normal text-warning-foreground">{warning}</Text>
       ) : null}
       <View className="flex-row flex-wrap gap-2.5">
-        {options.map((option) => (
+        {plain.map((option) => (
           <RequestActionButton
             key={option.decision}
             label={option.label}
@@ -67,11 +81,47 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
                   ? "danger"
                   : "secondary"
             }
-            disabled={disabled || !props.canOperateThread}
-            onPress={() => void props.onRespond(props.approval.requestId, option.decision)}
+            disabled={disabled}
+            onPress={() => respond(option)}
           />
         ))}
       </View>
+      {selected ? (
+        // Like a merge button: it acts on the selected choice, which the menu changes, and the
+        // provider lists first the one the user picked last time.
+        <View className="flex-row items-stretch gap-1">
+          <View className="flex-1">
+            <RequestActionButton
+              label={selected.label}
+              tone="secondary"
+              disabled={disabled}
+              onPress={() => respond(selected)}
+            />
+          </View>
+          <ControlPillMenu
+            actions={choices.map((option) => ({
+              id: option.optionId ?? option.label,
+              title: option.label,
+              state: option.optionId === selected.optionId ? ("on" as const) : ("off" as const),
+            }))}
+            onPressAction={({ nativeEvent }) => setSelectedId(nativeEvent.event)}
+          >
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Choose where it applies"
+              disabled={disabled}
+              className="items-center justify-center rounded-[14px] bg-subtle-strong px-3 active:opacity-70 disabled:opacity-50"
+            >
+              <SymbolView
+                name="chevron.down"
+                size={14}
+                tintColorClassName="accent-chevron"
+                type="monochrome"
+              />
+            </Pressable>
+          </ControlPillMenu>
+        </View>
+      ) : null}
       {!props.canOperateThread ? (
         <Text className="font-sans text-xs text-adaptive-neutral-500-400">
           This connection cannot respond to approvals.

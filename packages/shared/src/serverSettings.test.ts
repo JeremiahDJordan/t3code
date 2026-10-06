@@ -3,6 +3,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ThreadId,
   UsageLimitSourceId,
   type ServerProvider,
 } from "@t3tools/contracts";
@@ -24,6 +25,24 @@ import {
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("serverSettings helpers", () => {
+  it("adds and removes Bob's rules against those saved, so two edits never undo each other", () => {
+    const push = { kind: "allow-command" as const, value: "git push" };
+    const commit = { kind: "allow-command" as const, value: "git commit" };
+    const both = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      bobRuleChanges: { add: [push, commit, push] },
+    });
+    expect(both.bobRules).toEqual([push, commit]);
+    // Two removals made from the same view each remove only their own rule.
+    const one = applyServerSettingsPatch(both, { bobRuleChanges: { remove: [commit] } });
+    expect(applyServerSettingsPatch(one, { bobRuleChanges: { remove: [push] } }).bobRules).toEqual(
+      [],
+    );
+    const thread = { ...commit, threadId: ThreadId.make("t") };
+    expect(
+      applyServerSettingsPatch(both, { bobRuleChanges: { remove: [thread] } }).bobRules,
+    ).toEqual([push, commit]);
+  });
+
   it("changes a cleanup rule without replacing the machine's other rules", () => {
     const enabled = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       storageCleanup: { worktreeAfterDays: 8, worktreeOnMerge: true, logsAfterDays: 30 },
