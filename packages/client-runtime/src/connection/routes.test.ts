@@ -61,6 +61,25 @@ describe("connection routes", () => {
     expect(connectionRouteKind(direct("ts6", "http://[fd7a:115c:a1e0::1]:3773/"))).toBe("tailnet");
     expect(connectionRouteLabel(TAILNET)).toBe("Tailscale");
     expect(connectionRouteLabel(RELAY)).toBe("T3 Connect");
+    expect(
+      connectionRouteLabel({
+        target: new BearerConnectionTarget({
+          environmentId: ENVIRONMENT_ID,
+          label: "Desk",
+          connectionId: "access",
+        }),
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: "access",
+            environmentId: ENVIRONMENT_ID,
+            label: "Desk",
+            httpBaseUrl: "https://t3.example.test/",
+            wsBaseUrl: "wss://t3.example.test/",
+            transport: "cloudflare-access",
+          }),
+        ),
+      }),
+    ).toBe("t3.example.test · Cloudflare Access");
   });
 
   it("places a new route after faster kinds and ahead of T3 Connect", () => {

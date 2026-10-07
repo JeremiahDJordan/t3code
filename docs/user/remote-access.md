@@ -144,6 +144,26 @@ tailscale serve --https=443 off
 If that port is already in use, choose another with
 `--tailscale-serve-port`. See `t3 pair --help` for other pairing options.
 
+### Cloudflare Tunnel with Access
+
+To reach the machine through your own Cloudflare account, run a Cloudflare Tunnel to the
+server and put its hostname behind Cloudflare Access:
+
+1. In Cloudflare Zero Trust, create a tunnel, install `cloudflared` on the machine with the
+   command Cloudflare shows, and give the tunnel a public hostname, such as `t3.example.com`,
+   that points to the port T3 Code serves on, such as `http://localhost:3773`.
+2. Under **Access → Applications**, add a self-hosted application for that hostname. Allow your
+   email for browsers, and add a **Service Auth** policy with a service token from
+   **Access → Service Auth** for the phone.
+3. On the phone, add an environment with the host `https://t3.example.com` and a pairing code,
+   turn on **Behind Cloudflare Access**, and enter the service token's client ID and secret.
+
+The phone sends the token only to that hostname, never to a LAN or Tailscale address it learns
+from the server, and keeps it in the device's secure storage. When the token expires or is
+revoked, the environment says Cloudflare Access rejected it; enter a new one in the
+environment's settings. In a browser, open the hostname itself and sign in to Access; the
+hosted web app cannot reach a server behind Access.
+
 ### Hosted web app
 
 [app.t3.codes](https://app.t3.codes) needs an HTTPS endpoint. It connects directly

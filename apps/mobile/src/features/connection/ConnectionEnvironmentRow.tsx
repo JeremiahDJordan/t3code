@@ -20,6 +20,7 @@ import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-typ
 import { serverEnvironment } from "../../state/server";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
+import type { EnvironmentUpdate } from "./useConnectionController";
 
 function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string | null {
   if (!environment.isEnabled && environment.connectionState !== "unsupported") {
@@ -42,11 +43,14 @@ export function ConnectionEnvironmentRow(props: {
   readonly onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
   readonly onUpdate: (
     environmentId: EnvironmentId,
-    updates: { readonly label: string; readonly displayUrl: string },
+    updates: EnvironmentUpdate,
   ) => Promise<AtomCommandResult<unknown, unknown>>;
 }) {
   const [label, setLabel] = useState(props.environment.environmentLabel);
   const [url, setUrl] = useState(props.environment.displayUrl);
+  // Left empty, the saved Cloudflare Access service token stays.
+  const [accessClientId, setAccessClientId] = useState("");
+  const [accessClientSecret, setAccessClientSecret] = useState("");
   const serverConfig = useAtomValue(
     serverEnvironment.configValueAtom(props.environment.environmentId),
   );
@@ -61,9 +65,19 @@ export function ConnectionEnvironmentRow(props: {
     (props.environment.connectionState === "connecting" ||
       props.environment.connectionState === "reconnecting");
   const handleSave = useCallback(async () => {
+    const clientId = accessClientId.trim();
+    const clientSecret = accessClientSecret.trim();
+    if ((clientId === "") !== (clientSecret === "")) {
+      Alert.alert(
+        "Enter the whole service token",
+        "A new Cloudflare Access token needs both its client ID and client secret.",
+      );
+      return;
+    }
     const result = await props.onUpdate(props.environment.environmentId, {
       label: label.trim(),
       displayUrl: url.trim(),
+      ...(clientId === "" ? {} : { cloudflareAccess: { clientId, clientSecret } }),
     });
     if (AsyncResult.isSuccess(result)) {
       props.onToggle();
@@ -74,7 +88,7 @@ export function ConnectionEnvironmentRow(props: {
       "Could not update environment",
       error instanceof Error ? error.message : "The environment could not be updated.",
     );
-  }, [label, url, props]);
+  }, [accessClientId, accessClientSecret, label, url, props]);
 
   return (
     <Animated.View layout={LinearTransition.duration(250)} className="bg-grouped-card">
@@ -178,6 +192,28 @@ export function ConnectionEnvironmentRow(props: {
                 value={url}
                 onChangeText={setUrl}
               />
+
+              {props.environment.usesCloudflareAccess ? (
+                <>
+                  <ConnectionFormField
+                    label="New Access client ID"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    placeholder="Unchanged"
+                    value={accessClientId}
+                    onChangeText={setAccessClientId}
+                  />
+                  <ConnectionFormField
+                    label="New Access client secret"
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    secureTextEntry
+                    placeholder="Unchanged"
+                    value={accessClientSecret}
+                    onChangeText={setAccessClientSecret}
+                  />
+                </>
+              ) : null}
             </>
           )}
 

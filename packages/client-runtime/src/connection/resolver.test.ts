@@ -32,6 +32,7 @@ import {
   type ConnectionTarget,
 } from "./model.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
+import { connectionTransportHeaders, setConnectionTransportHeaders } from "./transportHeaders.ts";
 import * as RpcHttp from "../rpc/http.ts";
 import {
   GitHubRoutingPermissions,
@@ -326,6 +327,60 @@ describe("ConnectionResolver", () => {
         (yield* broker.prepare(catalogEntry(target, Option.some(profile)))).socketUrl,
       ).toContain("wsTicket=ticket");
       expect(yield* Ref.get(bearerInputs)).toEqual([{ token: "secret-bearer", method: "direct" }]);
+    }),
+  );
+
+  it.effect("sends a Cloudflare Access route's token, and none on a route learned from it", () =>
+    Effect.gen(function* () {
+      const seen: Array<string | undefined> = [];
+      const access = { clientId: "id.access", clientSecret: "access-secret" };
+      const brokerLayer = yield* makeDependencies({
+        credentials: [
+          ["access-1", new BearerConnectionCredential({ token: "t", cloudflareAccess: access })],
+        ],
+        authorizeBearer: (input) =>
+          Effect.sync(() => {
+            // What a request to the route would carry as authorization starts.
+            seen.push(connectionTransportHeaders(input.httpBaseUrl)?.["CF-Access-Client-Secret"]);
+            return {
+              environmentId: input.expectedEnvironmentId,
+              label: "Saved",
+              httpBaseUrl: input.httpBaseUrl,
+              socketUrl: "wss://environment.example.test/ws?wsTicket=ticket",
+              httpAuthorization: { _tag: "Bearer" as const, token: input.bearerToken },
+            };
+          }),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
+      const route = (connectionId: string, httpBaseUrl: string, transport: boolean) =>
+        catalogEntry(
+          new BearerConnectionTarget({
+            environmentId: ENVIRONMENT_ID,
+            label: "Saved",
+            connectionId,
+          }),
+          Option.some(
+            new BearerConnectionProfile({
+              connectionId,
+              environmentId: ENVIRONMENT_ID,
+              label: "Saved",
+              httpBaseUrl,
+              wsBaseUrl: httpBaseUrl.replace(/^https/, "wss"),
+              ...(transport ? { transport: "cloudflare-access" as const } : {}),
+            }),
+          ),
+        );
+      yield* broker.prepare(route("access-1", ENDPOINT.httpBaseUrl, true));
+      // A Tailscale route learned while connected through Access borrows its bearer token only.
+      yield* broker.prepare(
+        route(
+          `learned:${ENVIRONMENT_ID}:https://desk.tailnet.ts.net@access-1`,
+          "https://desk.tailnet.ts.net",
+          false,
+        ),
+      );
+      expect(seen).toEqual(["access-secret", undefined]);
+      setConnectionTransportHeaders(ENDPOINT.httpBaseUrl, undefined);
     }),
   );
 

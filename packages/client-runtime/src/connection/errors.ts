@@ -4,6 +4,7 @@ import type { ManagedRelayClientError } from "../relay/managedRelay.ts";
 import { dpopFailureMessage, relayProtectedErrorMessage } from "../relay/errorPresentation.ts";
 import type { RemoteEnvironmentAuthError } from "../authorization/remote.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
+import { isCloudflareAccessDenied } from "./transportHeaders.ts";
 import {
   ConnectionBlockedError,
   type ConnectionAttemptError,
@@ -152,6 +153,13 @@ export function mapRemoteEnvironmentError(
         detail: `${error.message}${networkHint}`,
       });
     case "RemoteEnvironmentAuthFetchError":
+      if (isCloudflareAccessDenied(error.cause)) {
+        return new ConnectionBlockedError({
+          reason: "authentication",
+          detail:
+            "Cloudflare Access rejected the service token. Enter a new one in the environment's settings.",
+        });
+      }
       return new ConnectionTransientError({
         reason: "network",
         detail: `${error.message}${networkHint}`,

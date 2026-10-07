@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  type CloudflareAccessServiceToken,
   RelayConnectionRegistration,
   RelayConnectionTarget,
 } from "@t3tools/client-runtime/connection";
@@ -27,6 +28,13 @@ export interface RelayEnvironmentView {
   readonly status: RelayEnvironmentStatusResponse | null;
   readonly error: string | null;
   readonly traceId: string | null;
+}
+
+/** What editing a saved environment changes; its Access service token only when one is given. */
+export interface EnvironmentUpdate {
+  readonly label: string;
+  readonly displayUrl: string;
+  readonly cloudflareAccess?: CloudflareAccessServiceToken;
 }
 
 export function useConnectionController() {
@@ -69,10 +77,15 @@ export function useConnectionController() {
   );
 
   const connectPairingUrl = useCallback(
-    (pairingUrl: string, expectedEnvironmentId?: EnvironmentId) =>
+    (
+      pairingUrl: string,
+      expectedEnvironmentId?: EnvironmentId,
+      cloudflareAccess?: CloudflareAccessServiceToken,
+    ) =>
       connectPairingUrlMutation({
         pairingUrl,
         ...(expectedEnvironmentId === undefined ? {} : { expectedEnvironmentId }),
+        ...(cloudflareAccess === undefined ? {} : { cloudflareAccess }),
       }),
     [connectPairingUrlMutation],
   );
@@ -102,14 +115,14 @@ export function useConnectionController() {
     [setEnvironmentEnabledMutation],
   );
   const updateEnvironment = useCallback(
-    (
-      environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
-    ) =>
+    (environmentId: EnvironmentId, updates: EnvironmentUpdate) =>
       updateBearer({
         environmentId,
         label: updates.label,
         httpBaseUrl: updates.displayUrl,
+        ...(updates.cloudflareAccess === undefined
+          ? {}
+          : { cloudflareAccess: updates.cloudflareAccess }),
       }),
     [updateBearer],
   );

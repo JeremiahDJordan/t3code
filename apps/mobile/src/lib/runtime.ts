@@ -2,6 +2,10 @@ import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Socket from "effect/socket/Socket";
 
+import {
+  connectionTransportHeaders,
+  withConnectionTransportHeaders,
+} from "@t3tools/client-runtime/connection";
 import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
 
 import * as Dpop from "../features/cloud/dpop";
@@ -17,11 +21,30 @@ function configuredRelayUrl(): string {
   return resolveCloudPublicConfig().relay.url ?? "http://relay.invalid";
 }
 
-const layerHttpClient = layerRemoteHttpClient(fetch);
+// A route behind Cloudflare Access needs its service token on every request and WebSocket.
+const layerHttpClient = layerRemoteHttpClient(withConnectionTransportHeaders(fetch));
+
+/** React Native's WebSocket takes handshake headers as a third argument, which DOM types omit. */
+const ReactNativeWebSocket = WebSocket as unknown as new (
+  url: string,
+  protocols: string | Array<string> | undefined,
+  options: { readonly headers: Readonly<Record<string, string>> },
+) => WebSocket;
+
+const layerWebSocketConstructor = Layer.succeed(Socket.WebSocketConstructor)((url, options) => {
+  const protocols = typeof options === "string" || Array.isArray(options) ? options : undefined;
+  const headers = {
+    ...(typeof options === "object" && !Array.isArray(options) ? options.headers : undefined),
+    ...connectionTransportHeaders(url),
+  };
+  return Object.keys(headers).length === 0
+    ? new WebSocket(url, protocols)
+    : new ReactNativeWebSocket(url, protocols, { headers });
+});
 
 type RuntimeLayerSource =
   | ReturnType<typeof ManagedRelayLayer.layer>
-  | typeof Socket.layerWebSocketConstructorGlobal
+  | typeof layerWebSocketConstructor
   | typeof Dpop.layer
   | typeof layerHttpClient
   | typeof Persistence.layer
@@ -29,7 +52,7 @@ type RuntimeLayerSource =
 
 const layerRuntime = Layer.merge(
   ManagedRelayLayer.layer(configuredRelayUrl()),
-  Socket.layerWebSocketConstructorGlobal,
+  layerWebSocketConstructor,
 ).pipe(
   Layer.provideMerge(Dpop.layer),
   Layer.provideMerge(layerHttpClient),

@@ -183,8 +183,14 @@ export function connectionRouteLabel(route: ConnectionRoute): string {
         ? `SSH ${profile.target.username ? `${profile.target.username}@` : ""}${profile.target.hostname}`
         : "SSH";
     }
-    case "public":
-      return routeHostname(route) ?? "Remote link";
+    case "public": {
+      const hostname = routeHostname(route) ?? "Remote link";
+      const profile = Option.getOrNull(route.profile);
+      return profile?._tag === "BearerConnectionProfile" &&
+        profile.transport === "cloudflare-access"
+        ? `${hostname} · Cloudflare Access`
+        : hostname;
+    }
   }
 }
 

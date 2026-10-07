@@ -33,6 +33,11 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      * Connect credential instead of a stored bearer token.
      */
     authorization: Schema.optionalKey(Schema.Literal("t3-connect")),
+    /**
+     * "cloudflare-access" when the address sits behind Cloudflare Access, so every request to it
+     * carries the service token kept in the route's credential.
+     */
+    transport: Schema.optionalKey(Schema.Literal("cloudflare-access")),
   },
 ) {}
 
@@ -74,6 +79,10 @@ export class BearerConnectionCredential extends Schema.TaggedClass<BearerConnect
   "BearerConnectionCredential",
   {
     token: Schema.String,
+    /** The Cloudflare Access service token of a route behind Access. */
+    cloudflareAccess: Schema.optionalKey(
+      Schema.Struct({ clientId: Schema.String, clientSecret: Schema.String }),
+    ),
   },
 ) {}
 

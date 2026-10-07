@@ -21,6 +21,7 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { AppText as Text, AppTextInput, type AppTextInputProps } from "../../components/AppText";
 import { FrostedCutout } from "../../components/FrostedCutout";
+import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { buildPairingUrl, extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
 import {
   setPendingConnectionError,
@@ -61,6 +62,10 @@ export function ConnectionsNewRouteScreen({
   const insets = useSafeAreaInsets();
   const [hostInput, setHostInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
+  // An address behind Cloudflare Access takes a service token with every request.
+  const [behindAccess, setBehindAccess] = useState(false);
+  const [accessClientId, setAccessClientId] = useState("");
+  const [accessClientSecret, setAccessClientSecret] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const screenFocused = useIsFocused();
@@ -71,7 +76,11 @@ export function ConnectionsNewRouteScreen({
 
   const headerIconColor = useUniwindTheme()["--color-icon"];
 
-  const connectDisabled = isSubmitting || hostInput.trim().length === 0;
+  const connectDisabled =
+    isSubmitting ||
+    hostInput.trim().length === 0 ||
+    (behindAccess &&
+      (accessClientId.trim().length === 0 || accessClientSecret.trim().length === 0));
 
   useEffect(() => {
     const { host, code } = parsePairingUrl(connectionPairingUrl);
@@ -157,11 +166,15 @@ export function ConnectionsNewRouteScreen({
   );
 
   const connectAndClose = useCallback(
-    async (pairingUrl: string, replaceWithHome: boolean) => {
+    async (
+      pairingUrl: string,
+      replaceWithHome: boolean,
+      cloudflareAccess?: { readonly clientId: string; readonly clientSecret: string },
+    ) => {
       setIsSubmitting(true);
       onChangeConnectionPairingUrl(pairingUrl);
       try {
-        const result = await onConnectPress(pairingUrl, params.routeFor);
+        const result = await onConnectPress(pairingUrl, params.routeFor, cloudflareAccess);
         void Haptics.notificationAsync(
           AsyncResult.isSuccess(result)
             ? Haptics.NotificationFeedbackType.Success
@@ -182,8 +195,14 @@ export function ConnectionsNewRouteScreen({
   );
 
   const handleSubmit = useCallback(async () => {
-    await connectAndClose(buildPairingUrl(hostInput, codeInput), false);
-  }, [codeInput, connectAndClose, hostInput]);
+    await connectAndClose(
+      buildPairingUrl(hostInput, codeInput),
+      false,
+      behindAccess
+        ? { clientId: accessClientId.trim(), clientSecret: accessClientSecret.trim() }
+        : undefined,
+    );
+  }, [accessClientId, accessClientSecret, behindAccess, codeInput, connectAndClose, hostInput]);
 
   useEffect(() => {
     if (!shouldAutoConnect || attemptedAutoConnectRef.current === routePairingUrl) {
@@ -258,6 +277,36 @@ export function ConnectionsNewRouteScreen({
                   if (!connectDisabled) void handleSubmit();
                 }}
               />
+              <View className="ml-4 border-t border-border-subtle" />
+              <View collapsable={false} className="h-13 flex-row items-center gap-3 px-4">
+                <Text className="flex-1 text-base leading-[23px] text-foreground">
+                  Behind Cloudflare Access
+                </Text>
+                <ThemedSwitch
+                  accessibilityLabel="Behind Cloudflare Access"
+                  value={behindAccess}
+                  onValueChange={setBehindAccess}
+                />
+              </View>
+              {behindAccess ? (
+                <>
+                  <View className="ml-4 border-t border-border-subtle" />
+                  <PairingInputRow
+                    label="Client ID"
+                    placeholder="0123abcd….access"
+                    value={accessClientId}
+                    onChangeText={setAccessClientId}
+                  />
+                  <View className="ml-4 border-t border-border-subtle" />
+                  <PairingInputRow
+                    label="Secret"
+                    secureTextEntry
+                    placeholder="Client secret"
+                    value={accessClientSecret}
+                    onChangeText={setAccessClientSecret}
+                  />
+                </>
+              ) : null}
             </View>
             <Text
               accessibilityLiveRegion="polite"
@@ -267,7 +316,9 @@ export function ConnectionsNewRouteScreen({
               )}
             >
               {pairingConnectionError ??
-                "For machines on your local network or tailnet. The machine keeps its own provider credentials."}
+                (behindAccess
+                  ? "Sends the Access service token with every request to this address only."
+                  : "For machines on your local network or tailnet. The machine keeps its own provider credentials.")}
             </Text>
           </View>
 

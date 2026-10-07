@@ -14,6 +14,23 @@ import { DPOP_RETRY_HINT, DPOP_UNKNOWN_HINT } from "../relay/errorPresentation.t
 import { ManagedRelayRequestFailedError } from "../relay/managedRelay.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import { RemoteEnvironmentAuthFetchError, RemoteEnvironmentAuthTimeoutError } from "../rpc/http.ts";
+import { CloudflareAccessDeniedError } from "./transportHeaders.ts";
+
+describe("mapRemoteEnvironmentError", () => {
+  it("says Cloudflare Access refused the service token, rather than that the network failed", () => {
+    const mapped = mapRemoteEnvironmentError(
+      new RemoteEnvironmentAuthFetchError({
+        message: "Failed to fetch remote environment endpoint.",
+        cause: { cause: new CloudflareAccessDeniedError("https://t3.example.test/") },
+      }),
+    );
+    expect(mapped).toMatchObject({
+      _tag: "ConnectionBlockedError",
+      reason: "authentication",
+    });
+    expect(mapped.message).toContain("Cloudflare Access rejected the service token");
+  });
+});
 
 describe("mapManagedRelayError", () => {
   it("keeps a timeout reported by the relay distinct from a local network failure", () => {

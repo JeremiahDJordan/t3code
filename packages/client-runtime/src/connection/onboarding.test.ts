@@ -16,6 +16,11 @@ import { fetchRemoteSessionState } from "../authorization/remote.ts";
 import { BearerConnectionCredential, BearerConnectionProfile } from "./catalog.ts";
 import { BearerConnectionTarget } from "./model.ts";
 import {
+  connectionTransportHeaders,
+  setConnectionTransportHeaders,
+  withConnectionTransportHeaders,
+} from "./transportHeaders.ts";
+import {
   prepareBearerConnectionUpdate,
   preparePairingRegistration,
   prepareSshRegistration,
@@ -119,8 +124,10 @@ function layerPairingHttp(
     return Promise.reject(new Error(`Unexpected request: ${url}`));
   }) satisfies typeof fetch;
 
-  return RpcHttp.layerRemoteHttpClient(fetchFn);
+  return RpcHttp.layerRemoteHttpClient(withConnectionTransportHeaders(fetchFn));
 }
+
+const ACCESS_TOKEN = { clientId: "id.access", clientSecret: "access-secret" };
 
 describe("connection onboarding", () => {
   it.effect("prepares a persisted bearer registration from pairing details", () =>
@@ -315,6 +322,96 @@ describe("connection onboarding", () => {
         message: "Enter a backend URL.",
       });
       expect(calls).toEqual([]);
+    }),
+  );
+
+  it.effect("pairs an address behind Cloudflare Access, its token on every request", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const registration = yield* preparePairingRegistration({
+        host: "t3.example.test",
+        pairingCode: "pairing-token",
+        cloudflareAccess: ACCESS_TOKEN,
+      }).pipe(Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))));
+      // The descriptor fetch and the token exchange both pass Access.
+      expect(
+        calls.map((call) => new Headers(call.init.headers).get("CF-Access-Client-Secret")),
+      ).toEqual(["access-secret", "access-secret"]);
+      expect(registration.profile.transport).toBe("cloudflare-access");
+      expect(registration.credential.cloudflareAccess).toEqual(ACCESS_TOKEN);
+      setConnectionTransportHeaders("https://t3.example.test/", undefined);
+    }),
+  );
+
+  it.effect("keeps no service token after a failed pairing, and none over plain http", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const layer = Layer.mergeAll(
+        layerClientPresentation,
+        layerPairingHttp(calls, { failDescriptor: true }),
+      );
+      yield* preparePairingRegistration({
+        host: "t3.example.test",
+        pairingCode: "pairing-token",
+        cloudflareAccess: ACCESS_TOKEN,
+      }).pipe(Effect.provide(layer), Effect.flip);
+      expect(connectionTransportHeaders("https://t3.example.test/")).toBeUndefined();
+      const plain = yield* preparePairingRegistration({
+        host: "http://t3.example.test",
+        pairingCode: "pairing-token",
+        cloudflareAccess: ACCESS_TOKEN,
+      }).pipe(Effect.provide(layer), Effect.flip);
+      expect(plain.message).toContain("https");
+    }),
+  );
+
+  it.effect("keeps a route behind Cloudflare Access when edited, with a new token if given", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("environment-paired");
+      const entry = Option.some({
+        target: new BearerConnectionTarget({
+          environmentId,
+          label: "Desk",
+          connectionId: "bearer:environment-paired",
+        }),
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: "bearer:environment-paired",
+            environmentId,
+            label: "Desk",
+            httpBaseUrl: "https://t3.example.test/",
+            wsBaseUrl: "wss://t3.example.test/",
+            transport: "cloudflare-access",
+          }),
+        ),
+        enabled: true,
+      });
+      const saved = new BearerConnectionCredential({
+        token: "bearer-token",
+        cloudflareAccess: ACCESS_TOKEN,
+      });
+      const credential = Option.some(saved);
+      const renamed = yield* prepareBearerConnectionUpdate({
+        input: { environmentId, label: "Renamed", httpBaseUrl: "https://t3.example.test/" },
+        entry,
+        credential,
+      });
+      expect(renamed.profile.transport).toBe("cloudflare-access");
+      expect(renamed.credential).toEqual(saved);
+      const rotated = yield* prepareBearerConnectionUpdate({
+        input: {
+          environmentId,
+          label: "Desk",
+          httpBaseUrl: "https://t3.example.test/",
+          cloudflareAccess: { clientId: "new.access", clientSecret: "new-secret" },
+        },
+        entry,
+        credential,
+      });
+      expect(rotated.credential).toMatchObject({
+        token: "bearer-token",
+        cloudflareAccess: { clientId: "new.access", clientSecret: "new-secret" },
+      });
     }),
   );
 

@@ -33,6 +33,11 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 import { connectionRoutes, routeEntry, sshTargetKey } from "./routes.ts";
+import {
+  cloudflareAccessHeaders,
+  setConnectionTransportHeaders,
+  type CloudflareAccessServiceToken,
+} from "./transportHeaders.ts";
 
 export interface PairingConnectionInput {
   readonly pairingUrl?: string;
@@ -43,6 +48,8 @@ export interface PairingConnectionInput {
    * environment, or nothing is saved.
    */
   readonly expectedEnvironmentId?: EnvironmentId;
+  /** The service token of an address behind Cloudflare Access, sent with every request to it. */
+  readonly cloudflareAccess?: CloudflareAccessServiceToken;
 }
 
 export interface SshConnectionInput {
@@ -56,6 +63,8 @@ export interface BearerConnectionUpdateInput {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly httpBaseUrl: string;
+  /** A new Cloudflare Access service token for a route behind Access; the saved one otherwise. */
+  readonly cloudflareAccess?: CloudflareAccessServiceToken;
 }
 
 export class ConnectionOnboarding extends Context.Service<
@@ -112,6 +121,30 @@ export const preparePairingRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.preparePairingRegistration",
 )(function* (input: PairingConnectionInput) {
   const target = yield* resolvePairingTarget(input);
+  const access = input.cloudflareAccess;
+  if (access !== undefined) {
+    if (!target.httpBaseUrl.startsWith("https://")) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "An address behind Cloudflare Access must use https.",
+      });
+    }
+    // Access turns away every request without the token, the first descriptor fetch included.
+    setConnectionTransportHeaders(target.httpBaseUrl, cloudflareAccessHeaders(access));
+  }
+  return yield* pairWith(target, input).pipe(
+    Effect.tapError(() =>
+      Effect.sync(() => {
+        if (access !== undefined) setConnectionTransportHeaders(target.httpBaseUrl, undefined);
+      }),
+    ),
+  );
+});
+
+const pairWith = Effect.fn("clientRuntime.connection.onboarding.pairWith")(function* (
+  target: ReturnType<typeof resolveRemotePairingTarget>,
+  input: PairingConnectionInput,
+) {
   const presentation = yield* ClientCapabilities.ClientPresentation;
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: target.httpBaseUrl,
@@ -147,9 +180,13 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
+      ...(input.cloudflareAccess === undefined ? {} : { transport: "cloudflare-access" as const }),
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
+      ...(input.cloudflareAccess === undefined
+        ? {}
+        : { cloudflareAccess: { ...input.cloudflareAccess } }),
     }),
   });
 });
@@ -237,6 +274,15 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       }),
   });
   const connectionId = entry.target.connectionId;
+  // A route behind Cloudflare Access stays behind it, with a new service token if one is given.
+  const cloudflareAccess =
+    options.input.cloudflareAccess ?? credential.value.cloudflareAccess ?? undefined;
+  if (cloudflareAccess !== undefined && !httpBaseUrl.startsWith("https://")) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "An address behind Cloudflare Access must use https.",
+    });
+  }
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
       environmentId: options.input.environmentId,
@@ -249,8 +295,15 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       label,
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+      ...(cloudflareAccess === undefined ? {} : { transport: "cloudflare-access" as const }),
     }),
-    credential: credential.value,
+    credential:
+      options.input.cloudflareAccess === undefined
+        ? credential.value
+        : new BearerConnectionCredential({
+            token: credential.value.token,
+            cloudflareAccess: { ...options.input.cloudflareAccess },
+          }),
   });
 });
 
