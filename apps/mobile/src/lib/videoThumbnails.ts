@@ -1,6 +1,7 @@
 import type { VideoThumbnail } from "expo-video";
 
 import type { AttachmentPreviewFile } from "./attachmentDownload";
+import { withEnvironmentRequestHeaders } from "./environmentRequest";
 
 const thumbnails = new Map<string, VideoThumbnail>();
 const MAX_CACHED_THUMBNAILS = 32;
@@ -27,7 +28,9 @@ async function extractFrame(uri: string, signal: AbortSignal) {
     // An unreachable environment must not hold up thumbnails for other environments.
     timeout = setTimeout(cancel, 15_000);
     const frame = (async () => {
-      await player.replaceAsync({ uri, contentType: "progressive" });
+      await player.replaceAsync(
+        withEnvironmentRequestHeaders({ uri, contentType: "progressive" as const }),
+      );
       if (disposed || signal.aborted) return null;
       const [thumbnail] = await player.generateThumbnailsAsync([0], {
         maxWidth: 480,

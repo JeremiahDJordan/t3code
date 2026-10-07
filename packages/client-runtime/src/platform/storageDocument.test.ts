@@ -215,6 +215,25 @@ describe("ConnectionCatalogDocument", () => {
     expect(restored.remoteDpopTokens[0]?.accountId).toBe(accountId);
   });
 
+  it("round-trips a route behind Cloudflare Access with its service token", () => {
+    const profile = new BearerConnectionProfile({
+      ...BEARER_PROFILE,
+      transport: "cloudflare-access",
+    });
+    const credential = new BearerConnectionCredential({
+      ...BEARER_CREDENTIAL,
+      cloudflareAccess: { clientId: "id.access", clientSecret: "access-secret" },
+    });
+    const document = registerConnectionInCatalog(
+      EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      new BearerConnectionRegistration({ target: BEARER_TARGET, profile, credential }),
+    );
+    const schema = Schema.fromJsonString(ConnectionCatalogDocument);
+    const restored = Schema.decodeSync(schema)(Schema.encodeSync(schema)(document));
+    expect(restored.profiles).toEqual([profile]);
+    expect(restored.credentials[0]?.credential).toEqual(credential);
+  });
+
   it("registers a bearer connection as one catalog mutation", () => {
     const document = registerConnectionInCatalog(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,

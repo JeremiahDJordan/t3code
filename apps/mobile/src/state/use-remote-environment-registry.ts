@@ -6,7 +6,11 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback } from "react";
 import { Alert } from "react-native";
 
-import { useConnectionController } from "../features/connection/useConnectionController";
+import {
+  type EnvironmentUpdate,
+  useConnectionController,
+} from "../features/connection/useConnectionController";
+import type { CloudflareAccessServiceToken } from "@t3tools/client-runtime/connection";
 import { environmentPresentations } from "./presentation";
 import { useWorkspaceConnectionState, useWorkspaceEnvironments } from "./workspace";
 import type { SavedRemoteConnection } from "../lib/connection";
@@ -110,10 +114,18 @@ export function useRemoteConnections() {
   }, []);
 
   const onConnectPress = useCallback(
-    async (pairingUrl?: string, expectedEnvironmentId?: EnvironmentId) => {
+    async (
+      pairingUrl?: string,
+      expectedEnvironmentId?: EnvironmentId,
+      cloudflareAccess?: CloudflareAccessServiceToken,
+    ) => {
       const nextPairingUrl = pairingUrl ?? connectionPairingUrl;
       setPendingConnectionError(null);
-      const result = await controller.connectPairingUrl(nextPairingUrl, expectedEnvironmentId);
+      const result = await controller.connectPairingUrl(
+        nextPairingUrl,
+        expectedEnvironmentId,
+        cloudflareAccess,
+      );
       if (AsyncResult.isFailure(result)) {
         const error = Cause.squash(result.cause);
         const message =
@@ -146,10 +158,8 @@ export function useRemoteConnections() {
     [controller],
   );
   const onUpdateEnvironment = useCallback(
-    (
-      environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
-    ) => controller.updateEnvironment(environmentId, updates),
+    (environmentId: EnvironmentId, updates: EnvironmentUpdate) =>
+      controller.updateEnvironment(environmentId, updates),
     [controller],
   );
 

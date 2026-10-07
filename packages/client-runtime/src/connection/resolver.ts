@@ -45,6 +45,7 @@ import {
   orchestrationProtocolCompatibilityError,
 } from "./compatibility.ts";
 import { credentialConnectionId } from "./routes.ts";
+import { cloudflareAccessHeaders, setConnectionTransportHeaders } from "./transportHeaders.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 
 export class ConnectionResolver extends Context.Service<
@@ -158,6 +159,15 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
     );
     if (!isBearerCredential(credential)) {
       return yield* credentialMissingError(target.connectionId);
+    }
+    // Only the route paired behind Cloudflare Access sends its token, never one learned from it.
+    if (profile.transport === "cloudflare-access") {
+      setConnectionTransportHeaders(
+        profile.httpBaseUrl,
+        credential.cloudflareAccess === undefined
+          ? undefined
+          : cloudflareAccessHeaders(credential.cloudflareAccess),
+      );
     }
     const authorized = yield* remote.authorizeBearer({
       expectedEnvironmentId: target.environmentId,

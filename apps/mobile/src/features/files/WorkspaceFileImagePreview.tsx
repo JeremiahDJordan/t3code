@@ -6,6 +6,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
 import { PresentationSource } from "../../components/NativePresentation";
 import { useMediaActions } from "../../state/mediaActions";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { type MediaActionsSource } from "../../lib/mediaActionsSource";
 import { MediaActionsMenu } from "../../components/MediaActionsMenu";
 
@@ -19,7 +20,7 @@ function ResolvedWorkspaceFileImagePreview(props: {
   const sourceIdentifier = useId();
   const mediaActions = useMediaActions(props.actionsSource);
   const imageSource = useMemo(
-    () => ({ uri: props.uri, cache: "force-cache" as const }),
+    () => withEnvironmentRequestHeaders({ uri: props.uri, cache: "force-cache" as const }),
     [props.uri],
   );
 

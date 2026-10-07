@@ -165,4 +165,30 @@ describe("video thumbnails", () => {
     ).toBe(frame);
     expect(mocks.createPlayer).toHaveBeenCalledTimes(34);
   });
+
+  it("sends a Cloudflare Access route's service token with the frame request", async () => {
+    // The same module instance `videoThumbnails` loaded after the registry reset.
+    const { cloudflareAccessHeaders, setConnectionTransportHeaders } =
+      await import("@t3tools/client-runtime/connection");
+    const access = cloudflareAccessHeaders({ clientId: "id.access", clientSecret: "secret" });
+    setConnectionTransportHeaders("https://t3.access.example/", access);
+    try {
+      const uri = "https://t3.access.example/api/assets/signed-token/clip.mp4";
+      expect(
+        await thumbnails.loadVideoThumbnail(
+          "access:clip",
+          async () => ({ uri, dispose: vi.fn() }),
+          new AbortController().signal,
+        ),
+      ).toBe(frame);
+      const used = mocks.createPlayer.mock.results[0]!.value as ReturnType<typeof player>;
+      expect(used.replaceAsync).toHaveBeenCalledWith({
+        uri,
+        contentType: "progressive",
+        headers: access,
+      });
+    } finally {
+      setConnectionTransportHeaders("https://t3.access.example/", undefined);
+    }
+  });
 });

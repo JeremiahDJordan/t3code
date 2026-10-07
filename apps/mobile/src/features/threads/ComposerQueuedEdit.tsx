@@ -4,6 +4,7 @@ import { Pressable, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { useAssetUrl } from "../../state/assets";
 import { assetImageSource } from "../../lib/assetImageSource";
 
@@ -89,7 +90,9 @@ function QueuedEditAttachmentChip(props: {
     <View className="max-w-[180px] flex-row items-center gap-2 rounded-xl border border-border bg-card py-1 pl-1 pr-2">
       {isImage && url !== null ? (
         <Image
-          source={assetImageSource(props.environmentId, resource, url)}
+          source={withEnvironmentRequestHeaders(
+            assetImageSource(props.environmentId, resource, url),
+          )}
           cachePolicy="memory-disk"
           contentFit="cover"
           style={{ width: 24, height: 24, borderRadius: 6 }}

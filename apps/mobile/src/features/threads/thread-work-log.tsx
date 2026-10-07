@@ -104,6 +104,7 @@ import Animated, {
   withSequence,
   withTiming,
 } from "react-native-reanimated";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { useAssetUrl } from "../../state/assets";
 
 const SHIMMER_WIDTH = 72;
@@ -1614,7 +1615,7 @@ function ToolActivityImage(props: {
           ]}
         >
           <Image
-            source={props.source}
+            source={withEnvironmentRequestHeaders({ uri: props.source })}
             cachePolicy="memory-disk"
             contentFit="contain"
             style={[StyleSheet.absoluteFill, { opacity: loaded ? 0.7 : 0 }]}

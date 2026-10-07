@@ -2,6 +2,7 @@ import { requireNativeModule } from "expo";
 import { useEffect, useEffectEvent, useId } from "react";
 import { Alert } from "react-native";
 
+import { environmentRequestHeaders } from "../lib/environmentRequest";
 import type { ResolvedFilePreviewSource } from "./FilePreviewModal.types";
 
 const NativeControls = requireNativeModule<{
@@ -10,12 +11,16 @@ const NativeControls = requireNativeModule<{
     name: string,
     sourceIdentifier: string,
     identifier: string,
+    /** Sent with the download Quick Look previews; empty for a local file. */
+    headers: Record<string, string>,
   ): Promise<void>;
   presentFiles(
     uris: readonly string[],
     names: readonly string[],
     selectedIndex: number,
     identifier: string,
+    /** Each file's download headers, as `presentFile` takes them. */
+    headers: readonly Record<string, string>[],
   ): Promise<void>;
   dismissFile(identifier: string): Promise<void>;
 }>("T3NativeControls");
@@ -45,8 +50,15 @@ function NativeFilePreview(props: {
               gallery.findIndex((item) => item.uri === uri),
             ),
             identifier,
+            gallery.map((item) => environmentRequestHeaders(item.uri) ?? {}),
           )
-        : NativeControls.presentFile(uri, name ?? "Preview", sourceIdentifier ?? "", identifier);
+        : NativeControls.presentFile(
+            uri,
+            name ?? "Preview",
+            sourceIdentifier ?? "",
+            identifier,
+            environmentRequestHeaders(uri) ?? {},
+          );
     void presentation
       .catch((error: unknown) => {
         if (!canceled) onOpenError(error);

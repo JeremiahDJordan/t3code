@@ -3,6 +3,7 @@ import { Pressable, View } from "react-native";
 import ImageViewing from "react-native-image-viewing";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { withEnvironmentRequestHeaders } from "../lib/environmentRequest";
 import { useMediaActions } from "../state/mediaActions";
 import { AppText } from "./AppText";
 import { SymbolView } from "./AppSymbol";
@@ -56,7 +57,7 @@ export function MediaImagePreview(props: MediaImagePreviewProps) {
   return (
     <ImagePreviewContext value={context}>
       <ImageViewing
-        images={gallery.map((item) => ({ uri: item.uri }))}
+        images={gallery.map((item) => withEnvironmentRequestHeaders({ uri: item.uri }))}
         imageIndex={index}
         onImageIndexChange={setIndex}
         visible

@@ -10,6 +10,7 @@ import { Alert } from "react-native";
 import type { FileBackedComposerAttachment } from "./composerImages";
 import { loadLocalAttachmentPreview } from "./localAttachmentPreview";
 import { downloadAndShareAttachment, shareLocalAttachment } from "./attachmentDownload";
+import { environmentRequestHeaders } from "./environmentRequest";
 import { useRefreshAssetUrl } from "../state/assets";
 import { attachmentDocumentPresentation } from "./attachmentDocumentPresentation";
 
@@ -148,7 +149,9 @@ export function useAttachmentDocument(input: {
           }
           return fetch(target, {
             signal: controller.signal,
+            // A route behind Cloudflare Access checks its service token before T3 sees the read.
             headers: {
+              ...environmentRequestHeaders(target),
               ...(sizeBytes > 0 ? { Range: `bytes=0-${FILE_TEXT_PREVIEW_MAX_BYTES}` } : {}),
               ...(revision > 0 ? { "Cache-Control": "no-cache" } : {}),
             },

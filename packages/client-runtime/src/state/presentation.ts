@@ -15,7 +15,8 @@ import {
   type EnvironmentPresentation,
 } from "../connection/presentation.ts";
 import type { EnvironmentCatalogState } from "./connections.ts";
-import { hasRelayRoute } from "../connection/routes.ts";
+import { connectionRoutes, hasRelayRoute } from "../connection/routes.ts";
+import type { BearerConnectionProfile, ConnectionCatalogEntry } from "../connection/catalog.ts";
 
 function mapsEqual<K, V>(left: ReadonlyMap<K, V>, right: ReadonlyMap<K, V>): boolean {
   if (left.size !== right.size) {
@@ -85,10 +86,21 @@ export interface EnvironmentConnectionSummary {
   readonly environmentLabel: string;
   readonly displayUrl: string;
   readonly isRelayManaged: boolean;
+  /** Whether the direct route an edit changes sits behind Cloudflare Access. */
+  readonly usesCloudflareAccess: boolean;
   readonly isEnabled: boolean;
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
   readonly connectionErrorTraceId: string | null;
+}
+
+/** The profile of an environment's first direct route, which editing the environment changes. */
+function editedBearerProfile(entry: ConnectionCatalogEntry): BearerConnectionProfile | undefined {
+  const route = connectionRoutes(entry).find(
+    (candidate) => candidate.target._tag === "BearerConnectionTarget",
+  );
+  const profile = route === undefined ? null : Option.getOrNull(route.profile);
+  return profile?._tag === "BearerConnectionProfile" ? profile : undefined;
 }
 
 export function projectEnvironmentConnectionSummary(
@@ -100,6 +112,7 @@ export function projectEnvironmentConnectionSummary(
     environmentLabel: environment.entry.target.label,
     displayUrl: connectionCatalogDisplayUrl(environment.entry) ?? "",
     isRelayManaged: hasRelayRoute(environment.entry),
+    usesCloudflareAccess: editedBearerProfile(environment.entry)?.transport === "cloudflare-access",
     isEnabled: environment.entry.enabled,
     connectionState: environment.connection.phase,
     connectionError: environment.connection.error,
@@ -154,6 +167,7 @@ export function createEnvironmentSummaryAtoms(input: {
         previous.environmentLabel === next.environmentLabel &&
         previous.displayUrl === next.displayUrl &&
         previous.isRelayManaged === next.isRelayManaged &&
+        previous.usesCloudflareAccess === next.usesCloudflareAccess &&
         previous.isEnabled === next.isEnabled &&
         previous.connectionState === next.connectionState &&
         previous.connectionError === next.connectionError &&

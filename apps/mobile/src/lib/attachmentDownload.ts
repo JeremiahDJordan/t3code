@@ -1,7 +1,8 @@
 import type { ChatFileAttachment } from "@t3tools/contracts";
-import type { Directory } from "expo-file-system";
+import type { Directory, DownloadOptions } from "expo-file-system";
 import type { SharingOptions } from "expo-sharing";
 
+import { environmentRequestHeaders } from "./environmentRequest";
 import { beginForegroundHandoff } from "./foreground-handoff";
 import { uuidv4 } from "./uuid";
 
@@ -41,6 +42,12 @@ function downloadFileName(name: string): string {
     remainingBytes -= bytes;
   }
   return `${shortStem || "attachment"}${extension}`;
+}
+
+/** A download's abort signal and the headers its route needs before T3 sees the request. */
+function downloadOptions(url: string, signal: AbortSignal): DownloadOptions {
+  const headers = environmentRequestHeaders(url);
+  return headers === undefined ? { signal } : { signal, headers };
 }
 
 function removeDownloadDirectory(directory: Directory): void {
@@ -182,7 +189,11 @@ export async function openAttachmentInViewer(input: {
     if (/^(file|content):/.test(input.uri)) {
       await new File(input.uri).copy(cached.file);
     } else {
-      await File.downloadFileAsync(input.uri, cached.file, { signal: input.signal });
+      await File.downloadFileAsync(
+        input.uri,
+        cached.file,
+        downloadOptions(input.uri, input.signal),
+      );
     }
     if (input.signal.aborted) return;
     const endHandoff = beginForegroundHandoff();
@@ -216,7 +227,7 @@ export async function downloadAttachmentForPreview(input: {
       cached.preview.dispose();
       return null;
     }
-    await File.downloadFileAsync(input.url, cached.file, { signal: input.signal });
+    await File.downloadFileAsync(input.url, cached.file, downloadOptions(input.url, input.signal));
     if (input.signal.aborted) {
       cached.preview.dispose();
       return null;

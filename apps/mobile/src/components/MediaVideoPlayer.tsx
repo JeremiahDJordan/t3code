@@ -9,6 +9,7 @@ import { AppText } from "./AppText";
 import { SymbolView } from "./AppSymbol";
 import { VideoThumbnailImage } from "./VideoThumbnailImage";
 import { useMediaActions } from "../state/mediaActions";
+import { withEnvironmentRequestHeaders } from "../lib/environmentRequest";
 import { type MediaActionsSource } from "../lib/mediaActionsSource";
 import { useFullscreenVideoOpen, useMediaAudioSessionHold } from "../lib/videoAudioSession";
 import { MediaActionsMenu } from "./MediaActionsMenu";
@@ -40,7 +41,9 @@ function LoadedMediaVideo(props: {
     if (signal.aborted) return;
     if (uri === null) throw new Error("Video unavailable");
     player.pause();
-    await player.replaceAsync({ uri, contentType: "progressive" });
+    await player.replaceAsync(
+      withEnvironmentRequestHeaders({ uri, contentType: "progressive" as const }),
+    );
     if (!signal.aborted && props.playRequested && active.current) player.play();
   });
 

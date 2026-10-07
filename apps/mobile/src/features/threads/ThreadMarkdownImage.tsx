@@ -13,6 +13,10 @@ import type { FilePreviewSource } from "../../components/FilePreviewModal";
 import { MediaActionsMenu } from "../../components/MediaActionsMenu";
 import { PresentationSource } from "../../components/NativePresentation";
 import { useMediaActions } from "../../state/mediaActions";
+import {
+  environmentRequestHeaders,
+  withEnvironmentRequestHeaders,
+} from "../../lib/environmentRequest";
 import type { MediaActionsSource } from "../../lib/mediaActionsSource";
 import { useAssetUrlState } from "../../state/assets";
 import {
@@ -176,7 +180,7 @@ function ThreadMarkdownImageRequest(props: {
         />
       ) : (
         <Image
-          source={{ uri: props.uri }}
+          source={withEnvironmentRequestHeaders({ uri: props.uri })}
           contentFit="contain"
           cachePolicy="memory-disk"
           accessible={false}
@@ -221,7 +225,10 @@ function ThreadMarkdownSvg(props: {
             )
           : content;
       }
-      const response = await fetch(props.uri, { signal: controller.signal });
+      const response = await fetch(props.uri, {
+        signal: controller.signal,
+        headers: environmentRequestHeaders(props.uri),
+      });
       if (!response.ok && !(response.status === 0 && props.uri.startsWith("file://")))
         throw new Error(`SVG request failed: ${response.status}`);
       return response.text();

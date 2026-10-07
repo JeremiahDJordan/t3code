@@ -14,6 +14,7 @@ import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { useAssetUrlState, useRefreshAssetUrl } from "../../state/assets";
@@ -99,8 +100,10 @@ export function HtmlRenderWebView(props: {
   const crashes = useRef(0);
   // The theme the loaded document shows; null until it loads.
   const shownTheme = useRef<HtmlRenderTheme | null>(null);
+  // Only the first request carries the route's headers, and it is the whole page: a render is
+  // one attachment, whose signed URL has no files beside it, so a plain Access route loses nothing.
   const source = useMemo(
-    () => ({ uri: props.uri + htmlRenderThemeFragment(initialTheme) }),
+    () => withEnvironmentRequestHeaders({ uri: props.uri + htmlRenderThemeFragment(initialTheme) }),
     [props.uri, initialTheme],
   );
   useEffect(() => {

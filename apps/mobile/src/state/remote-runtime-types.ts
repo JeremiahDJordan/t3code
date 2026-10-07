@@ -13,6 +13,8 @@ export interface ConnectedEnvironmentSummary {
   readonly environmentLabel: string;
   readonly displayUrl: string;
   readonly isRelayManaged: boolean;
+  /** Whether the direct route an edit changes sits behind Cloudflare Access. */
+  readonly usesCloudflareAccess: boolean;
   /** False when the user switched the environment off in Settings. */
   readonly isEnabled: boolean;
   readonly connectionState: EnvironmentConnectionPhase;

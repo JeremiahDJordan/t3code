@@ -78,6 +78,10 @@ import {
   shareLocalAttachment,
 } from "./attachmentDownload";
 import { isForegroundHandoffActive } from "./foreground-handoff";
+import {
+  cloudflareAccessHeaders,
+  setConnectionTransportHeaders,
+} from "@t3tools/client-runtime/connection";
 
 const NOW = 1_787_990_400_000;
 const DAY_MS = 24 * 60 * 60_000;
@@ -428,5 +432,47 @@ describe("document viewer handoff", () => {
     expect(mocks.download).toHaveBeenCalledTimes(1);
     expect(mocks.deleted).toHaveBeenCalledTimes(1);
     expect(isForegroundHandoffActive()).toBe(false);
+  });
+});
+
+describe("downloads on a Cloudflare Access route", () => {
+  const ACCESS_ROUTE = "https://t3.access.example/";
+  const ACCESS = cloudflareAccessHeaders({ clientId: "id.access", clientSecret: "secret" });
+
+  afterEach(() => {
+    setConnectionTransportHeaders(ACCESS_ROUTE, undefined);
+  });
+
+  it("send the route's service token with the download, and nothing to another host", async () => {
+    setConnectionTransportHeaders(ACCESS_ROUTE, ACCESS);
+    const controller = new AbortController();
+    const onAccessRoute = "https://t3.access.example/api/assets/signed-token/report.pdf";
+
+    const file = await downloadAttachmentForPreview({
+      url: onAccessRoute,
+      attachment: input.attachment,
+      signal: controller.signal,
+    });
+    file?.dispose();
+    expect(mocks.download).toHaveBeenLastCalledWith(onAccessRoute, expect.anything(), {
+      signal: controller.signal,
+      headers: ACCESS,
+    });
+
+    await openAttachmentInViewer({
+      uri: onAccessRoute,
+      attachment: input.attachment,
+      signal: controller.signal,
+    });
+    expect(mocks.download).toHaveBeenLastCalledWith(onAccessRoute, expect.anything(), {
+      signal: controller.signal,
+      headers: ACCESS,
+    });
+
+    // The same token never goes to a route learned on another address.
+    await downloadAndShareAttachment({ ...input, signal: controller.signal });
+    expect(mocks.download).toHaveBeenLastCalledWith(input.url, expect.anything(), {
+      signal: controller.signal,
+    });
   });
 });
