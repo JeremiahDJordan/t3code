@@ -22,6 +22,7 @@ import { Menu } from "../../components/ui/Menu";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { useAssetUrl } from "../../state/assets";
 import { assetImageSource } from "../../lib/assetImageSource";
@@ -577,7 +578,7 @@ function QueueAttachmentThumbnail(props: {
   }
   return (
     <Image
-      source={assetImageSource(props.environmentId, resource, url)}
+      source={withEnvironmentRequestHeaders(assetImageSource(props.environmentId, resource, url))}
       cachePolicy="memory-disk"
       contentFit="cover"
       style={{ width: 24, height: 24, borderRadius: 4 }}

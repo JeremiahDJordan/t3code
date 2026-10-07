@@ -4,6 +4,7 @@ import { requireNativeModule } from "expo";
 import { useEffect, useEffectEvent, useId, useState } from "react";
 import { Keyboard } from "react-native";
 
+import { environmentRequestHeaders } from "../lib/environmentRequest";
 import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
 import { fullscreenVideoClosed, fullscreenVideoOpened } from "../lib/videoAudioSession";
 import { mediaVideoPreviewUri, type VideoPreviewSource } from "../lib/videoPreviewSource";
@@ -18,6 +19,8 @@ const NativeControls = requireNativeModule<{
     title: string,
     sourceIdentifier: string,
     identifier: string,
+    /** Sent with every request AVPlayer makes for the video; empty for a local file. */
+    headers: Record<string, string>,
   ): Promise<void>;
   dismissVideo(identifier: string): Promise<void>;
 }>("T3NativeControls");
@@ -79,11 +82,13 @@ function NativeVideoPreview(props: {
       try {
         if (controller.signal.aborted) return;
         ready = true;
+        const url = file?.uri ?? playbackUrl!;
         await NativeControls.presentVideo(
-          file?.uri ?? playbackUrl!,
+          url,
           name,
           source.sourceIdentifier ?? "",
           identifier,
+          environmentRequestHeaders(url) ?? {},
         );
         if (!controller.signal.aborted) onRequestClose();
       } finally {

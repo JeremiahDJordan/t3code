@@ -8,6 +8,7 @@ import { Linking, Pressable, View } from "react-native";
 import { getQuestionAnswerText } from "@t3tools/client-runtime/work-log/user-input";
 import { AppText as Text } from "../../components/ui/AppText";
 import { assetImageSource } from "../../lib/assetImageSource";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { useAssetUrl } from "../../state/assets";
 
 function AnswerFile(props: {
@@ -28,7 +29,9 @@ function AnswerFile(props: {
     >
       {props.attachment.type === "image" && url ? (
         <Image
-          source={assetImageSource(props.environmentId, resource, url)}
+          source={withEnvironmentRequestHeaders(
+            assetImageSource(props.environmentId, resource, url),
+          )}
           cachePolicy="memory-disk"
           style={{ width: 160, height: 96 }}
           contentFit="contain"

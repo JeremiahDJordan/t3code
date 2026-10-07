@@ -4,6 +4,7 @@ import { Modal, Pressable, View } from "react-native";
 import ImageViewing from "react-native-image-viewing";
 
 import { openAttachmentInViewer } from "../lib/attachmentDownload";
+import { withEnvironmentRequestHeaders } from "../lib/environmentRequest";
 import type { ResolvedFilePreviewSource } from "./FilePreviewModal.types";
 import { MediaImagePreview } from "./MediaImagePreview";
 import { AppText as Text } from "./ui/AppText";
@@ -76,7 +77,9 @@ export function FilePreview(props: {
   return (
     <ImageViewing
       images={
-        props.source.gallery?.map((item) => ({ uri: item.uri })) ?? [{ uri: props.source.uri }]
+        props.source.gallery?.map((item) => withEnvironmentRequestHeaders({ uri: item.uri })) ?? [
+          withEnvironmentRequestHeaders({ uri: props.source.uri }),
+        ]
       }
       imageIndex={Math.max(
         0,

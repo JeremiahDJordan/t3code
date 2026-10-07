@@ -286,7 +286,12 @@ function FileContent(props: {
   }
 
   if (props.activeMode === "preview" && isBrowserFile) {
-    return <WorkspaceFileWebPreview uri={props.previewUri} />;
+    return (
+      <WorkspaceFileWebPreview
+        uri={props.previewUri}
+        linksWorkspaceFiles={/\.html?$/i.test(props.relativePath)}
+      />
+    );
   }
 
   if (props.fileError && props.fileContents === null) {

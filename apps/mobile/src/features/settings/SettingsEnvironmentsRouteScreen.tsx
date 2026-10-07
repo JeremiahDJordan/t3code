@@ -3,6 +3,7 @@ import { useNavigation } from "@react-navigation/native";
 import { useAtomValue } from "@effect/atom-react";
 import { managedRelaySessionAtom } from "@t3tools/client-runtime/relay";
 import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentUpdate } from "../connection/useConnectionController";
 import { useCallback, useRef, useState } from "react";
 import { Platform, RefreshControl } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -77,10 +78,7 @@ export function SettingsEnvironmentsRouteScreen() {
     [navigation],
   );
   const handleUpdateEnvironment = useCallback(
-    (
-      environmentId: EnvironmentId,
-      updates: { readonly label: string; readonly displayUrl: string },
-    ) => {
+    (environmentId: EnvironmentId, updates: EnvironmentUpdate) => {
       if (!SHOWCASE_ENABLED) return onUpdateEnvironment(environmentId, updates);
       const actualEnvironment = environmentSections.localEnvironments.find(
         (environment) => environment.environmentId === environmentId,

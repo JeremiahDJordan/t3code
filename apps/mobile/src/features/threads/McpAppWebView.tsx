@@ -29,6 +29,7 @@ import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { shareGeneratedAttachment } from "../../lib/attachmentDownload";
+import { webViewRequestsLackRouteHeaders } from "../../lib/environmentRequest";
 import { mobileHtmlRenderTheme } from "../../lib/htmlRenderTheme";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { uuidv4 } from "../../lib/uuid";
@@ -41,6 +42,7 @@ import { enqueueThreadOutboxMessage } from "../../state/thread-outbox";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { MCP_APP_INLINE_MAX_HEIGHT, mcpAppInlineHeight } from "./mcpAppSizing";
+import { mcpAppDocumentUri } from "./mcpAppDocumentUri";
 
 const ROW_BOTTOM_MARGIN = 8;
 
@@ -144,13 +146,23 @@ export function ThreadMcpApp(props: {
     [app],
   );
   const asset = useAssetUrlState(props.environmentId, resource);
-  // The view keeps its first URL: a re-minted one would reload the app.
-  const [uri, setUri] = useState<string | null>(null);
-  if (uri === null && asset._tag === "Success") setUri(asset.url);
   const [loaded, setLoaded] = useState(false);
   const [navigatedAway, setNavigatedAway] = useState(false);
-  const [generation, setGeneration] = useState(0);
   const [crashed, setCrashed] = useState(false);
+  // The view keeps its first loadable URL: a re-minted one would reload the app.
+  const [uri, setUri] = useState<string | null>(null);
+  const nextUri = mcpAppDocumentUri(uri, asset._tag === "Success" ? asset.url : undefined);
+  if (nextUri !== uri) {
+    // A different URL is a new document, so it starts loading with none of the old one's state.
+    setUri(nextUri);
+    setLoaded(false);
+    setNavigatedAway(false);
+    setCrashed(false);
+  }
+  // The app's frame loads its document itself, without the route's headers, so a plain Access
+  // route turns it away; the row says so instead of showing Access's refusal.
+  const blockedByAccess = uri !== null && webViewRequestsLackRouteHeaders(uri);
+  const [generation, setGeneration] = useState(0);
   const restart = () => {
     if (generation > 0) {
       setCrashed(true);
@@ -250,7 +262,7 @@ export function ThreadMcpApp(props: {
   const hostRef = useRef<McpAppHost | null>(null);
 
   useEffect(() => {
-    if (uri === null) return;
+    if (uri === null || blockedByAccess) return;
     const scope = () => {
       const { environmentId, threadId, itemId } = latest.current.props;
       return { environmentId, input: { threadId, itemId } };
@@ -446,7 +458,7 @@ export function ThreadMcpApp(props: {
       hostRef.current = null;
     };
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- A restarted view needs a new host.
-  }, [uri, app, generation, documentKey]);
+  }, [uri, blockedByAccess, app, generation, documentKey]);
 
   useEffect(() => {
     hostRef.current?.updateHostContext();
@@ -500,7 +512,14 @@ export function ThreadMcpApp(props: {
 
   return (
     <View style={fullscreen ? { flex: 1 } : { height, marginBottom: ROW_BOTTOM_MARGIN }}>
-      {navigatedAway ? (
+      {blockedByAccess ? (
+        <View className="flex-1 items-center justify-center px-6">
+          <Text className="text-center text-sm text-foreground-muted">
+            The {app.server} app can't load over Cloudflare Access. An end-to-end encrypted route
+            shows it.
+          </Text>
+        </View>
+      ) : navigatedAway ? (
         <View className="flex-1 items-center justify-center">
           <Text className="text-sm text-foreground-muted">
             The {app.server} app left its page and was stopped
@@ -553,7 +572,7 @@ export function ThreadMcpApp(props: {
           <Text className="text-sm text-foreground-muted">Unable to load the {app.server} app</Text>
         </View>
       ) : null}
-      {uri !== null && !loaded && !crashed && !navigatedAway ? (
+      {uri !== null && !blockedByAccess && !loaded && !crashed && !navigatedAway ? (
         <View pointerEvents="none" className="absolute inset-0 items-center justify-center">
           <AppActivityIndicator />
         </View>

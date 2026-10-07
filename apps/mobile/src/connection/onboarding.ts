@@ -1,4 +1,7 @@
-import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
+import {
+  type CloudflareAccessServiceToken,
+  ConnectionOnboarding,
+} from "@t3tools/client-runtime/connection";
 import {
   createAtomCommandScheduler,
   createRuntimeCommand,
@@ -23,6 +26,8 @@ export const connectPairingUrl = createRuntimeCommand(connectionAtomRuntime, {
   execute: (input: {
     readonly pairingUrl: string;
     readonly expectedEnvironmentId?: EnvironmentId;
+    /** The service token of an address behind Cloudflare Access. */
+    readonly cloudflareAccess?: CloudflareAccessServiceToken;
   }) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerPairing(input)),
@@ -40,6 +45,7 @@ export const updateBearerConnection = createRuntimeCommand(connectionAtomRuntime
     readonly environmentId: EnvironmentId;
     readonly label: string;
     readonly httpBaseUrl: string;
+    readonly cloudflareAccess?: CloudflareAccessServiceToken;
   }) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.updateBearer(input)),

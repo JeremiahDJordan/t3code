@@ -8,6 +8,7 @@ import { composerAttachmentInlineUri, isFileBackedComposerAttachment } from "../
 import { loadLocalAttachmentPreview } from "../lib/localAttachmentPreview";
 import { downloadAndShareAttachment } from "../lib/attachmentDownload";
 import { assetImageSource } from "../lib/assetImageSource";
+import { withEnvironmentRequestHeaders } from "../lib/environmentRequest";
 import { useAssetUrlState, useRefreshAssetUrl } from "../state/assets";
 import { AppText as Text } from "./ui/AppText";
 import { FilePreviewModal } from "./FilePreviewModal";
@@ -100,11 +101,11 @@ export function ComposerContextAttachment(props: {
           onPress={() => setPreviewOpen(true)}
         >
           <Image
-            source={
+            source={withEnvironmentRequestHeaders(
               remoteEnvironmentId === null
                 ? { uri }
-                : assetImageSource(remoteEnvironmentId, resource, uri)
-            }
+                : assetImageSource(remoteEnvironmentId, resource, uri),
+            )}
             style={{ width: "100%", height: 280 }}
             contentFit="contain"
             accessibilityLabel={record.name}

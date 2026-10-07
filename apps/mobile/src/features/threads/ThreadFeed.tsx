@@ -116,6 +116,7 @@ import { scopedThreadKey } from "../../lib/scopedEntities";
 import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { downloadAndShareAttachment } from "../../lib/attachmentDownload";
+import { withEnvironmentRequestHeaders } from "../../lib/environmentRequest";
 import { hasWideMarkdownBlock } from "../../lib/wideMarkdownBlocks";
 import { faviconUrlForOrigin } from "@t3tools/shared/favicon";
 import {
@@ -489,7 +490,9 @@ function MessageAttachmentImage(props: {
         }
       >
         <ExpoImage
-          source={assetImageSource(props.environmentId, resource, uri)}
+          source={withEnvironmentRequestHeaders(
+            assetImageSource(props.environmentId, resource, uri),
+          )}
           cachePolicy="memory-disk"
           style={imageStyle}
           contentFit="cover"
