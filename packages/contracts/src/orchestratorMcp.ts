@@ -154,6 +154,14 @@ export const OrchestratorMcpTerminalDelegatedTaskStatus = Schema.Literals([
 export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
+const OrchestratorMcpJsonObject = Schema.Record(Schema.String, Schema.Unknown);
+
+/** A JSON Schema object; the JSON-string form is accepted for the OpenCode quirk above. */
+export const OrchestratorMcpJsonSchemaObject = Schema.Union([
+  OrchestratorMcpJsonObject,
+  Schema.fromJsonString(OrchestratorMcpJsonObject),
+]);
+
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
@@ -165,6 +173,12 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
         "Defaults to shared: use the parent's checkout. Worktree creates a separate checkout from the parent's current local commit before starting the child. Uncommitted edits are not copied.",
+    }),
+  ),
+  resultSchema: Schema.optional(
+    OrchestratorMcpJsonSchemaObject.annotate({
+      description:
+        "JSON Schema the child's result must match. The child returns it with t3_task_return, and task_status reports it as structuredResult.",
     }),
   ),
   mode: Schema.optional(
@@ -203,6 +217,12 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
   summary: Schema.NullOr(Schema.String),
+  /**
+   * For a task with a resultSchema, once its result is available: the value
+   * it returned with t3_task_return, else the last JSON object in its final
+   * message that matches the schema, else null.
+   */
+  structuredResult: Schema.optional(Schema.Unknown),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   hasPendingQuestion: Schema.Boolean.annotate({
     description:
@@ -214,6 +234,19 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
+
+export const OrchestratorMcpTaskReturnInput = Schema.Struct({
+  value: Schema.Unknown.annotate({
+    description: "The task's result, matching the JSON Schema in its task prompt.",
+  }),
+});
+export type OrchestratorMcpTaskReturnInput = typeof OrchestratorMcpTaskReturnInput.Type;
+
+export const OrchestratorMcpTaskReturnResult = Schema.Struct({
+  taskId: NodeId,
+  accepted: Schema.Literal(true),
+});
+export type OrchestratorMcpTaskReturnResult = typeof OrchestratorMcpTaskReturnResult.Type;
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
