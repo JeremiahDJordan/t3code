@@ -227,6 +227,7 @@ type DelegateTaskInput = {
   clientRequestId?: string;
   runtimeMode?: "inherit" | "approval-required" | "auto-accept-edits" | "full-access";
   interactionMode?: "inherit" | "plan" | "default";
+  resultSchema?: object; // JSON Schema for a structured result
 };
 ```
 
@@ -271,9 +272,29 @@ type DelegateTaskResult = {
   latestTerminalStatus: "completed" | "failed" | "cancelled" | "interrupted" | null;
   latestTerminalSummary: string | null;
   latestTerminalResultContextTransferId: string | null;
+  structuredResult?: unknown; // for a task with a resultSchema, once its result is available
   waitTimedOut: boolean;
 };
 ```
+
+A task with a `resultSchema` tells the child to return its result with
+`t3_task_return`, which validates the value and records it on the task row. If the
+child cannot call the tool, `structuredResult` is the last JSON value in its final
+message that matches the schema, else `null`.
+
+### `t3_task_return`
+
+Only for a delegated task whose prompt gives a result schema. It validates `value`
+against the schema and refuses a mismatch with the validation errors, so the child
+can correct it and call again.
+
+### `t3_workflow_run`
+
+Starts a workflow script (`source`, or `file` in the thread's workspace or its
+attachments) as a delegated task driven by the hidden `t3-workflow` provider, and
+returns its `taskId` at once. `dryRun` reports the phases, clamped limits and role
+bindings; a role that cannot bind returns `unbound_roles` with candidates and starts
+nothing unless `unboundRoles: "inherit"`. See [Workflows](../internals/workflows.md).
 
 ### `task_status`
 
