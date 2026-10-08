@@ -34,6 +34,7 @@ import {
   type ScheduledTaskId,
   ThreadId,
   type TurnItemId,
+  WORKFLOW_PROVIDER_INSTANCE_ID,
 } from "@t3tools/contracts";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
 import * as Context from "effect/Context";
@@ -516,35 +517,46 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
 
+  const assertConfiguredProviderInstanceEnabled = (
+    input: Parameters<ThreadManagementServiceShape["assertProviderInstanceEnabled"]>[0],
+  ) =>
+    receipts.getByCommandId(input.commandId).pipe(
+      Effect.orElseSucceed(() => Option.none()),
+      Effect.flatMap((receipt) =>
+        Option.isSome(receipt)
+          ? Effect.void
+          : serverSettings.getSettings.pipe(
+              Effect.orDie,
+              Effect.flatMap((current) =>
+                resolveProjectProviderInstanceEnabled(current, input.projectId, input.instanceId)
+                  ? Effect.void
+                  : new ThreadManagementProviderInstanceDisabledError({
+                      projectId: input.projectId,
+                      instanceId: input.instanceId,
+                    }),
+              ),
+            ),
+      ),
+    );
+
+  // The workflow engine's hidden instance is never configured, so no setting
+  // turns it off; only the workflow tool starts threads on it.
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
-      receipts.getByCommandId(input.commandId).pipe(
-        Effect.orElseSucceed(() => Option.none()),
-        Effect.flatMap((receipt) =>
-          Option.isSome(receipt)
-            ? Effect.void
-            : serverSettings.getSettings.pipe(
-                Effect.orDie,
-                Effect.flatMap((current) =>
-                  resolveProjectProviderInstanceEnabled(current, input.projectId, input.instanceId)
-                    ? Effect.void
-                    : new ThreadManagementProviderInstanceDisabledError({
-                        projectId: input.projectId,
-                        instanceId: input.instanceId,
-                      }),
-                ),
-              ),
-        ),
-      );
+      input.instanceId === WORKFLOW_PROVIDER_INSTANCE_ID
+        ? Effect.void
+        : assertConfiguredProviderInstanceEnabled(input);
 
   const isProviderInstanceEnabledForProject: ThreadManagementServiceShape["isProviderInstanceEnabledForProject"] =
     (input) =>
-      serverSettings.getSettings.pipe(
-        Effect.orDie,
-        Effect.map((current) =>
-          resolveProjectProviderInstanceEnabled(current, input.projectId, input.instanceId),
-        ),
-      );
+      input.instanceId === WORKFLOW_PROVIDER_INSTANCE_ID
+        ? Effect.succeed(true)
+        : serverSettings.getSettings.pipe(
+            Effect.orDie,
+            Effect.map((current) =>
+              resolveProjectProviderInstanceEnabled(current, input.projectId, input.instanceId),
+            ),
+          );
 
   const hasReceipt: ThreadManagementServiceShape["hasReceipt"] = (commandId) =>
     receipts.getByCommandId(commandId).pipe(

@@ -9,7 +9,17 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaRepresentation from "effect/SchemaRepresentation";
 
-type Decoder = (value: unknown) => Result.Result<unknown, string>;
+import { compileResultPattern, type PatternBudget, type ResultPattern } from "./ResultPattern.ts";
+
+/**
+ * Validates `value`, charging its pattern checks to `budget`, or to a fresh one. A field a
+ * closed object does not allow fails it, unless `strip` drops it instead.
+ */
+type Decoder = (
+  value: unknown,
+  budget?: PatternBudget,
+  strip?: boolean,
+) => Result.Result<unknown, string>;
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -18,87 +28,6 @@ const PROBES: ReadonlyArray<unknown> = [null, {}, []];
 
 const MAX_CACHED_SCHEMAS = 64;
 const decoders = new Map<string, Result.Result<Decoder, string>>();
-
-/** Longest `pattern` enforced; a longer one is refused rather than guessed about. */
-const MAX_PATTERN_CHARS = 256;
-
-/**
- * Longest string a `pattern` is checked against, by the pattern's cost: the
- * number of variable-width quantifiers in it, plus one when it is not anchored
- * at its start, since the engine then retries from every position. Each entry
- * keeps a mismatch to a few milliseconds; a pattern past the table is refused.
- */
-const PATTERN_VALUE_LENGTHS: ReadonlyArray<number> = [4096, 4096, 4096, 256, 64];
-
-/**
- * How `pattern` may be enforced: refused with a reason, or applied to strings
- * no longer than `maxLength`. Patterns run on the runtime's backtracking
- * engine against values the child chose. A repeated group or a backreference
- * can take exponential time, so those are refused. Without them a mismatch
- * costs about the value's length raised to the number of variable-width
- * quantifiers (`*`, `+`, `?`, `{n,m}`), so that count picks the length.
- */
-function patternBound(
-  pattern: string,
-): { readonly reason: string } | { readonly cost: number; readonly maxLength: number } {
-  if (pattern.length > MAX_PATTERN_CHARS) {
-    return { reason: `is longer than ${MAX_PATTERN_CHARS} characters` };
-  }
-  let inClass = false;
-  let depth = 0;
-  let quantifiers = 0;
-  let topLevelAlternation = false;
-  let afterQuantifier = false;
-  for (let index = 0; index < pattern.length; index += 1) {
-    const char = pattern[index]!;
-    const previous = pattern[index - 1];
-    const wasAfterQuantifier: boolean = afterQuantifier;
-    afterQuantifier = false;
-    if (char === "\\") {
-      const next = pattern[index + 1] ?? "";
-      if (next === "k" || (next >= "1" && next <= "9")) return { reason: "refers back to a group" };
-      index += 1;
-      // \p{...}, \P{...} and \u{...} hold braces that are not quantifiers.
-      if ("pPu".includes(next) && pattern[index + 1] === "{") {
-        const close = pattern.indexOf("}", index);
-        index = close === -1 ? pattern.length : close;
-      }
-    } else if (inClass) {
-      if (char === "]") inClass = false;
-    } else if (char === "[") {
-      inClass = true;
-    } else if (char === "(") {
-      depth += 1;
-    } else if (char === ")") {
-      depth -= 1;
-      if (/^[*+?{]/.test(pattern.slice(index + 1, index + 2))) return { reason: "repeats a group" };
-    } else if (char === "|") {
-      if (depth === 0) topLevelAlternation = true;
-    } else if (char === "*" || char === "+") {
-      quantifiers += 1;
-      afterQuantifier = true;
-    } else if (char === "?") {
-      // Not the lazy modifier of a quantifier, nor the `?` of a group prefix.
-      if (!wasAfterQuantifier && previous !== "(") quantifiers += 1;
-      afterQuantifier = !wasAfterQuantifier;
-    } else if (char === "{") {
-      const range = /^\{\d+(,\d*)?\}/.exec(pattern.slice(index));
-      if (range !== null) {
-        if (range[1] !== undefined) quantifiers += 1;
-        index += range[0].length - 1;
-        afterQuantifier = true;
-      }
-    }
-  }
-  const anchored = pattern.startsWith("^") && !topLevelAlternation;
-  const cost = quantifiers + (anchored ? 0 : 1);
-  const maxLength = PATTERN_VALUE_LENGTHS[cost];
-  return maxLength === undefined
-    ? {
-        reason: `has ${quantifiers} variable-width quantifiers${anchored ? "" : " and no ^ anchor"}, more than can be checked`,
-      }
-    : { cost, maxLength };
-}
 
 /** Keywords whose values are data, not schemas, so a `pattern` key inside them is not a constraint. */
 const DATA_KEYWORDS = new Set(["enum", "const", "default", "examples"]);
@@ -111,50 +40,396 @@ const SCHEMA_MAP_KEYWORDS = new Set([
   "dependentSchemas",
 ]);
 
-const lengthOf = (value: unknown) => (typeof value === "number" ? value : Infinity);
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+interface PatternVisitor {
+  /** The pattern to use in place of `pattern`, found at `at`. */
+  readonly pattern: (pattern: string, at: string) => string;
+  /** A string the importer may test a pattern against while it compiles. */
+  readonly literal: (value: string) => void;
+}
 
 /**
- * `schema` with every pattern constraint bounded: a `maxLength` beside each
- * `pattern`, so the engine never sees a string longer than the pattern's cost
- * allows. A `patternProperties` key is matched against property names, whose
- * length nothing bounds, so it must be linear. Throws naming the first
- * pattern that cannot be enforced.
+ * `schema` with each pattern constraint, a `pattern` value or a
+ * `patternProperties` key, replaced by `visit.pattern`. The importer tests
+ * patterns against property names (`properties` keys and `required`
+ * entries) and string `const` and `enum` values, so those go to
+ * `visit.literal`. A `type` list loses its repeats, which the importer
+ * would translate the whole node again for, and their children in turn.
  */
-function boundPatterns(schema: unknown, path: string, keyed: boolean): unknown {
+function mapPatterns(
+  schema: unknown,
+  path: string,
+  keyed: boolean,
+  visit: PatternVisitor,
+): unknown {
   if (typeof schema !== "object" || schema === null) return schema;
   if (Array.isArray(schema)) {
-    return schema.map((item, index) => boundPatterns(item, `${path}/${index}`, keyed));
+    return schema.map((item, index) => mapPatterns(item, `${path}/${index}`, keyed, visit));
   }
-  const refuse = (pattern: string, at: string, reason: string): never => {
-    throw new Error(
-      `the pattern ${JSON.stringify(pattern)} at ${at} ${reason}, so it cannot be checked in bounded time. Use enum, or a pattern without repeated groups or long chains of quantifiers.`,
-    );
-  };
-  const bound = (pattern: string, at: string) => {
-    const result = patternBound(pattern);
-    return "reason" in result ? refuse(pattern, at, result.reason) : result;
-  };
-  const copy: Record<string, unknown> = { ...schema };
-  let cap = Infinity;
-  for (const [key, value] of Object.entries(schema)) {
-    const at = `${path}/${key}`;
-    if (keyed && DATA_KEYWORDS.has(key)) continue;
-    if (keyed && key === "pattern" && typeof value === "string") {
-      cap = bound(value, at).maxLength;
-      continue;
+  const strings = (value: unknown) => {
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (typeof item === "string") visit.literal(item);
     }
-    if (keyed && key === "patternProperties" && typeof value === "object" && value !== null) {
-      for (const pattern of Object.keys(value)) {
-        if (bound(pattern, at).cost > 1) {
-          refuse(pattern, at, "has a quantifier or no ^ anchor, and names have no length limit");
+  };
+  return Object.fromEntries(
+    Object.entries(schema).map(([key, value]): [string, unknown] => {
+      const at = `${path}/${key}`;
+      if (!keyed) return [key, mapPatterns(value, at, true, visit)];
+      if (key === "const" || key === "enum" || key === "required") strings(value);
+      if (key === "properties" && isRecord(value)) strings(Object.keys(value));
+      if (DATA_KEYWORDS.has(key)) return [key, value];
+      if (key === "type" && Array.isArray(value)) return [key, [...new Set(value)]];
+      if (key === "pattern" && typeof value === "string") return [key, visit.pattern(value, at)];
+      if (key === "patternProperties" && isRecord(value)) {
+        const entries = Object.entries(value).map(([pattern, item]): [string, unknown] => [
+          visit.pattern(pattern, at),
+          mapPatterns(item, `${at}/${pattern}`, true, visit),
+        ]);
+        return [key, Object.fromEntries(entries)];
+      }
+      return [key, mapPatterns(value, at, !SCHEMA_MAP_KEYWORDS.has(key), visit)];
+    }),
+  );
+}
+
+/** `value` as a `u`-flag pattern of escapes, so it holds no syntax. */
+const literalPattern = (value: string) =>
+  Array.from(value, (char) =>
+    /^[A-Za-z0-9_ ]$/.test(char) ? char : `\\u{${char.codePointAt(0)!.toString(16)}}`,
+  ).join("");
+
+/**
+ * The pattern the importer sees in place of the real one: unique by `id`,
+ * and matching exactly `matches`, the strings of the schema itself the real
+ * one matches, so what it decides while compiling holds. Its checks are then
+ * revived with the real pattern.
+ */
+const placeholderPattern = (id: number, matches: Iterable<string>) =>
+  [`[]${id}`, ...Array.from(matches, (match) => `^${literalPattern(match)}$`)].join("|");
+
+/**
+ * Most steps spent matching a schema's patterns against its own strings: by
+ * `ResultPattern` here, and by the runtime when the importer tests the
+ * placeholders, whose length grows with the strings they list.
+ */
+const MAX_LITERAL_WORK = 1 << 24;
+
+const PatternPayload = Schema.Struct({ source: Schema.String, flags: Schema.String });
+
+/**
+ * Steps every pattern check in one validation may take together, about
+ * 100 ms at worst: each check is bounded on its own, but a result can hold
+ * many strings, each checked against many patterns.
+ */
+const MAX_VALIDATION_WORK = 1 << 23;
+const TOO_COSTLY =
+  "The result's strings take too long to check against the schema's patterns altogether";
+
+/** The budget of the validation running now, set for each call so cached decoders share none. */
+interface Checking {
+  budget: PatternBudget | undefined;
+}
+
+/**
+ * The importer's revivers (`jsonSchemaRevivers` in effect's
+ * `SchemaRepresentation`), except that patterns run on `ResultPattern`
+ * rather than the runtime's backtracking engine. A reviver missing here
+ * makes a schema that needs it fail to compile, naming it.
+ */
+const patternRevivers = (patterns: ReadonlyMap<string, ResultPattern>, checking: Checking) => [
+  SchemaRepresentation.JsonReviver,
+  SchemaRepresentation.makeReviverFilter(
+    "effect/schema/isPattern",
+    PatternPayload,
+    ({ payload, annotations }) => {
+      const pattern = patterns.get(payload.source);
+      if (pattern === undefined) throw new Error(`an unexpected pattern ${payload.source}`);
+      return Schema.makeFilter(
+        (value: string) =>
+          pattern.test(value, checking.budget) ??
+          (checking.budget !== undefined && checking.budget.remaining < 0
+            ? `${TOO_COSTLY}; stopped at the pattern ${pattern.source}`
+            : `Too long to check against the pattern ${pattern.source}: at most ${pattern.longest} characters`),
+        { ...annotations, expected: `a string matching the pattern ${pattern.source}` },
+      );
+    },
+  ),
+  SchemaRepresentation.isFiniteReviver,
+  SchemaRepresentation.isGreaterThanReviver,
+  SchemaRepresentation.isGreaterThanOrEqualToReviver,
+  SchemaRepresentation.isLessThanReviver,
+  SchemaRepresentation.isLessThanOrEqualToReviver,
+  SchemaRepresentation.isMultipleOfReviver,
+  SchemaRepresentation.isIntReviver,
+  SchemaRepresentation.isMinLengthReviver,
+  SchemaRepresentation.isMaxLengthReviver,
+  SchemaRepresentation.isMinCodePointsReviver,
+  SchemaRepresentation.isMaxCodePointsReviver,
+  SchemaRepresentation.isMinPropertiesReviver,
+  SchemaRepresentation.isMaxPropertiesReviver,
+  SchemaRepresentation.isPropertyNamesReviver,
+  SchemaRepresentation.isUniqueReviver,
+];
+
+/**
+ * Most work the importer may do on a schema, about 25 ms at worst: in
+ * steps of `IMPORT_NODE_STEPS` for each node and literal it translates, and
+ * of one for each property name and scope it lowers each time it intersects
+ * scopes. An `allOf` of objects is lowered again at each member, over every
+ * name and scope gathered so far, and so are the properties those share, so
+ * its cost grows with the cube of its length, and faster for shared depth.
+ */
+const MAX_IMPORT_WORK = 1 << 18;
+const IMPORT_NODE_STEPS = 64;
+
+/** Keywords the importer folds into a node's parts rather than its scope. */
+const COMPOSITION_KEYWORDS = new Set(["allOf", "anyOf", "oneOf", "$ref"]);
+/** Keywords that constrain nothing, so a node of only these has no scope of its own. */
+const ANNOTATION_KEYWORDS = new Set([
+  "$schema",
+  "$id",
+  "$anchor",
+  "$comment",
+  "$defs",
+  "definitions",
+  "title",
+  "description",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+]);
+
+/**
+ * Refuses a schema whose import would take longer than `MAX_IMPORT_WORK`,
+ * before the importer runs: it blocks the server's thread, unlike a value's
+ * checks, which share a budget. An upper bound of the importer's own work:
+ * each part it intersects (an `allOf` member, a `$ref` with siblings, a
+ * branch with its siblings) is a scope, and the properties of `m` scopes are
+ * intersected in turn at each of the `m - 1` steps. Its walk is charged as it
+ * goes, so stops within the budget too.
+ */
+function checkImportWork(document: JsonSchema.Document<"draft-2020-12">): void {
+  let work = 0;
+  const charge = (steps: number) => {
+    work += steps;
+    if (!(work <= MAX_IMPORT_WORK)) {
+      throw new Error(
+        "it is too large to compile quickly. Each property, enum value and branch counts, and one combined through allOf, anyOf, oneOf or $ref counts again for each combination. Use fewer of them, or flatten them into one object.",
+      );
+    }
+  };
+  const translated = new WeakSet<object>();
+  /** The definition a `$ref` names, as effect's `JsonSchema.getReferenceKey` reads it. */
+  const definitionOf = (schema: Record<string, unknown>) => {
+    const path =
+      typeof schema.$ref === "string" && schema.$ref.startsWith("#")
+        ? JsonPointer.parseUriFragment(schema.$ref)
+        : undefined;
+    const name = path?.length === 2 && path[0] === "$defs" ? path[1]! : undefined;
+    return name !== undefined && Object.hasOwn(document.definitions, name) ? name : undefined;
+  };
+  const walks = new WeakMap<object, number>();
+  /**
+   * The nodes effect's `hasChoices` may walk below `schema` before it finds a choice: every
+   * subschema, through every `$ref`, as a tree, since it does not remember a definition it
+   * walked, so one reached by two paths is walked twice. It stops at a union of two or more
+   * branches, and at a cycle, which count once.
+   */
+  const walked = (schema: unknown): number => {
+    if (!isRecord(schema)) return 1;
+    const known = walks.get(schema);
+    if (known !== undefined) return known;
+    walks.set(schema, 1);
+    const name = definitionOf(schema);
+    const children = Object.entries(schema).flatMap(([key, value]): ReadonlyArray<unknown> => {
+      if (DATA_KEYWORDS.has(key) || key === "$defs" || key === "definitions") return [];
+      if ((key === "anyOf" || key === "oneOf") && Array.isArray(value) && value.length > 1) {
+        return [];
+      }
+      if (SCHEMA_MAP_KEYWORDS.has(key) && isRecord(value)) return Object.values(value);
+      return Array.isArray(value) ? value.filter(isRecord) : isRecord(value) ? [value] : [];
+    });
+    if (name !== undefined) children.push(document.definitions[name]);
+    let total = 1;
+    for (const child of children) total = Math.min(total + walked(child), MAX_IMPORT_WORK + 1);
+    walks.set(schema, total);
+    return total;
+  };
+  /** Charges intersecting `parts` with `scopes`, `factor` times, and what their properties share. */
+  const intersect = (
+    parts: ReadonlyArray<unknown>,
+    factor: number,
+    scopes: Array<Record<string, unknown>> = [],
+  ): void => {
+    const unions: Array<ReadonlyArray<unknown>> = [];
+    const references: Array<readonly [string, ReadonlySet<string>]> = [];
+    const add = (schema: unknown, chain: ReadonlySet<string>) => {
+      if (!isRecord(schema)) return charge(factor);
+      // The importer translates each node once, then intersects what it made.
+      const first = !translated.has(schema);
+      translated.add(schema);
+      const literals = first && Array.isArray(schema.enum) ? schema.enum.length : 0;
+      charge(factor + (first ? IMPORT_NODE_STEPS * (1 + literals) : 0));
+      if (
+        Object.keys(schema).some(
+          (key) => !COMPOSITION_KEYWORDS.has(key) && !ANNOTATION_KEYWORDS.has(key),
+        )
+      ) {
+        scopes.push(schema);
+      }
+      if (Array.isArray(schema.allOf)) for (const member of schema.allOf) add(member, chain);
+      for (const members of [schema.anyOf, schema.oneOf]) {
+        if (Array.isArray(members)) unions.push(members);
+      }
+      const name = definitionOf(schema);
+      if (name !== undefined && !chain.has(name)) references.push([name, chain]);
+    };
+    for (const part of parts) add(part, new Set());
+    // A definition is read again only where it is intersected with something.
+    while (references.length > 0 && scopes.length + references.length + unions.length > 1) {
+      const [name, chain] = references.pop()!;
+      add(document.definitions[name], new Set(chain).add(name));
+    }
+    const [union, ...rest] = unions;
+    if (union !== undefined) {
+      // Before intersecting overlapping branches with the rest, effect checks whether the other
+      // side holds a choice, walking the rest, or each branch of another union, whole.
+      if (scopes.length > 0 || rest.length > 0) {
+        const sides: ReadonlyArray<unknown> = [...scopes, ...rest.flat(), ...union];
+        charge(factor * sides.reduce<number>((sum, side) => sum + walked(side), 0));
+      }
+      // Intersected, a union's branches are each intersected with the rest.
+      for (const member of union) {
+        intersect([member, ...rest.map((members) => ({ anyOf: members }))], factor, [...scopes]);
+      }
+      return;
+    }
+    if (scopes.length === 0) return;
+    const children = new Map<string, Array<unknown>>();
+    const child = (key: string, value?: unknown) => {
+      let list = children.get(key);
+      if (list === undefined) children.set(key, (list = []));
+      if (value !== undefined) list.push(value);
+    };
+    let literals = 0;
+    for (const scope of scopes) {
+      for (const [key, value] of Object.entries(scope)) {
+        if (key === "enum" && Array.isArray(value)) literals += value.length;
+        if (
+          DATA_KEYWORDS.has(key) ||
+          COMPOSITION_KEYWORDS.has(key) ||
+          ANNOTATION_KEYWORDS.has(key)
+        ) {
+          continue;
+        }
+        if (key === "properties" && isRecord(value)) {
+          for (const [name, item] of Object.entries(value)) child(`p:${name}`, item);
+        } else if (key === "required" && Array.isArray(value)) {
+          for (const name of value) if (typeof name === "string") child(`p:${name}`);
+        } else if (key === "prefixItems" && Array.isArray(value)) {
+          value.forEach((item, index) => child(`i:${index}`, item));
+        } else if (SCHEMA_MAP_KEYWORDS.has(key) && isRecord(value)) {
+          for (const [name, item] of Object.entries(value)) child(`${key}:${name}`, item);
+        } else if (isRecord(value)) {
+          child(key, value);
         }
       }
     }
-    copy[key] = boundPatterns(value, at, !(keyed && SCHEMA_MAP_KEYWORDS.has(key)));
+    const steps = Math.max(1, scopes.length - 1);
+    charge(factor * steps * (scopes.length * (children.size + 1) + literals));
+    // Merged, the scopes make a new node of every property, as a union's
+    // branches each do with the scopes beside it.
+    if (scopes.length > 1) charge(IMPORT_NODE_STEPS * children.size);
+    // Schemas typing names or elements beyond their own join each one they may type.
+    for (const scope of scopes) {
+      const patterns = isRecord(scope.patternProperties)
+        ? Object.values(scope.patternProperties)
+        : [];
+      const joins = [
+        ...[scope.additionalProperties, ...patterns].map((extra) => ["p:", extra] as const),
+        ["i:", scope.items] as const,
+      ];
+      for (const [prefix, extra] of joins) {
+        if (!isRecord(extra)) continue;
+        for (const [key, list] of children) if (key.startsWith(prefix)) list.push(extra);
+      }
+    }
+    for (const list of children.values()) if (list.length > 0) intersect(list, factor * steps);
+  };
+  intersect([document.schema], 1);
+  for (const definition of Object.values(document.definitions)) intersect([definition], 1);
+}
+
+/**
+ * The schema as effect imports it, with every pattern checked by
+ * `ResultPattern`: the importer only ever runs placeholders, on the schema's
+ * own strings, and the decoder never runs the runtime's engine on a value.
+ */
+function importSchema(schema: object, checking: Checking): Schema.Top {
+  const compiled = new Map<string, ResultPattern>();
+  /** Places each pattern appears, where the importer tests it again. */
+  const uses = new Map<string, number>();
+  const literals = new Set<string>();
+  mapPatterns(schema, "", true, {
+    pattern: (pattern, at) => {
+      uses.set(pattern, (uses.get(pattern) ?? 0) + 1);
+      if (compiled.has(pattern)) return pattern;
+      const result = compileResultPattern(pattern);
+      if ("reason" in result) {
+        throw new Error(
+          `the pattern ${JSON.stringify(pattern)} at ${at} ${result.reason}. Use enum, or a pattern without backreferences, lookaround or inline flags.`,
+        );
+      }
+      compiled.set(pattern, result);
+      return pattern;
+    },
+    literal: (value) => literals.add(value),
+  });
+  const placeholders = new Map<string, string>();
+  const byPlaceholder = new Map<string, ResultPattern>();
+  let work = 0;
+  const charge = (steps: number) => {
+    work += steps;
+    if (work > MAX_LITERAL_WORK) {
+      throw new Error("it has too many patterns and names to check against each other");
+    }
+  };
+  for (const [pattern, result] of compiled) {
+    const matches = Array.from(literals).filter((literal) => {
+      charge((literal.length + 1) * result.size);
+      const matched = result.test(literal);
+      // Taken as no match, the importer would type that name without the pattern's schema.
+      if (matched === undefined) {
+        throw new Error(
+          `the name or value ${JSON.stringify(literal.slice(0, 32))}… is too long to check against the pattern ${JSON.stringify(pattern)}: at most ${result.longest} characters, not ${literal.length}`,
+        );
+      }
+      return matched;
+    });
+    const placeholder = placeholderPattern(placeholders.size, matches);
+    // The importer runs the placeholder against the schema's names and
+    // values wherever the pattern appears, each run costing about its length.
+    charge(literals.size * placeholder.length * uses.get(pattern)!);
+    placeholders.set(pattern, placeholder);
+    byPlaceholder.set(placeholder, result);
   }
-  // The cap holds whichever order the schema lists `pattern` and its own `maxLength` in.
-  if (cap !== Infinity) copy.maxLength = Math.min(cap, lengthOf(copy.maxLength));
-  return copy;
+  const raw = mapPatterns(schema, "", true, {
+    pattern: (pattern) => placeholders.get(pattern)!,
+    literal: () => undefined,
+  }) as JsonSchema.JsonSchema;
+  const dialect = typeof raw.$schema === "string" && raw.$schema.includes("draft-07");
+  const document = dialect
+    ? JsonSchema.fromSchemaDraft07(raw)
+    : JsonSchema.fromSchemaDraft2020_12(raw);
+  checkImportWork(document);
+  const imported = SchemaRepresentation.fromJsonSchemaDocument(document, { patterns: "apply" });
+  if (compiled.size === 0) return imported;
+  return SchemaRepresentation.fromRepresentation(
+    SchemaRepresentation.toRepresentation(imported.ast),
+    { revivers: patternRevivers(byPlaceholder, checking) },
+  );
 }
 
 function compile(schema: unknown): Result.Result<Decoder, string> {
@@ -166,24 +441,42 @@ function compile(schema: unknown): Result.Result<Decoder, string> {
   if (cached !== undefined) return cached;
   let compiled: Result.Result<Decoder, string>;
   try {
-    const raw = boundPatterns(schema, "", true) as JsonSchema.JsonSchema;
-    const dialect = typeof raw.$schema === "string" && raw.$schema.includes("draft-07");
-    const document = dialect
-      ? JsonSchema.fromSchemaDraft07(raw)
-      : JsonSchema.fromSchemaDraft2020_12(raw);
-    // Patterns are enforced: the walk above refused any that could backtrack
-    // without bound and capped the length of the strings the rest see.
-    const decode = Schema.decodeUnknownResult(
-      SchemaRepresentation.fromJsonSchemaDocument(document, { patterns: "apply" }) as Schema.Codec<
-        unknown,
-        unknown
-      >,
-    );
+    const checking: Checking = { budget: undefined };
+    const imported = importSchema(schema, checking) as Schema.Codec<unknown, unknown>;
+    // A field a closed object does not allow fails it, as in JSON Schema,
+    // rather than being dropped: dropped, it could let a `oneOf` branch
+    // that does not allow it match too.
+    const decodeStrictly = Schema.decodeUnknownResult(imported, { onExcessProperty: "error" });
+    const decodeStripping = Schema.decodeUnknownResult(imported);
+    // Every pattern check in one call shares one budget: the caller's, or a fresh one.
+    const decode = (
+      value: unknown,
+      shared?: PatternBudget,
+      strip = false,
+    ): Result.Result<unknown, string> => {
+      const budget: PatternBudget = shared ?? { remaining: MAX_VALIDATION_WORK };
+      checking.budget = budget;
+      let decoded: Result.Result<unknown, string>;
+      try {
+        decoded = Result.mapError(
+          (strip ? decodeStripping : decodeStrictly)(value),
+          (error) => error.message,
+        );
+      } finally {
+        checking.budget = undefined;
+      }
+      if (budget.remaining >= 0) return decoded;
+      // A check that ran out may have been taken as a mismatch, by a union
+      // or a key pattern, so whatever the decoder concluded, the value fails.
+      return Result.isFailure(decoded) && decoded.failure.includes(TOO_COSTLY)
+        ? decoded
+        : Result.fail(`${TOO_COSTLY}.`);
+    };
     for (const probe of PROBES) decode(probe);
     // A probe cannot reach every branch, so a later throw is a failure too.
-    compiled = Result.succeed((value) => {
+    compiled = Result.succeed((value, budget, strip) => {
       try {
-        return Result.mapError(decode(value), (error) => error.message);
+        return decode(value, budget, strip);
       } catch {
         // The decoder's own error text names its internals, not the schema.
         return Result.fail(
@@ -217,7 +510,7 @@ export function structuredTaskPrompt(task: string, schema: unknown): string {
   return [
     task,
     "",
-    "When you finish, call the t3_task_return tool with your result as `value`. It must match the JSON Schema below; if the tool rejects it, fix the value and call it again. If you cannot call the tool, end your final message with the result as JSON matching the schema.",
+    "When you finish, call the t3_task_return tool with your result as `value`. It must match the JSON Schema below; if the tool rejects it, fix the value and call it again. If you cannot call the tool, end your final message with the result as JSON matching the schema, in a ```json fence.",
     "",
     "```json",
     JSON.stringify(schema, null, 2),
@@ -511,7 +804,16 @@ function fencedValueAround(text: string, start: number, valueStart: number): num
  * and taken whole, never as a piece nested inside one, so
  * `{"ok":false,"details":{"ok":true}}` is not read as `{"ok":true}` whatever
  * follows it in the message, nor is the same value cut short, closed with
- * the wrong bracket, or missing a comma or colon before it.
+ * the wrong bracket, or missing a comma or colon before it. Every
+ * candidate's pattern checks share one validation's budget, and the scan
+ * stops when it runs out.
+ *
+ * Outside a fence, a value with other syntax errors before the match, such
+ * as a mismatched bracket, a comment or an unquoted key, is not taken for a
+ * value holding it, so the match nested in it is read: no one rule tells
+ * those from prose that happens to hold brackets and quotes. A fence whose
+ * content begins with a bracket, as the task prompt asks for, is stricter:
+ * any bracket there still open holds the match.
  */
 export function structuredResultFromText(
   schema: unknown,
@@ -519,6 +821,9 @@ export function structuredResultFromText(
 ): Result.Result<unknown, string> {
   const compiled = compile(schema);
   if (Result.isFailure(compiled)) return compiled;
+  const decode = compiled.success;
+  // Every candidate's pattern checks share one budget, as one validation's do.
+  const budget: PatternBudget = { remaining: MAX_VALIDATION_WORK };
   let tried = 0;
   let steps = 0;
   let lastProblem: string | undefined;
@@ -545,8 +850,21 @@ export function structuredResultFromText(
     } catch {
       return undefined;
     }
-    const validated = validateStructuredResult(schema, parsed);
-    if (Result.isFailure(validated)) lastProblem ??= validated.failure;
+    const validated = decode(parsed, budget);
+    if (Result.isFailure(validated)) {
+      // Out of budget, no later candidate is checked: that is the problem to report.
+      if (budget.remaining < 0) lastProblem = validated.failure;
+      else lastProblem ??= validated.failure;
+      // A final message is not a tool call: the value it ends with, meant as the result, may
+      // carry a field a closed object leaves out. That value without it is the result, rather
+      // than an earlier one the message mentions, which may say the opposite. Only a value
+      // that fails as given is stripped, so a `oneOf` branch it matches as given still decides.
+      if (budget.remaining >= 0) {
+        const stripped = decode(parsed, budget, true);
+        if (Result.isSuccess(stripped)) return stripped;
+        if (budget.remaining < 0) lastProblem = stripped.failure;
+      }
+    }
     return validated;
   };
   for (
@@ -570,6 +888,7 @@ export function structuredResultFromText(
     if (forward.json === undefined || forward.json.length !== end - back.start) continue;
     tried += 1;
     const validated = tryCandidate(forward.json);
+    if (budget.remaining < 0) break;
     if (validated !== undefined && Result.isSuccess(validated)) {
       // A match that is a piece of an unfinished or malformed value is not
       // the result either: the value around it, and its other pieces, are

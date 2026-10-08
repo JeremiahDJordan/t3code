@@ -591,6 +591,7 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "command":
     case "edit":
     case "delegate":
+    case "workflow-run":
     case "task-cancel":
     case "thread-create":
     case "thread-send":
