@@ -683,6 +683,10 @@ export const OrchestrationV2Subagent = Schema.Struct({
   // blocking tool call). Absent on legacy records; treated as settled_only.
   completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
+  /** JSON Schema the task's result must match, returned with `t3_task_return`. */
+  resultSchema: Schema.optional(Schema.Json),
+  /** The validated value the child returned for `resultSchema`. */
+  structuredResult: Schema.optional(Schema.Json),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -3013,6 +3017,7 @@ export const OrchestrationV2Command = Schema.Union([
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    resultSchema: Schema.optional(Schema.Json),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3112,6 +3117,17 @@ const OrchestrationV2InternalCommand = Schema.Union([
     commandId: CommandId,
     threadId: ThreadId,
     reason: Schema.optional(Schema.String),
+  }),
+  /**
+   * Records the structured result a delegated task returned for its
+   * `resultSchema`. Internal: the caller validates the value first.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.return"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    value: Schema.Json,
   }),
   /**
    * Records or updates a secret an agent asked the user for. Internal so no

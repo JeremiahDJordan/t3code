@@ -29,6 +29,8 @@ import {
   OrchestratorMcpThreadWaitResult,
   ThreadMetadataMcpUpdateInput,
   ThreadMetadataMcpUpdateResult,
+  OrchestratorMcpTaskReturnInput,
+  OrchestratorMcpTaskReturnResult,
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -99,6 +101,18 @@ const TaskCancelTool = Tool.make("task_cancel", {
 })
   .annotate(Tool.Title, "Cancel delegated task")
   .annotate(Tool.Destructive, true);
+
+const TaskReturnTool = Tool.make("t3_task_return", {
+  description:
+    "Only for a delegated task whose prompt gives a JSON Schema for its result: return the result as value before ending your turn. It is checked against the schema; a mismatch is refused with what is wrong, so fix the value and call again.",
+  parameters: OrchestratorMcpTaskReturnInput,
+  success: OrchestratorMcpTaskReturnResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Return a task's result")
+  .annotate(Tool.Destructive, false);
 
 export const ScheduleTaskTool = Tool.make("schedule_task", {
   description:
@@ -261,6 +275,7 @@ export const OrchestratorToolkit = Toolkit.make(
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,
+  TaskReturnTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,
   UpdateScheduledTaskTool,

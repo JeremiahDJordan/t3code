@@ -478,6 +478,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
+    case "delegated_task.return":
     case "thread.created.record":
       return command.parentThreadId;
     case "secret_request.record":
@@ -6584,6 +6585,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         title: command.title ?? null,
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        ...(command.resultSchema === undefined ? {} : { resultSchema: command.resultSchema }),
         status: "running",
         result: null,
         startedAt: now,
@@ -6970,6 +6972,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
    * item carries the request and its status only; the value goes straight to
    * the server's secret store and never through orchestration.
    */
+  // Records a delegated task's structured result on its row in the parent.
+  // The caller validated the value against the row's resultSchema.
+  const dispatchDelegatedTaskReturn = Effect.fn("orchestrationV2.dispatch.delegatedTaskReturn")(
+    function* (
+      command: Extract<OrchestrationV2InternalCommand, { readonly type: "delegated_task.return" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const parentProjection = yield* projectionStore
+        .getThreadRecords(command.parentThreadId, ["subagents"])
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+          ),
+        );
+      const task = parentProjection.subagents.find(
+        (candidate) => candidate.id === command.taskId && candidate.origin === "app_owned",
+      );
+      if (task === undefined || task.resultSchema === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Delegated task ${command.taskId} has no result schema.`,
+        });
+      }
+      if (isTerminalDelegatedTaskStatus(task.status)) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Delegated task ${command.taskId} already finished.`,
+        });
+      }
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "subagent.updated",
+        threadId: command.parentThreadId,
+        ...(task.runId === null ? {} : { runId: task.runId }),
+        nodeId: task.id,
+        driver: task.driver,
+        providerInstanceId: task.providerInstanceId,
+        occurredAt: now,
+        payload: { ...task, structuredResult: command.value, updatedAt: now },
+      });
+    },
+  );
+
   const dispatchSecretRequestRecord = Effect.fn("orchestrationV2.dispatch.secretRequestRecord")(
     function* (
       command: Extract<OrchestrationV2InternalCommand, { readonly type: "secret_request.record" }>,
@@ -10401,6 +10451,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "delegated_task.completion-delivery.acknowledge":
       case "delegated_task.completion-delivery.dispose":
         yield* dispatchDelegatedTaskCompletionDeliveryResolution(command, events);
+        break;
+      case "delegated_task.return":
+        yield* dispatchDelegatedTaskReturn(command, events);
         break;
       case "thread.created.record":
         yield* dispatchCreatedThreadRecord(command, events);

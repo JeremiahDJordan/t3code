@@ -45,6 +45,7 @@ function start(ready) {
           projection: {
             messages: [history()],
             contextHandoffs: [],
+            subagents: [],
             turnItems: [],
             visibleTurnItems: [],
           },

@@ -35,6 +35,13 @@ const handlers = {
       return yield* service.cancelTask(scope, input);
     }),
   ),
+  t3_task_return: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* service.returnTaskResult(scope, input);
+    }),
+  ),
   schedule_task: McpToolAccess.startsThreads(
     // A scheduled task runs with the caller's own modes.
     () => ({}),

@@ -1,6 +1,7 @@
 import type {
   OrchestrationV2DomainEvent,
   OrchestrationV2ContextHandoff,
+  OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
@@ -207,6 +208,22 @@ export function projectContextHandoffForWire(
   return { ...projected, summaryText: "" };
 }
 
+/**
+ * A subagent row as clients receive it. Result schemas and structured results
+ * are for the agents that read them, not for drawing a row.
+ */
+function projectSubagentForWire(subagent: OrchestrationV2Subagent): OrchestrationV2Subagent {
+  if (subagent.resultSchema === undefined && subagent.structuredResult === undefined) {
+    return subagent;
+  }
+  const {
+    resultSchema: _resultSchema,
+    structuredResult: _structuredResult,
+    ...projected
+  } = subagent;
+  return projected;
+}
+
 export function projectThreadProjectionForWire(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadProjection {
@@ -222,6 +239,7 @@ export function projectThreadProjectionForWire(
   return {
     ...projection,
     contextHandoffs: projection.contextHandoffs.map(projectContextHandoffForWire),
+    subagents: projection.subagents.map(projectSubagentForWire),
     turnItems: projection.turnItems.map(project),
     visibleTurnItems: projection.visibleTurnItems.map((row) => ({
       ...row,
@@ -237,5 +255,7 @@ export function projectDomainEventForWire(
     ? { ...event, payload: projectTurnItemForWire(event.payload) }
     : event.type === "context-handoff.updated"
       ? { ...event, payload: projectContextHandoffForWire(event.payload) }
-      : event;
+      : event.type === "subagent.updated"
+        ? { ...event, payload: projectSubagentForWire(event.payload) }
+        : event;
 }

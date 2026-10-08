@@ -8,6 +8,7 @@ export interface T3McpToolPresentation {
 export type T3McpToolSummaryAction =
   | "capabilities"
   | "delegate"
+  | "task-return"
   | "task-status"
   | "task-cancel"
   | "schedule-run"
@@ -113,6 +114,7 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "capabilities",
   ),
   delegate_task: tool(["Delegate", "Delegating", "Delegated", "a child task"], "delegate"),
+  t3_task_return: tool(["Return", "Returning", "Returned", "a task result"], "task-return"),
   task_status: tool(["Get", "Getting", "Got", "delegated task status"], "task-status"),
   task_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],

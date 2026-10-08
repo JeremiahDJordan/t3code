@@ -31,6 +31,8 @@ import {
   type OrchestratorMcpTarget,
   type OrchestratorMcpTaskCancelInput,
   type OrchestratorMcpTaskCancelResult,
+  type OrchestratorMcpTaskReturnInput,
+  type OrchestratorMcpTaskReturnResult,
   type OrchestratorMcpUpdateScheduledTaskInput,
   type OrchestratorMcpListScheduledTasksInput,
   type ProjectId,
@@ -68,10 +70,17 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import {
+  checkResultSchema,
+  structuredResultFromText,
+  structuredTaskPrompt,
+  validateStructuredResult,
+} from "../orchestration-v2/StructuredResult.ts";
 import {
   subagentResultForRun,
   delegatedTaskProgress,
@@ -132,6 +141,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     taskId: NodeId,
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+  /** Records the calling child's structured result, checked against its task's resultSchema. */
+  readonly returnTaskResult: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpTaskReturnInput,
+  ) => Effect.Effect<OrchestratorMcpTaskReturnResult, OrchestratorMcpFailure>;
   readonly cancelTask: (
     scope: McpInvocationScope,
     input: OrchestratorMcpTaskCancelInput,
@@ -1306,6 +1320,14 @@ const make = Effect.gen(function* () {
             null);
       const resultTransfer = resultTransfers[0] ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
+      // A child that could not call t3_task_return may still end with the JSON.
+      const structuredResult =
+        task.resultSchema === undefined || !isTerminalTaskStatus(status)
+          ? undefined
+          : (task.structuredResult ??
+            (status === "completed" && derivedResult !== null
+              ? Result.getOrNull(structuredResultFromText(task.resultSchema, derivedResult))
+              : null));
       const response = {
         taskId: task.id,
         childThreadId: task.childThreadId,
@@ -1317,6 +1339,7 @@ const make = Effect.gen(function* () {
         providerInstanceId: task.providerInstanceId,
         model: task.model,
         summary: derivedResult,
+        ...(structuredResult === undefined ? {} : { structuredResult }),
         resultContextTransferId: resultTransfer?.id ?? null,
         latestTerminalRunId: terminalRun?.id ?? null,
         latestTerminalStatus:
@@ -1839,6 +1862,10 @@ const make = Effect.gen(function* () {
           parent.thread.interactionMode,
           input.interactionMode,
         );
+        if (input.resultSchema !== undefined) {
+          const usable = checkResultSchema(input.resultSchema);
+          if (Result.isFailure(usable)) return yield* failure("invalid_request", usable.failure);
+        }
         const key = yield* requestKey(input.clientRequestId);
         const commandId = stableCommandId({
           scope,
@@ -1854,8 +1881,14 @@ const make = Effect.gen(function* () {
             parentThreadId: scope.thread.threadId,
             parentRunId: parentRun.id,
             parentNodeId: parentRun.rootNodeId,
-            task: taskPrompt(input),
+            task:
+              input.resultSchema === undefined
+                ? taskPrompt(input)
+                : structuredTaskPrompt(taskPrompt(input), input.resultSchema),
             ...(input.title === undefined ? {} : { title: input.title }),
+            ...(input.resultSchema === undefined
+              ? {}
+              : { resultSchema: input.resultSchema as Schema.Json }),
             modelSelection: target.modelSelection,
             runtimeMode,
             interactionMode,
@@ -1940,6 +1973,53 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const scope = yield* requireThreadScope(callerScope, "task_status");
         return yield* readTask(scope, taskId, false, true);
+      }),
+    returnTaskResult: (callerScope, input) =>
+      Effect.gen(function* () {
+        const { parent: caller } = yield* loadThreadCaller(callerScope, "t3_task_return");
+        const parentThreadId = caller.thread.lineage.parentThreadId;
+        const forkedFrom = caller.thread.forkedFrom;
+        const notATask = failure(
+          "invalid_request",
+          "t3_task_return is only for a delegated task whose prompt gives a result schema.",
+        );
+        if (
+          caller.thread.lineage.relationshipToParent !== "subagent" ||
+          parentThreadId === null ||
+          forkedFrom?.type !== "node"
+        ) {
+          return yield* notATask;
+        }
+        const parent = yield* loadProjection(parentThreadId);
+        const task = parent.subagents.find(
+          (candidate) =>
+            candidate.id === forkedFrom.nodeId && candidate.childThreadId === caller.thread.id,
+        );
+        if (task?.resultSchema === undefined) return yield* notATask;
+        const validated = validateStructuredResult(task.resultSchema, input.value);
+        if (Result.isFailure(validated)) {
+          return yield* failure(
+            "invalid_request",
+            `The value does not match the task's result schema: ${validated.failure} Fix it and call t3_task_return again.`,
+          );
+        }
+        const key = yield* requestKey(undefined);
+        yield* threadManagement
+          .dispatch({
+            type: "delegated_task.return",
+            commandId: CommandId.make(
+              `command:task-return:${stablePart(task.id)}:${stablePart(key)}`,
+            ),
+            parentThreadId,
+            taskId: task.id,
+            value: validated.success as Schema.Json,
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              failure("orchestration_error", `Unable to record the result: ${errorMessage(error)}`),
+            ),
+          );
+        return { taskId: task.id, accepted: true } satisfies OrchestratorMcpTaskReturnResult;
       }),
     cancelTask: (callerScope, input) =>
       Effect.gen(function* () {
