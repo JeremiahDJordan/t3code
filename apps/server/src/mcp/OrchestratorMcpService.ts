@@ -129,6 +129,7 @@ const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
 interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
   readonly supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined;
+  readonly provider: ServerProvider;
 }
 
 type TerminalTaskStatus = Extract<
@@ -280,7 +281,7 @@ function scheduledTaskSummary(task: ScheduledTask, mayRun: boolean): Orchestrato
   };
 }
 
-function providerConstraints(
+export function providerConstraints(
   provider: ServerProvider | undefined,
   supportsOrchestrationV2: boolean,
 ): ReadonlyArray<string> {
@@ -596,19 +597,56 @@ export function resolveRuntimeMode(
   );
 }
 
+/**
+ * The child's interaction mode, refused when broader than the parent's. Given
+ * the providers, a plan-mode parent is also refused a child on a provider
+ * without plan mode, which would edit files; a parent whose own provider has
+ * no plan mode already edits.
+ */
 export function resolveInteractionMode(
   parentMode: ProviderInteractionMode,
   requested: OrchestratorMcpInteractionMode | undefined,
+  providers?: {
+    readonly child: Pick<ServerProvider, "instanceId" | "showInteractionModeToggle">;
+    readonly parent: Pick<ServerProvider, "showInteractionModeToggle"> | undefined;
+  },
 ): Effect.Effect<ProviderInteractionMode, OrchestratorMcpFailure> {
   const resolved = requested === undefined || requested === "inherit" ? parentMode : requested;
-  return interactionModeRank(resolved) > interactionModeRank(parentMode)
-    ? Effect.fail(
-        failure(
-          "interaction_mode_escalation_denied",
-          `Child interaction mode ${resolved} is broader than parent mode ${parentMode}.`,
-        ),
-      )
-    : Effect.succeed(resolved);
+  if (interactionModeRank(resolved) > interactionModeRank(parentMode)) {
+    return Effect.fail(
+      failure(
+        "interaction_mode_escalation_denied",
+        `Child interaction mode ${resolved} is broader than parent mode ${parentMode}.`,
+      ),
+    );
+  }
+  if (
+    parentMode === "plan" &&
+    providers !== undefined &&
+    providers.child.showInteractionModeToggle === false &&
+    providers.parent?.showInteractionModeToggle !== false
+  ) {
+    return Effect.fail(
+      failure(
+        "interaction_mode_escalation_denied",
+        `This thread is in plan mode, and provider ${providers.child.instanceId} has no plan mode, so a child there would edit files. Choose a provider with plan mode.`,
+      ),
+    );
+  }
+  return Effect.succeed(resolved);
+}
+
+/** Largest `t3_task_return` value, as JSON; the parent reads it back on every status read. */
+const TASK_RETURN_MAX_BYTES = 1024 * 1024;
+const toJsonText = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+function parentProvider(
+  parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+  providers: ReadonlyArray<ServerProvider>,
+): ServerProvider | undefined {
+  return providers.find(
+    (provider) => provider.instanceId === parent.thread.modelSelection.instanceId,
+  );
 }
 
 function stablePart(value: string): string {
@@ -630,6 +668,18 @@ function stableCommandId(input: {
       stablePart(input.requestKey),
       ...(input.index === undefined ? [] : [String(input.index)]),
     ].join(":"),
+  );
+}
+
+/**
+ * The command id `delegate_task` dispatches with. A workflow engine uses the
+ * same shape under its own namespace, so its children's ids derive the same way.
+ */
+export function delegateTaskCommandId(requestNamespace: string, requestKey: string): CommandId {
+  return CommandId.make(
+    ["command", "mcp", stablePart(requestNamespace), "delegate-task", stablePart(requestKey)].join(
+      ":",
+    ),
   );
 }
 
@@ -1333,6 +1383,7 @@ const make = Effect.gen(function* () {
               ? { instanceId, model }
               : { instanceId, model, options: requestedOptions },
         supportedRuntimeModes: provider.supportedRuntimeModes,
+        provider,
       };
     });
 
@@ -2046,6 +2097,7 @@ const make = Effect.gen(function* () {
         const interactionMode = yield* resolveInteractionMode(
           parent.thread.interactionMode,
           input.interactionMode,
+          { child: target.provider, parent: parentProvider(parent, providers) },
         );
         let workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy | undefined;
         if (input.isolation === "worktree" && !isRetryOfAcceptedDelegation) {
@@ -2187,6 +2239,10 @@ const make = Effect.gen(function* () {
       }),
     returnTaskResult: (callerScope, input) =>
       Effect.gen(function* () {
+        // Taken before any read: the caller scope names no run, so the run
+        // live as the call arrived is its sender, whatever runs by the time
+        // the reads below finish.
+        const receivedAt = yield* Clock.currentTimeMillis;
         const { parent: caller } = yield* loadThreadCaller(callerScope, "t3_task_return");
         const parentThreadId = caller.thread.lineage.parentThreadId;
         const forkedFrom = caller.thread.forkedFrom;
@@ -2201,12 +2257,50 @@ const make = Effect.gen(function* () {
         ) {
           return yield* notATask;
         }
+        // The thread's lineage names the task it was delegated for; a later
+        // follow-up is its own task, recorded on the run doing that work. A
+        // thread runs one turn at a time, so the sender is the latest run
+        // started when the call arrived; one that has ended since cannot
+        // record it, and a follow-up that replaced it must not take its late
+        // return. A run that started in the very millisecond the call arrived,
+        // while the one before was still live, may be that replacement: the
+        // earlier one is assumed, which refuses the call.
+        const [latest, previous] = caller.runs
+          .flatMap((run) =>
+            run.startedAt === null
+              ? []
+              : [{ run, startedAt: DateTime.toEpochMillis(run.startedAt) }],
+          )
+          .filter(({ startedAt }) => startedAt <= receivedAt)
+          .toSorted((left, right) => right.run.ordinal - left.run.ordinal);
+        const callerRun =
+          latest?.startedAt === receivedAt &&
+          previous !== undefined &&
+          (previous.run.completedAt === null ||
+            DateTime.toEpochMillis(previous.run.completedAt) >= receivedAt)
+            ? previous.run
+            : latest?.run;
+        if (
+          callerRun === undefined ||
+          (callerRun.status !== "running" && callerRun.status !== "waiting")
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "The run that called t3_task_return has ended, so its result was not recorded.",
+          );
+        }
+        const taskId = callerRun.delegatedTaskId ?? forkedFrom.nodeId;
         const parent = yield* loadProjection(parentThreadId);
         const task = parent.subagents.find(
-          (candidate) =>
-            candidate.id === forkedFrom.nodeId && candidate.childThreadId === caller.thread.id,
+          (candidate) => candidate.id === taskId && candidate.childThreadId === caller.thread.id,
         );
         if (task?.resultSchema === undefined) return yield* notATask;
+        if (new TextEncoder().encode(toJsonText(input.value)).byteLength > TASK_RETURN_MAX_BYTES) {
+          return yield* failure(
+            "invalid_request",
+            `The value is larger than ${TASK_RETURN_MAX_BYTES / 1024 / 1024} MiB of JSON. Return a smaller result and call t3_task_return again.`,
+          );
+        }
         const validated = validateStructuredResult(task.resultSchema, input.value);
         if (Result.isFailure(validated)) {
           return yield* failure(
@@ -2223,6 +2317,7 @@ const make = Effect.gen(function* () {
             ),
             parentThreadId,
             taskId: task.id,
+            childRunId: callerRun.id,
             value: validated.success as Schema.Json,
           })
           .pipe(
@@ -2415,6 +2510,7 @@ const make = Effect.gen(function* () {
               const interactionMode = yield* resolveInteractionMode(
                 parent.thread.interactionMode,
                 request.interactionMode,
+                { child: target.provider, parent: parentProvider(parent, providers) },
               );
               const threadId = stableThreadId({
                 scope,

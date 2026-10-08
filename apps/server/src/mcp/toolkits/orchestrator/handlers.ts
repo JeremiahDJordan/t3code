@@ -7,6 +7,7 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import * as WorkflowMcpService from "../../WorkflowMcpService.ts";
 
 const handlers = {
   orchestrator_capabilities: McpToolAccess.reads(() =>
@@ -56,6 +57,13 @@ const handlers = {
           ),
         );
       }),
+  ),
+  t3_workflow_run: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* WorkflowMcpService.WorkflowMcpService;
+      return yield* service.runWorkflow(scope, input);
+    }),
   ),
   t3_task_return: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {

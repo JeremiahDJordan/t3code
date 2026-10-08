@@ -147,6 +147,16 @@ export function summarizeT3ToolCalls(
     case "delegate":
       label = phrase("Delegated", "delegate", quantity(countEntities(entityIds("taskId")), "task"));
       break;
+    case "workflow-run": {
+      // Only a started run has a taskId, which the compact wire output keeps;
+      // a dry run or an unbound role starts nothing.
+      const started = completed.filter((call) => id(call.output?.taskId) !== undefined).length;
+      label =
+        started > 0
+          ? `Started ${quantity(started, "workflow")}`
+          : phrase("Checked", "check", `a workflow ${times}`);
+      break;
+    }
     case "task-return":
       label = phrase("Returned", "return", `a task result ${times}`);
       break;
