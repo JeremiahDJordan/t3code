@@ -660,6 +660,57 @@ export const OrchestrationV2ExecutionNode = Schema.Struct({
 });
 export type OrchestrationV2ExecutionNode = typeof OrchestrationV2ExecutionNode.Type;
 
+/**
+ * The hidden provider instance that runs a workflow's coordinator thread. It is
+ * never listed, and only the server's workflow tool creates threads on it.
+ */
+export const WORKFLOW_PROVIDER_INSTANCE_ID = ProviderInstanceId.make("t3-workflow");
+
+/** A phase a workflow script declares in `meta.phases`. */
+export const OrchestrationV2WorkflowPhase = Schema.Struct({
+  title: TrimmedNonEmptyString,
+  detail: Schema.optional(Schema.String),
+});
+export type OrchestrationV2WorkflowPhase = typeof OrchestrationV2WorkflowPhase.Type;
+
+/**
+ * What the workflow card reads from a subagent row. A workflow's coordinator
+ * row, in the thread that started it, carries the script's name and declared
+ * phases; each agent the script starts carries its phase, role and attempt.
+ */
+export const OrchestrationV2SubagentWorkflow = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("run"),
+    name: TrimmedNonEmptyString,
+    phases: Schema.Array(OrchestrationV2WorkflowPhase),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("agent"),
+    phase: Schema.NullOr(TrimmedNonEmptyString),
+    role: Schema.NullOr(TrimmedNonEmptyString),
+    /** Identifies the `agent()` call, so the card shows only its latest attempt. */
+    call: Schema.optional(TrimmedNonEmptyString),
+    attempt: PositiveInt,
+  }),
+]);
+export type OrchestrationV2SubagentWorkflow = typeof OrchestrationV2SubagentWorkflow.Type;
+
+/**
+ * Parent-wake policy for app-owned tasks: "always" offers a continuation on
+ * every terminal (async delegations; queue_after_active sequences it behind a
+ * live parent run), "settled_only" offers only when the parent has no live run
+ * (wait-mode delegations, whose result returns through the blocking tool
+ * call), and "owner_observes" never wakes the parent's provider: a workflow
+ * engine watches the row itself. Absent on legacy records; treated as
+ * settled_only.
+ */
+export const OrchestrationV2CompletionWake = Schema.Literals([
+  "always",
+  "settled_only",
+  "owner_observes",
+]);
+export type OrchestrationV2CompletionWake = typeof OrchestrationV2CompletionWake.Type;
+
 export const OrchestrationV2Subagent = Schema.Struct({
   id: NodeId,
   threadId: ThreadId,
@@ -676,17 +727,13 @@ export const OrchestrationV2Subagent = Schema.Struct({
   title: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
-  // Parent-wake policy for app-owned tasks: "always" offers a continuation on
-  // every terminal (async delegations; queue_after_active sequences it behind
-  // a live parent run), "settled_only" offers only when the parent has no
-  // live run (wait-mode delegations, whose result returns through the
-  // blocking tool call). Absent on legacy records; treated as settled_only.
-  completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  completionWake: Schema.optional(OrchestrationV2CompletionWake),
   completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
   /** JSON Schema the task's result must match, returned with `t3_task_return`. */
   resultSchema: Schema.optional(Schema.Json),
   /** The validated value the child returned for `resultSchema`. */
   structuredResult: Schema.optional(Schema.Json),
+  workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
   status: Schema.Literals([
     "idle",
     "pending",
@@ -3016,8 +3063,13 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
-    completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    completionWake: Schema.optional(OrchestrationV2CompletionWake),
     resultSchema: Schema.optional(Schema.Json),
+    workflow: Schema.optional(OrchestrationV2SubagentWorkflow),
+    /** Runs the child in this checkout instead of the parent's. */
+    workspace: Schema.optional(
+      Schema.Struct({ worktreePath: TrimmedNonEmptyString, branch: TrimmedNonEmptyString }),
+    ),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3457,8 +3509,10 @@ export type OrchestrationV2RpcError = typeof OrchestrationV2RpcError.Type;
 export const OrchestrationV2GetWorkflowScriptInput = Schema.Struct({
   threadId: ThreadId,
   /** Absolute path from the workflow's runHandles.scriptPath. The server
-   * re-derives containment; the client value is a hint, never trusted. */
-  scriptPath: TrimmedNonEmptyString,
+   * re-derives containment; the client value is a hint, never trusted.
+   * Omitted for a T3 workflow: `threadId` is then its coordinator thread, and
+   * the result is the exact source that run used. */
+  scriptPath: Schema.optional(TrimmedNonEmptyString),
 });
 export type OrchestrationV2GetWorkflowScriptInput =
   typeof OrchestrationV2GetWorkflowScriptInput.Type;

@@ -31,6 +31,8 @@ import {
   ThreadMetadataMcpUpdateResult,
   OrchestratorMcpTaskReturnInput,
   OrchestratorMcpTaskReturnResult,
+  OrchestratorMcpWorkflowRunInput,
+  OrchestratorMcpWorkflowRunResult,
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 
@@ -38,11 +40,17 @@ import * as ThreadManagementService from "../../../orchestration-v2/ThreadManage
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as OrchestratorMcpService from "../../OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "../../ThreadMetadataMcpService.ts";
+import * as WorkflowMcpService from "../../WorkflowMcpService.ts";
 
 const dependencies = [
   McpInvocationContext.McpInvocationContext,
   ThreadManagementService.ThreadManagementService,
   OrchestratorMcpService.OrchestratorMcpService,
+];
+const workflowDependencies = [
+  McpInvocationContext.McpInvocationContext,
+  ThreadManagementService.ThreadManagementService,
+  WorkflowMcpService.WorkflowMcpService,
 ];
 const threadMetadataDependencies = [
   McpInvocationContext.McpInvocationContext,
@@ -101,6 +109,19 @@ const TaskCancelTool = Tool.make("task_cancel", {
 })
   .annotate(Tool.Title, "Cancel delegated task")
   .annotate(Tool.Destructive, true);
+
+const WorkflowRunTool = Tool.make("t3_workflow_run", {
+  description:
+    "Needs an agent running inside a T3 thread. Start a workflow: a script that drives several T3 agents through phases, each on the provider and model its role names, in the background. Pass a file you were given as file (a path in this thread's workspace, one of this thread's message attachments, or a Claude workflow run's script under ~/.claude/projects) instead of retyping it; pass source only for a script you wrote. Run it with dryRun:true first: that returns the name, phases, limits after this environment's caps, and each role's binding. A role that cannot bind here returns status unbound_roles with candidates and starts nothing; ask the user, pass roles:{name:{providerInstanceId, model}}, or pass unboundRoles:'inherit' to run it on this thread's model. Otherwise the call returns a taskId at once. Its completion wakes this thread with the workflow's result, so end your turn instead of polling; use task_status or task_cancel with the taskId.",
+  parameters: OrchestratorMcpWorkflowRunInput,
+  success: OrchestratorMcpWorkflowRunResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies: workflowDependencies,
+})
+  .annotate(Tool.Title, "Run a workflow")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 
 const TaskReturnTool = Tool.make("t3_task_return", {
   description:
@@ -275,6 +296,7 @@ export const OrchestratorToolkit = Toolkit.make(
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,
+  WorkflowRunTool,
   TaskReturnTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,

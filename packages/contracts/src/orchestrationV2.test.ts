@@ -960,6 +960,60 @@ describe("orchestration V2 contracts", () => {
       "settled_only",
     );
     expect(() => decode({ ...appOwnedSubagent, completionWake: "sometimes" })).toThrow();
+    // A workflow's agents are watched by their owner instead of waking it.
+    expect(decode({ ...appOwnedSubagent, completionWake: "owner_observes" }).completionWake).toBe(
+      "owner_observes",
+    );
+  });
+
+  it("decodes workflow facts and structured results on subagent rows", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2Subagent);
+    const row = {
+      id: "node-subagent-3",
+      threadId: "thread-1",
+      runId: "run-1",
+      parentNodeId: "node-root-1",
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: "codex",
+      providerInstanceId: "codex",
+      providerThreadId: null,
+      childThreadId: "thread-child-3",
+      nativeTaskRef: null,
+      prompt: "Review the API.",
+      title: "review: api",
+      model: "gpt-6",
+      status: "completed",
+      result: "done",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+    };
+    const agent = decode({
+      ...row,
+      resultSchema: { type: "object", properties: { findings: { type: "array" } } },
+      structuredResult: { findings: ["leak"] },
+      workflow: { kind: "agent", phase: "Review", role: "reviewer", call: "abc:1", attempt: 2 },
+    });
+    expect(agent.structuredResult).toEqual({ findings: ["leak"] });
+    expect(agent.workflow).toEqual({
+      kind: "agent",
+      phase: "Review",
+      role: "reviewer",
+      call: "abc:1",
+      attempt: 2,
+    });
+    const coordinator = decode({
+      ...row,
+      workflow: { kind: "run", name: "judged-review", phases: [{ title: "Review" }] },
+    });
+    expect(coordinator.workflow).toEqual({
+      kind: "run",
+      name: "judged-review",
+      phases: [{ title: "Review" }],
+    });
+    // Rows written before workflows existed still decode.
+    expect(decode(row).workflow).toBeUndefined();
   });
 
   it("decodes thread projections with an ordered turn item rendering stream", () => {

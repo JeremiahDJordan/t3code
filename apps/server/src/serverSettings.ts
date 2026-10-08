@@ -32,6 +32,7 @@ import {
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
+  WORKFLOW_PROVIDER_INSTANCE_ID,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -122,12 +123,28 @@ const foldProviderInstanceEnabledFlags = (settings: ServerSettings): ServerSetti
   };
 };
 
+/**
+ * Drops a provider instance with the workflow engine's reserved id, which a
+ * whole-map patch or a hand-edited file can carry past the mutation guard.
+ */
+const dropReservedProviderInstance = (settings: ServerSettings): Effect.Effect<ServerSettings> => {
+  if (!(WORKFLOW_PROVIDER_INSTANCE_ID in settings.providerInstances)) {
+    return Effect.succeed(settings);
+  }
+  const { [WORKFLOW_PROVIDER_INSTANCE_ID]: _reserved, ...providerInstances } =
+    settings.providerInstances;
+  return Effect.logWarning(
+    `Dropped provider instance ${WORKFLOW_PROVIDER_INSTANCE_ID}: the id is reserved for the workflow engine.`,
+  ).pipe(Effect.as({ ...settings, providerInstances }));
+};
+
 const normalizeServerSettings = (
   settings: ServerSettings,
 ): Effect.Effect<ServerSettings, ServerSettingsError> =>
   encodeServerSettings(settings).pipe(
     Effect.flatMap(decodeServerSettings),
     Effect.map(foldProviderInstanceEnabledFlags),
+    Effect.flatMap(dropReservedProviderInstance),
     Effect.map((next) => ({ ...next, ...deriveLegacyProjectOverrides(next) })),
     Effect.mapError(
       (cause) =>
@@ -238,6 +255,19 @@ function ensureProviderInstanceMutationAllowed(
   mutation: ProviderInstanceMutation,
   settingsPath: string,
 ): Effect.Effect<void, ServerSettingsError> {
+  // The workflow engine's hidden instance; a configured one with its id would
+  // let agents delegate to the engine directly.
+  if (mutation.operation !== "remove" && mutation.instanceId === WORKFLOW_PROVIDER_INSTANCE_ID) {
+    return Effect.fail(
+      new ServerSettingsError({
+        settingsPath,
+        operation:
+          mutation.operation === "create" ? "create-provider-instance" : "update-provider-instance",
+        providerInstanceId: mutation.instanceId,
+        detail: "the id is reserved for the workflow engine",
+      }),
+    );
+  }
   if (
     mutation.operation === "create" &&
     settings.providerInstances[mutation.instanceId] !== undefined
@@ -847,10 +877,12 @@ const make = Effect.gen(function* () {
             ),
           );
 
-    const loaded = foldProviderInstanceEnabledFlags(
-      legacyProviders === undefined
-        ? settings
-        : migrateLegacyProviderSettings(settings, legacyProviders, providerHistory),
+    const loaded = yield* dropReservedProviderInstance(
+      foldProviderInstanceEnabledFlags(
+        legacyProviders === undefined
+          ? settings
+          : migrateLegacyProviderSettings(settings, legacyProviders, providerHistory),
+      ),
     );
     const folded = settingsFileTrusted
       ? foldLegacyProjectSettings(loaded, legacyProjectRows)

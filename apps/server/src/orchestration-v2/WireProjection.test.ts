@@ -9,6 +9,7 @@ import {
   ProviderInstanceId,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
@@ -50,6 +51,55 @@ const base = {
 };
 
 describe("orchestration V2 wire projection", () => {
+  it("keeps result schemas, structured results and owner-observed wakes off the wire", () => {
+    const subagent: OrchestrationV2Subagent = {
+      id: NodeId.make("node-agent-1"),
+      threadId: ThreadId.make("thread-coordinator"),
+      runId: null,
+      parentNodeId: NodeId.make("node-root-1"),
+      origin: "app_owned",
+      createdBy: "agent",
+      driver: ProviderDriverKind.make("codex"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      providerThreadId: null,
+      childThreadId: ThreadId.make("thread-agent-1"),
+      nativeTaskRef: null,
+      prompt: "Review the API.",
+      title: "review: api",
+      model: "gpt-6",
+      completionWake: "owner_observes",
+      resultSchema: { type: "object" },
+      structuredResult: { findings: [] },
+      workflow: { kind: "agent", phase: "Review", role: "reviewer", attempt: 1 },
+      status: "completed",
+      result: "done",
+      startedAt: null,
+      completedAt: null,
+      updatedAt: DateTime.makeUnsafe("2026-10-07T00:00:00.000Z"),
+    };
+    const event = (payload: OrchestrationV2Subagent) =>
+      ({
+        id: EventId.make("event-agent-1"),
+        type: "subagent.updated",
+        threadId: payload.threadId,
+        occurredAt: payload.updatedAt,
+        payload,
+      }) as const;
+    const projected = projectDomainEventForWire(event(subagent));
+    if (projected.type !== "subagent.updated") throw new Error("expected a subagent event");
+    // Clients built before `owner_observes` existed could not decode it.
+    expect(projected.payload).not.toHaveProperty("completionWake");
+    expect(projected.payload).not.toHaveProperty("resultSchema");
+    expect(projected.payload).not.toHaveProperty("structuredResult");
+    expect(projected.payload.workflow).toEqual(subagent.workflow);
+    const delegated = projectDomainEventForWire(
+      event({ ...subagent, completionWake: "always", resultSchema: undefined }),
+    );
+    expect(delegated.type === "subagent.updated" && delegated.payload.completionWake).toBe(
+      "always",
+    );
+  });
+
   it("keeps copied handoff transcripts out of activity items and live events", () => {
     const item = {
       ...base,

@@ -9,6 +9,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  WORKFLOW_PROVIDER_INSTANCE_ID,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, it } from "@effect/vitest";
@@ -433,6 +434,55 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           (yield* serverSettings.getSettings).providerInstances[instanceId]?.displayName ?? "",
         ),
       );
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("refuses a provider instance with the workflow engine's reserved id", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      for (const operation of ["create", "upsert"] as const) {
+        const refused = yield* serverSettings
+          .updateProviderInstance({
+            operation,
+            instanceId: WORKFLOW_PROVIDER_INSTANCE_ID,
+            instance: { driver: ProviderDriverKind.make("codex"), displayName: "Not the engine" },
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused.providerInstanceId, WORKFLOW_PROVIDER_INSTANCE_ID);
+        assert.include(
+          refused.message,
+          operation === "create" ? "create-provider-instance" : "update-provider-instance",
+        );
+        assert.include(refused.message, "reserved for the workflow engine");
+      }
+      // A whole-map patch gets past the mutation guard; normalization drops it.
+      yield* serverSettings.updateSettings({
+        providerInstances: {
+          [WORKFLOW_PROVIDER_INSTANCE_ID]: {
+            driver: ProviderDriverKind.make("codex"),
+            displayName: "Not the engine",
+          },
+        },
+      });
+      assert.isUndefined(
+        (yield* serverSettings.getSettings).providerInstances[WORKFLOW_PROVIDER_INSTANCE_ID],
+      );
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("drops the workflow engine's reserved id from a hand-edited settings file", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        `{"providerInstances":{"${WORKFLOW_PROVIDER_INSTANCE_ID}":{"driver":"codex"},"codex_x":{"driver":"codex"}}}`,
+      );
+
+      const { providerInstances } = yield* serverSettings.getSettings;
+      assert.isUndefined(providerInstances[WORKFLOW_PROVIDER_INSTANCE_ID]);
+      assert.isDefined(providerInstances[ProviderInstanceId.make("codex_x")]);
     }).pipe(Effect.provide(layerServerSettings())),
   );
 

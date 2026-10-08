@@ -210,18 +210,26 @@ export function projectContextHandoffForWire(
 
 /**
  * A subagent row as clients receive it. Result schemas and structured results
- * are for the agents that read them, not for drawing a row.
+ * are for the agents that read them, not for drawing a row, and clients built
+ * before `owner_observes` could not decode it, so the policy stays server-side.
  */
 function projectSubagentForWire(subagent: OrchestrationV2Subagent): OrchestrationV2Subagent {
-  if (subagent.resultSchema === undefined && subagent.structuredResult === undefined) {
+  if (
+    subagent.resultSchema === undefined &&
+    subagent.structuredResult === undefined &&
+    subagent.completionWake !== "owner_observes"
+  ) {
     return subagent;
   }
   const {
     resultSchema: _resultSchema,
     structuredResult: _structuredResult,
+    completionWake,
     ...projected
   } = subagent;
-  return projected;
+  return completionWake === undefined || completionWake === "owner_observes"
+    ? projected
+    : { ...projected, completionWake };
 }
 
 export function projectThreadProjectionForWire(

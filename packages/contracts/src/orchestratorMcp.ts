@@ -246,6 +246,121 @@ export const OrchestratorMcpTaskReturnResult = Schema.Struct({
 });
 export type OrchestratorMcpTaskReturnResult = typeof OrchestratorMcpTaskReturnResult.Type;
 
+export const OrchestratorMcpWorkflowRoleBinding = Schema.Struct({
+  providerInstanceId: ProviderInstanceId.annotate({
+    description: "Configured provider instance id from orchestrator_capabilities.",
+  }),
+  model: Schema.optional(TrimmedNonEmptyString),
+  options: Schema.optional(OrchestratorMcpTargetOptions),
+});
+export type OrchestratorMcpWorkflowRoleBinding = typeof OrchestratorMcpWorkflowRoleBinding.Type;
+
+export const OrchestratorMcpWorkflowRunInput = Schema.Struct({
+  source: Schema.optional(
+    Schema.String.annotate({
+      description: "The workflow script's text. Pass file instead for a script you were given.",
+    }),
+  ),
+  file: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(4_096)).annotate({
+      description:
+        "A workflow file in this thread's workspace (relative or absolute), one of this thread's message attachments (its path or name), or a Claude workflow run's script (its absolute path under ~/.claude/projects). The server reads it.",
+    }),
+  ),
+  args: Schema.optional(
+    Schema.Unknown.annotate({
+      description: "The script's args, validated against meta.args. Pass a JSON value, not text.",
+    }),
+  ),
+  roles: Schema.optional(
+    Schema.Record(Schema.String, OrchestratorMcpWorkflowRoleBinding).annotate({
+      description: "Binds named roles to a local provider instance and model.",
+    }),
+  ),
+  unboundRoles: Schema.optional(
+    Schema.Literals(["fail", "inherit"]).annotate({
+      description:
+        "fail (default) returns unbound roles with candidates and starts nothing; inherit runs them on this thread's provider and model.",
+    }),
+  ),
+  dryRun: Schema.optional(
+    Schema.Boolean.annotate({
+      description: "Report the name, phases, limits and role bindings without starting anything.",
+    }),
+  ),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpWorkflowRunInput = typeof OrchestratorMcpWorkflowRunInput.Type;
+
+export const OrchestratorMcpWorkflowModelRef = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  driverKind: ProviderDriverKind,
+  model: Schema.String,
+});
+export type OrchestratorMcpWorkflowModelRef = typeof OrchestratorMcpWorkflowModelRef.Type;
+
+export const OrchestratorMcpWorkflowRole = Schema.Struct({
+  role: Schema.String,
+  /** What the script asked for, such as "codex gpt-6.1-sol" or "inherit". */
+  requested: Schema.String,
+  bound: Schema.NullOr(
+    Schema.Struct({
+      ...OrchestratorMcpWorkflowModelRef.fields,
+      runtimeMode: RuntimeMode,
+      interactionMode: ProviderInteractionMode,
+      /** Writers take turns in a shared checkout; plan-mode agents do not. */
+      writer: Schema.Boolean,
+    }),
+  ),
+  /** Why the role is unbound, when it is. */
+  reason: Schema.NullOr(Schema.String),
+  /** Models the role could bind to, when it is unbound. */
+  candidates: Schema.Array(OrchestratorMcpWorkflowModelRef),
+});
+export type OrchestratorMcpWorkflowRole = typeof OrchestratorMcpWorkflowRole.Type;
+
+export const OrchestratorMcpWorkflowLimits = Schema.Struct({
+  concurrency: PositiveInt,
+  agents: PositiveInt,
+  /** Requests above this environment's caps, and what they were clamped to. */
+  notes: Schema.Array(Schema.String),
+});
+export type OrchestratorMcpWorkflowLimits = typeof OrchestratorMcpWorkflowLimits.Type;
+
+const OrchestratorMcpWorkflowPhase = Schema.Struct({
+  title: Schema.String,
+  detail: Schema.optional(Schema.String),
+});
+
+export const OrchestratorMcpWorkflowRunResult = Schema.Union([
+  Schema.Struct({
+    status: Schema.Literal("started"),
+    taskId: NodeId,
+    childThreadId: ThreadId,
+    name: Schema.String,
+    sourceHash: Schema.String,
+    roles: Schema.Array(OrchestratorMcpWorkflowRole),
+    limits: OrchestratorMcpWorkflowLimits,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("dry_run"),
+    name: Schema.String,
+    description: Schema.String,
+    dialect: Schema.Literals(["t3", "claude"]),
+    phases: Schema.Array(OrchestratorMcpWorkflowPhase),
+    sourceHash: Schema.String,
+    roles: Schema.Array(OrchestratorMcpWorkflowRole),
+    limits: OrchestratorMcpWorkflowLimits,
+  }),
+  Schema.Struct({
+    status: Schema.Literal("unbound_roles"),
+    name: Schema.String,
+    message: Schema.String,
+    roles: Schema.Array(OrchestratorMcpWorkflowRole),
+  }),
+]);
+export type OrchestratorMcpWorkflowRunResult = typeof OrchestratorMcpWorkflowRunResult.Type;
+
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
 });

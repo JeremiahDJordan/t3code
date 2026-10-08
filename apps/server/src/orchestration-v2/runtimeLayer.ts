@@ -31,6 +31,9 @@ import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/continuationRequests";
+import * as WorkflowAdapterV2 from "./Adapters/WorkflowAdapterV2.ts";
+import * as WorkflowEngine from "../workflow/WorkflowEngine.ts";
+import * as WorkflowWorkspaces from "../workflow/WorkflowWorkspaces.ts";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -118,8 +121,10 @@ const layerContextHandoffServiceProvided = ContextHandoffService.layer.pipe(
   Layer.provide(IdAllocator.layer),
 );
 
-const layerProviderAdapterRegistryProvided =
-  ProviderAdapterRegistry.layerFromProviderInstanceRegistry;
+// The hidden workflow provider shares one engine host with the engine below.
+const layerProviderAdapterRegistryProvided = WorkflowAdapterV2.layerRegistryWithWorkflowAdapter(
+  ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
+).pipe(Layer.provide(WorkflowAdapterV2.layerEngineHost));
 const layerProviderSwitchServiceProvided = ProviderSwitchService.layer.pipe(
   Layer.provide(layerProviderAdapterRegistryProvided),
 );
@@ -318,6 +323,19 @@ const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.laye
   ),
 );
 
+const layerWorkflowEngineProvided = WorkflowEngine.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      WorkflowAdapterV2.layerEngineHost,
+      layerThreadManagementProvided,
+      IdAllocator.layer,
+      WorkflowWorkspaces.layer.pipe(
+        Layer.provide(Layer.merge(layerProjectService, layerProjectSetupScriptRunner)),
+      ),
+    ),
+  ),
+);
+
 const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -353,6 +371,7 @@ export const layerProduction = Layer.mergeAll(
     Layer.provide(Layer.mergeAll(ProjectionStore.layer, layerThreadManagementProvided)),
   ),
   layerProviderContinuationWorkerProvided,
+  layerWorkflowEngineProvided,
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(Layer.provide(Scheduler.layer), Layer.provideMerge(layerEventInfrastructure));

@@ -796,10 +796,13 @@ const seedRestartCancelledChild = (input: {
   readonly parentRunId: RunId;
   readonly rootNodeId: NodeId;
   readonly name: string;
-  readonly completionWake: "always" | "settled_only";
+  readonly completionWake: "always" | "settled_only" | "owner_observes";
   readonly continuationPending: boolean;
-  /** "completed" seeds a settled turn whose background work the restart cancelled. */
-  readonly runStatus?: "cancelled" | "completed";
+  /**
+   * "completed" seeds a settled turn whose background work the restart
+   * cancelled; "running" seeds a child the restart has not cut yet.
+   */
+  readonly runStatus?: "cancelled" | "completed" | "running";
   readonly now: DateTime.Utc;
 }) =>
   Effect.gen(function* () {
@@ -1460,6 +1463,180 @@ it.layer(layerTest)("delegated tasks across a server restart", (it) => {
       assert.deepEqual(
         projection.runs.find((row) => row.id === runId)?.delegatedCompletion?.delivery?.taskIds,
         [child.taskId],
+      );
+    }),
+  );
+
+  it.effect("settles a workflow coordinator once recovery settles its last agent", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:workflow-restart-parent");
+      const projectId = ProjectId.make("project:workflow-restart-parent");
+      const runId = RunId.make("run:workflow-restart-parent");
+      const rootNodeId = NodeId.make("node:workflow-restart-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:workflow-restart-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const coordinator = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "workflow-restart-1-coordinator",
+        completionWake: "always",
+        continuationPending: false,
+        now,
+      });
+      const agent = yield* seedRestartCancelledChild({
+        parentThreadId: coordinator.childThreadId,
+        projectId,
+        parentRunId: coordinator.childRunId,
+        rootNodeId: NodeId.make("node:workflow-restart-1-coordinator-root"),
+        name: "workflow-restart-2-agent",
+        completionWake: "owner_observes",
+        continuationPending: false,
+        now,
+      });
+      const coordinatorRow = () =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) =>
+              projection.subagents.find((row) => row.id === coordinator.taskId),
+            ),
+          );
+
+      // Recovery visits threads in id order, so it meets the coordinator while
+      // its agent still looks live; only settling the agent can settle it.
+      yield* orchestrator.recoverDelegatedTasks;
+
+      const agentRow = (yield* orchestrator.getThreadProjection(
+        coordinator.childThreadId,
+      )).subagents.find((row) => row.id === agent.taskId);
+      assert.equal(agentRow?.status, "cancelled");
+      // Settling the last observed agent settles the coordinator's own row.
+      assert.equal((yield* coordinatorRow())?.status, "cancelled");
+    }),
+  );
+
+  it.effect("settles a workflow coordinator once its last agent's continuation declines", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:workflow-declined-parent");
+      const projectId = ProjectId.make("project:workflow-declined-parent");
+      const runId = RunId.make("run:workflow-declined-parent");
+      const rootNodeId = NodeId.make("node:workflow-declined-parent-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:workflow-declined-parent-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const coordinator = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "workflow-declined-1-coordinator",
+        completionWake: "always",
+        continuationPending: false,
+        now,
+      });
+      const agent = yield* seedRestartCancelledChild({
+        parentThreadId: coordinator.childThreadId,
+        projectId,
+        parentRunId: coordinator.childRunId,
+        rootNodeId: NodeId.make("node:workflow-declined-1-coordinator-root"),
+        name: "workflow-declined-2-agent",
+        completionWake: "owner_observes",
+        continuationPending: true,
+        now,
+      });
+      const declineContinuation = (child: {
+        readonly childThreadId: ThreadId;
+        readonly childRunId: RunId;
+      }) =>
+        continueRestartedRun({ threadId: child.childThreadId, sourceRunId: child.childRunId }).pipe(
+          Effect.provide(ServerSettings.layerTest({ continueThreadsAfterServerUpdate: false })),
+        );
+      const coordinatorRow = () =>
+        orchestrator
+          .getThreadProjection(threadId)
+          .pipe(
+            Effect.map((projection) =>
+              projection.subagents.find((row) => row.id === coordinator.taskId),
+            ),
+          );
+
+      // The agent's pending continuation holds it, and the coordinator waits on it.
+      yield* orchestrator.recoverDelegatedTasks;
+      // The coordinator's own continuation declines first, while its agent is live.
+      yield* declineContinuation(coordinator);
+      assert.equal((yield* coordinatorRow())?.status, "running");
+
+      yield* declineContinuation(agent);
+
+      const agentRow = (yield* orchestrator.getThreadProjection(
+        coordinator.childThreadId,
+      )).subagents.find((row) => row.id === agent.taskId);
+      assert.equal(agentRow?.status, "cancelled");
+      assert.equal((yield* coordinatorRow())?.status, "cancelled");
+    }),
+  );
+
+  it.effect("keeps an observed task's wake policy", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:observed-wake-policy");
+      const projectId = ProjectId.make("project:observed-wake-policy");
+      const runId = RunId.make("run:observed-wake-policy");
+      const rootNodeId = NodeId.make("node:observed-wake-policy-root");
+      yield* seedParentWithTerminalTask({
+        threadId,
+        projectId,
+        runId,
+        rootNodeId,
+        taskId: NodeId.make("node:observed-wake-policy-settled"),
+        deliveryState: "delivered",
+        now,
+      });
+      const observed = yield* seedRestartCancelledChild({
+        parentThreadId: threadId,
+        projectId,
+        parentRunId: runId,
+        rootNodeId,
+        name: "observed-wake-policy-child",
+        completionWake: "owner_observes",
+        continuationPending: false,
+        runStatus: "running",
+        now,
+      });
+      const refused = yield* orchestrator
+        .dispatch({
+          type: "delegated_task.wake-policy",
+          commandId: CommandId.make("command:observed-wake-policy:upgrade"),
+          parentThreadId: threadId,
+          taskId: observed.taskId,
+          completionWake: "always",
+        })
+        .pipe(Effect.flip);
+      assert.include(String("cause" in refused ? refused.cause : refused), "cannot change");
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(
+        projection.subagents.find((row) => row.id === observed.taskId)?.completionWake,
+        "owner_observes",
       );
     }),
   );

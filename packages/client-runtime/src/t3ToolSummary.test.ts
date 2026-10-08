@@ -44,6 +44,21 @@ describe("summarizeT3ToolCalls", () => {
     ).toEqual({ label, failedCount: 0 });
   });
 
+  it("tells a started workflow from one that was only checked", () => {
+    // Clients receive the compact output, which keeps the started run's taskId.
+    expect(
+      summarizeT3ToolCalls("workflow-run", [
+        completed({ file: "review.workflow.js", dryRun: true }, { status: "dry_run" }),
+        completed({ file: "review.workflow.js" }, { taskId: "node:workflow-run" }),
+      ]).label,
+    ).toBe("Started 1 workflow");
+    expect(
+      summarizeT3ToolCalls("workflow-run", [
+        completed({ file: "review.workflow.js", dryRun: true }, { status: "dry_run" }),
+      ]).label,
+    ).toBe("Checked a workflow 1 time");
+  });
+
   it("counts answered requests rather than pretending every request contains one question", () => {
     expect(
       summarizeT3ToolCalls("question-respond", [

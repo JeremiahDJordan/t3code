@@ -1196,6 +1196,76 @@ describe("OrchestratorMcpService provider resolution", () => {
     }),
   );
 
+  it.effect("refuses a plan-mode parent a child on a provider without plan mode", () =>
+    Effect.gen(function* () {
+      const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+      const planParent = parentProjection([]);
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () =>
+            Effect.succeed({
+              ...planParent,
+              thread: { ...planParent.thread, interactionMode: "plan" },
+            }),
+          dispatch: (command) =>
+            Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+              Effect.andThen(Effect.die("a refused delegation must not dispatch")),
+            ),
+        }),
+        providerRegistryLayer([
+          {
+            ...providerSnapshot({
+              instanceId: codexInstanceId,
+              driver: ProviderDriverKind.make("codex"),
+              model: "gpt-5.4",
+            }),
+            showInteractionModeToggle: true,
+          },
+          {
+            ...providerSnapshot({
+              instanceId: antigravityInstanceId,
+              driver: ProviderDriverKind.make("antigravity"),
+              model: "ant-model",
+            }),
+            showInteractionModeToggle: false,
+          },
+        ]),
+        adapterRegistryLayer([codexInstanceId, antigravityInstanceId]),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const refused = yield* service
+          .delegateTask(scope, {
+            task: "Summarize the diff.",
+            target: { providerInstanceId: antigravityInstanceId },
+            mode: "async",
+            clientRequestId: "delegate-plan-writer-1",
+          })
+          .pipe(Effect.flip);
+        assert.equal(refused.code, "interaction_mode_escalation_denied");
+        assert.include(refused.message, "antigravity has no plan mode");
+        const created = yield* service
+          .createThreads(scope, {
+            threads: [
+              {
+                prompt: "Summarize the diff.",
+                target: { driverKind: ProviderDriverKind.make("antigravity") },
+              },
+            ],
+            clientRequestId: "create-plan-writer-1",
+          })
+          .pipe(Effect.flip);
+        assert.equal(created.code, "interaction_mode_escalation_denied");
+        assert.deepEqual(yield* Ref.get(dispatched), []);
+      }).pipe(Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
   it.effect("rejects delegation to a provider without a registered adapter", () =>
     Effect.gen(function* () {
       const forkOnlyInstanceId = ProviderInstanceId.make("forkOnly");

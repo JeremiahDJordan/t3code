@@ -1113,6 +1113,17 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+const DEFAULT_WORKFLOW_MAX_CONCURRENCY = 8;
+const DEFAULT_WORKFLOW_MAX_AGENTS = 100;
+export const WorkflowConcurrencyCap = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(1),
+  Schema.isLessThanOrEqualTo(64),
+);
+export const WorkflowAgentsCap = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(1),
+  Schema.isLessThanOrEqualTo(1_000),
+);
+
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   storageCleanup: StorageCleanupSettings.pipe(
@@ -1206,6 +1217,17 @@ export const ServerSettings = Schema.Struct({
   ),
   snoozeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   autoResumeLimitedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * The most agents one workflow run may have working at once, and in total.
+   * A workflow file asking for more is clamped, so this machine sets the
+   * spend, not the file's author.
+   */
+  workflowMaxConcurrency: WorkflowConcurrencyCap.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKFLOW_MAX_CONCURRENCY)),
+  ),
+  workflowMaxAgents: WorkflowAgentsCap.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_WORKFLOW_MAX_AGENTS)),
+  ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
   // Legacy flat fields retained for old settings files and old clients. New
@@ -1399,6 +1421,7 @@ export const ServerSettingsOperation = Schema.Literals([
   "normalize",
   "check-exists",
   "create-provider-instance",
+  "update-provider-instance",
   "read-file",
   "read-provider-history",
   "read-project-settings",
@@ -1418,6 +1441,8 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
     operation: ServerSettingsOperation,
     providerInstanceId: Schema.optional(Schema.String),
     environmentVariable: Schema.optional(Schema.String),
+    /** Why a validation failure refused the change, for the message. */
+    detail: Schema.optional(Schema.String),
     // Validation failures (e.g. a create colliding with an existing
     // instance) originate without an upstream defect.
     cause: Schema.optional(Schema.Defect()),
@@ -1430,7 +1455,8 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
       this.environmentVariable === undefined
         ? ""
         : ` and environment variable ${this.environmentVariable}`;
-    return `Server settings ${this.operation} failed${provider}${variable} at ${this.settingsPath}.`;
+    const detail = this.detail === undefined ? "" : `: ${this.detail}`;
+    return `Server settings ${this.operation} failed${provider}${variable} at ${this.settingsPath}${detail}.`;
   }
 }
 
@@ -1514,6 +1540,8 @@ export const ServerSettingsPatch = Schema.Struct({
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
+  workflowMaxConcurrency: Schema.optionalKey(WorkflowConcurrencyCap),
+  workflowMaxAgents: Schema.optionalKey(WorkflowAgentsCap),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({
       schemaVersion: Schema.optionalKey(Schema.Literal(1)),
