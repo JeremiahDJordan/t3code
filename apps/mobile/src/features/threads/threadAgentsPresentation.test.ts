@@ -1,6 +1,17 @@
+import {
+  NodeId,
+  type OrchestrationV2Subagent,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveSubagentRowPresentation } from "./threadAgentsPresentation";
+import {
+  groupWorkflowAgentsByPhase,
+  resolveSubagentRowPresentation,
+} from "./threadAgentsPresentation";
 
 const base = {
   title: null,
@@ -74,5 +85,70 @@ describe("resolveSubagentRowPresentation", () => {
     });
     expect(row.detail).toBe(`${"x".repeat(280)}…`);
     expect(row.statusLabel).toBe("Failed");
+  });
+});
+
+function workflowAgent(id: string, phase: string | null, started: number): OrchestrationV2Subagent {
+  const startedAt = DateTime.makeUnsafe(`2026-10-07T10:00:${String(started).padStart(2, "0")}Z`);
+  return {
+    id: NodeId.make(id),
+    threadId: ThreadId.make("thread:coordinator"),
+    runId: null,
+    parentNodeId: NodeId.make("node:root"),
+    origin: "app_owned",
+    createdBy: "agent",
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerThreadId: null,
+    childThreadId: ThreadId.make(`thread:${id}`),
+    nativeTaskRef: null,
+    prompt: `do ${id}`,
+    title: id,
+    model: null,
+    status: "running",
+    result: null,
+    workflow: { kind: "agent", phase, role: null, attempt: 1 },
+    startedAt,
+    completedAt: null,
+    updatedAt: startedAt,
+  };
+}
+
+describe("groupWorkflowAgentsByPhase", () => {
+  const agents = [
+    workflowAgent("judge", "Judge", 1),
+    workflowAgent("review", "Review", 2),
+    workflowAgent("loose", null, 3),
+  ];
+
+  it("follows the declared phases and leaves out ones with no agents", () => {
+    const groups = groupWorkflowAgentsByPhase(agents, {
+      workflow: {
+        kind: "run",
+        name: "judged-review",
+        phases: [{ title: "Review" }, { title: "Challenge" }, { title: "Judge" }],
+      },
+      status: "running",
+      startedAt: null,
+      completedAt: null,
+    });
+
+    expect(groups?.map((group) => [group.title, group.subagents.map((s) => s.id)])).toEqual([
+      ["Review", ["review"]],
+      ["Judge", ["judge"]],
+      ["Agents", ["loose"]],
+    ]);
+  });
+
+  it("orders phases by first agent without the coordinator's row", () => {
+    const groups = groupWorkflowAgentsByPhase(agents, null);
+
+    expect(groups?.map((group) => group.title)).toEqual(["Judge", "Review", "Agents"]);
+  });
+
+  it("does not group agents that are not a workflow's", () => {
+    const plain = { ...workflowAgent("plain", null, 1), workflow: undefined };
+
+    expect(groupWorkflowAgentsByPhase([plain], null)).toBeNull();
   });
 });

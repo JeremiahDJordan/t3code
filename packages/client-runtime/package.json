@@ -267,6 +267,10 @@
       "types": "./src/state/subagentRuntime.ts",
       "default": "./src/state/subagentRuntime.ts"
     },
+    "./state/workflowCard": {
+      "types": "./src/state/workflowCard.ts",
+      "default": "./src/state/workflowCard.ts"
+    },
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"

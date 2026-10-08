@@ -426,6 +426,18 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "environment-defaults",
   },
   {
+    id: "workflow-max-concurrency",
+    title: "Workflow agents at once",
+    to: "/settings/general",
+    searchTerms: ["workflow script concurrency parallel agents limit cap spend"],
+  },
+  {
+    id: "workflow-max-agents",
+    title: "Workflow agents per run",
+    to: "/settings/general",
+    searchTerms: ["workflow script total agents limit cap spend cost"],
+  },
+  {
     id: "continue-threads-after-server-update",
     title: "Continue threads after restarts",
     to: "/settings/general",

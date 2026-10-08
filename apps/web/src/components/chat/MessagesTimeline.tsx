@@ -4,6 +4,8 @@ import { MarkdownFindContext, useFindRevealRef } from "./markdownFindContext";
 import { ComputerUseAppIcon } from "~/components/Icons";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
+import { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/client-runtime/state/workflowCard";
+import { WorkflowRunRow } from "./WorkflowCard";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
@@ -485,6 +487,8 @@ interface MessagesTimelineProps {
     readonly threadId: ThreadId;
     readonly title: string;
   } | null;
+  /** Drawn above the first message, such as a workflow's card in its coordinator thread. */
+  headerContent?: ReactNode;
   onForkFromRun: (input: {
     readonly sourceThreadId: ThreadId;
     readonly runId: RunId;
@@ -596,6 +600,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   onOpenTurnDiff,
   onOpenThread,
   parentThreadLink = null,
+  headerContent = null,
   onForkFromRun,
   onRollbackCheckpoint,
   supportsConversationRollback,
@@ -1432,9 +1437,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
         {parentThreadLink === null ? leadingContent : null}
         {historyControls ? <TimelineHistoryControl {...historyControls} /> : null}
         {parentThreadLink !== null ? leadingContent : null}
+        {headerContent === null ? null : (
+          <div className="messages-timeline-row-frame">
+            <div className="chat-content-lane">{headerContent}</div>
+          </div>
+        )}
       </>
     );
-  }, [historyControls, onOpenThread, parentThreadLink, topFadeEnabled]);
+  }, [headerContent, historyControls, onOpenThread, parentThreadLink, topFadeEnabled]);
 
   const canvas = useChatCanvas();
   const registerTimeline = canvas?.registerTimeline;
@@ -3092,7 +3102,7 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
     );
   }
   if (isV2LifecycleItem(item)) {
-    return (
+    const lifecycleRow = (
       <V2LifecycleRow
         environmentId={ctx.activeThreadEnvironmentId}
         item={item}
@@ -3104,6 +3114,20 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         onOpenThread={ctx.onOpenThread}
       />
     );
+    // A workflow run is a delegated task driven by the hidden workflow provider.
+    if (item.type === "subagent" && item.providerInstanceId === WORKFLOW_PROVIDER_INSTANCE_ID) {
+      return (
+        <WorkflowRunRow
+          environmentId={ctx.activeThreadEnvironmentId}
+          parentThreadId={item.threadId}
+          subagentId={item.subagentId}
+          providerStatuses={ctx.providerStatuses}
+          onOpenThread={ctx.onOpenThread}
+          fallback={lifecycleRow}
+        />
+      );
+    }
+    return lifecycleRow;
   }
   const presentation = v2EventPresentation(item);
   const Icon = presentation.icon;

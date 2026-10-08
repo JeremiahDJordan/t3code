@@ -440,6 +440,8 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
+import { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/client-runtime/state/workflowCard";
+import { WorkflowCoordinatorHeader, WorkflowThreadBar } from "./chat/WorkflowCard";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
@@ -4260,7 +4262,12 @@ export default function ChatView(props: ChatViewProps) {
   // composer and its strips. Its approvals and questions are asked on the
   // top-level parent thread.
   const showProviderSubagentBar = isProviderSubagent;
-  const composerMounted = !showProviderSubagentBar;
+  // A workflow's coordinator thread runs its script: a bar replaces the
+  // composer, so nothing can send it a message or switch its provider.
+  const showWorkflowThreadBar =
+    activeThread?.modelSelection.instanceId === WORKFLOW_PROVIDER_INSTANCE_ID;
+  const composerReplaced = showProviderSubagentBar || showWorkflowThreadBar;
+  const composerMounted = !composerReplaced;
   const providerSubagentModels = selectedProviderEntry?.models ?? EMPTY_PROVIDER_MODELS;
   // Providers can report a dated id or alias (claude-haiku-4-5-20251001).
   const providerSubagentModelSlug = selectedProviderEntry
@@ -4287,7 +4294,7 @@ export default function ChatView(props: ChatViewProps) {
   const mountComposerContextStrip = shouldShowComposerContextStrip({
     isDraftHeroState,
     persistInActiveThreads: settings.persistComposerContextStrip,
-    hasActiveProject: activeProject !== null && !showProviderSubagentBar,
+    hasActiveProject: activeProject !== null && !composerReplaced,
     isGitRepo,
     showEnvironmentIndicator: showComposerEnvironmentIndicator,
     hostsRestingComposerControls: routeKind === "server",
@@ -4295,13 +4302,13 @@ export default function ChatView(props: ChatViewProps) {
   const showComposerContextStrip = shouldShowComposerContextStrip({
     isDraftHeroState,
     persistInActiveThreads: settings.persistComposerContextStrip,
-    hasActiveProject: activeProject !== null && !showProviderSubagentBar,
+    hasActiveProject: activeProject !== null && !composerReplaced,
     isGitRepo,
     showEnvironmentIndicator: showComposerEnvironmentIndicator,
     hostsRestingComposerControls: routeKind === "server" && restingComposerControlsVisible,
   });
   const mountComposerModelStrip =
-    routeKind === "server" && !mountComposerContextStrip && !showProviderSubagentBar;
+    routeKind === "server" && !mountComposerContextStrip && !composerReplaced;
   const showComposerModelStrip = mountComposerModelStrip && restingComposerControlsVisible;
   const terminalShortcutLabelOptions = useMemo(
     () => ({
@@ -7414,6 +7421,22 @@ export default function ChatView(props: ChatViewProps) {
       });
     },
     [environmentId, navigate],
+  );
+  // A workflow's coordinator thread opens with the workflow's card.
+  const workflowHeader = useMemo(
+    () =>
+      activeThread?.modelSelection.instanceId === WORKFLOW_PROVIDER_INSTANCE_ID ? (
+        <WorkflowCoordinatorHeader
+          environmentId={activeThread.environmentId}
+          thread={activeThread}
+          providerStatuses={
+            environmentById.get(activeThread.environmentId)?.serverConfig?.providers ??
+            EMPTY_PROVIDERS
+          }
+          onOpenThread={onOpenRelatedThread}
+        />
+      ) : null,
+    [activeThread, environmentById, onOpenRelatedThread],
   );
 
   // Commands such as /compact and /goal clear run as their own turn. The draft
@@ -11429,6 +11452,7 @@ export default function ChatView(props: ChatViewProps) {
                 onOpenTurnDiff={paintOnlyDisplayedTimeline ? noopHeldTurnDiff : onOpenTurnDiff}
                 onOpenThread={onOpenRelatedThread}
                 parentThreadLink={paintOnlyDisplayedTimeline ? null : parentThreadLink}
+                headerContent={paintOnlyDisplayedTimeline ? null : workflowHeader}
                 onForkFromRun={paintOnlyDisplayedTimeline ? async () => {} : onForkFromRun}
                 onRollbackCheckpoint={(input) => {
                   if (!paintOnlyDisplayedTimeline) void onRollbackCheckpoint(input);
@@ -11569,6 +11593,15 @@ export default function ChatView(props: ChatViewProps) {
                               modelLabel={providerSubagentModelLabel}
                               effortLabel={providerSubagentEffortLabel}
                               status={providerSubagentStatus}
+                              onOpenParent={
+                                parentThreadLink
+                                  ? () => onOpenRelatedThread(parentThreadLink.threadId)
+                                  : null
+                              }
+                            />
+                          ) : null}
+                          {showWorkflowThreadBar ? (
+                            <WorkflowThreadBar
                               onOpenParent={
                                 parentThreadLink
                                   ? () => onOpenRelatedThread(parentThreadLink.threadId)

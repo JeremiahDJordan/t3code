@@ -40,6 +40,7 @@ import {
   formatModelSelectionEffort,
   type ProviderSubagentStatus,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/client-runtime/state/workflowCard";
 import { formatModelSlugName, resolveSelectableModel } from "@t3tools/shared/model";
 import { isProviderNativeSubagentThread } from "@t3tools/contracts";
 import type { QueuedRunEdit } from "../../state/queued-run-edit";
@@ -139,6 +140,11 @@ import {
 } from "./ThreadComposer";
 import { ComposerPopoverHost } from "./ComposerPopoverHost";
 import { ThreadFeed, type ThreadFeedHistoryControls } from "./ThreadFeed";
+import {
+  WorkflowCoordinatorHeader,
+  workflowCoordinatorSource,
+  WorkflowThreadBar,
+} from "./WorkflowCard";
 import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
@@ -404,6 +410,24 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
   // A provider-native subagent shows status instead of a composer.
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
+  // A workflow's coordinator thread runs its script and takes no messages.
+  const isWorkflowThread =
+    props.selectedThread.modelSelection.instanceId === WORKFLOW_PROVIDER_INSTANCE_ID;
+  // A workflow's coordinator thread opens with the workflow's card.
+  const workflowSource = workflowCoordinatorSource(props.selectedThread);
+  const workflowParentThreadId = workflowSource?.parentThreadId ?? null;
+  const workflowNodeId = workflowSource?.nodeId ?? null;
+  const workflowHeader = useMemo(
+    () =>
+      workflowParentThreadId === null || workflowNodeId === null ? null : (
+        <WorkflowCoordinatorHeader
+          environmentId={props.environmentId}
+          parentThreadId={workflowParentThreadId}
+          nodeId={workflowNodeId}
+        />
+      ),
+    [props.environmentId, workflowNodeId, workflowParentThreadId],
+  );
   // Entering edit mode from the queue sheet should land in a ready composer,
   // not require a second tap on a composer already holding the message.
   const editingRunId = props.queuedRunEdit?.runId ?? null;
@@ -1121,7 +1145,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               dispatchingMessageId={props.dispatchingMessageId}
               // A native subagent has no composer to edit a pending message in;
               // Cancel on the edit banner would discard it.
-              onEditPendingMessage={isProviderSubagent ? null : handleEditPendingMessage}
+              onEditPendingMessage={
+                isProviderSubagent || isWorkflowThread ? null : handleEditPendingMessage
+              }
               contentPresentation={props.contentPresentation}
               agentLabel={agentLabel}
               threadTitle={props.selectedThread.title}
@@ -1140,6 +1166,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               }
               contentMaxWidth={contentMaxWidth}
               historyControls={props.historyControls}
+              headerContent={workflowHeader}
               layoutVariant={layoutVariant}
               usesAutomaticContentInsets={props.usesAutomaticContentInsets}
               onHeaderMaterialVisibilityChange={props.onHeaderMaterialVisibilityChange}
@@ -1338,7 +1365,28 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 A rejected creation has no thread to send to; the failure card
                 owns the slot instead. */}
                 <View style={composerSlotHidden ? { display: "none" } : undefined}>
-                  {isProviderSubagent ? (
+                  {isWorkflowThread ? (
+                    <View
+                      className="self-center px-3 pt-1.5"
+                      style={{
+                        width: "100%",
+                        maxWidth: contentMaxWidth,
+                        paddingBottom: composerBottomInset + 6,
+                      }}
+                    >
+                      <WorkflowThreadBar
+                        onOpenParent={
+                          props.selectedThread.lineage.parentThreadId === null
+                            ? null
+                            : () =>
+                                navigation.navigate("Thread", {
+                                  environmentId: String(props.environmentId),
+                                  threadId: String(props.selectedThread.lineage.parentThreadId),
+                                })
+                        }
+                      />
+                    </View>
+                  ) : isProviderSubagent ? (
                     <View
                       className="self-center px-3 pt-1.5"
                       style={{

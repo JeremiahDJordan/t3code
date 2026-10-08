@@ -1,15 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
-import { StackActions, useIsFocused, useNavigation } from "@react-navigation/native";
+import { StackActions, useNavigation } from "@react-navigation/native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { summarizeSubagentStatuses } from "@t3tools/client-runtime/state/subagent-display";
+import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
 import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
-import type {
-  EnvironmentId,
-  OrchestrationV2Subagent,
-  OrchestrationV2TurnItem,
-} from "@t3tools/contracts";
-import { useEffect, useState } from "react";
-import { AppState, Pressable, View, type ColorValue } from "react-native";
+import { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/client-runtime/state/workflowCard";
+import type { EnvironmentId, OrchestrationV2TurnItem } from "@t3tools/contracts";
+import { Pressable, View, type ColorValue } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
@@ -18,34 +15,13 @@ import { cn } from "../../lib/cn";
 import type { ThreadFeedActivity } from "../../lib/threadActivity";
 import { serverEnvironment } from "../../state/server";
 import { environmentThreadDetails } from "../../state/threads";
-import { subagentCardElapsed } from "./subagent-card-presentation";
+import { SubagentElapsed } from "./SubagentElapsed";
 import { SubagentRow } from "./SubagentRow";
+import { WorkflowCard } from "./WorkflowCard";
 import { WorkLogBlock } from "./work-log-layout";
 
 type SubagentItem = Extract<OrchestrationV2TurnItem, { type: "subagent" }>;
-type AgentTiming = Pick<OrchestrationV2Subagent, "status" | "startedAt" | "completedAt">;
-
-function SubagentElapsed({ agents }: { readonly agents: ReadonlyArray<AgentTiming> }) {
-  const focused = useIsFocused();
-  const live = agents.some((agent) => isActiveSubagentStatus(agent.status));
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const [appActive, setAppActive] = useState(() => AppState.currentState === "active");
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (state) =>
-      setAppActive(state === "active"),
-    );
-    return () => subscription.remove();
-  }, []);
-  useEffect(() => {
-    if (!live || !focused || !appActive) return;
-    const intervalId = setInterval(() => setNowMs(Date.now()), 1_000);
-    return () => clearInterval(intervalId);
-  }, [appActive, focused, live]);
-  const elapsed = subagentCardElapsed(agents, nowMs);
-  return elapsed ? (
-    <Text className="shrink-0 text-xs tabular-nums text-foreground-muted">{elapsed}</Text>
-  ) : null;
-}
+const selectSubagents = (thread: EnvironmentThread | null) => thread?.projection.subagents;
 
 function SubagentAvatar(props: {
   readonly item: SubagentItem;
@@ -71,13 +47,36 @@ export function ThreadSubagentGroup(props: {
 }) {
   const config = useAtomValue(serverEnvironment.configValueAtom(props.environmentId));
   const navigation = useNavigation();
-  const members = props.activities.flatMap(({ projectedItem }) =>
+  const items = props.activities.flatMap(({ projectedItem }) =>
     projectedItem.item.type === "subagent" ? [projectedItem.item] : [],
   );
   const liveAgents = useAtomValue(
-    environmentThreadDetails.threadAtom(scopeThreadRef(props.environmentId, members[0]!.threadId)),
-    (thread) => thread?.projection.subagents,
+    environmentThreadDetails.threadAtom(scopeThreadRef(props.environmentId, items[0]!.threadId)),
+    selectSubagents,
   );
+  // A workflow run draws as its card once its live row says so; the rest stay a group.
+  const workflowRuns = items.flatMap((item) => {
+    if (item.providerInstanceId !== WORKFLOW_PROVIDER_INSTANCE_ID) return [];
+    const live = liveAgents?.find((agent) => agent.id === item.subagentId);
+    return live?.workflow?.kind === "run" ? [live] : [];
+  });
+  const members =
+    workflowRuns.length === 0
+      ? items
+      : items.filter((item) => !workflowRuns.some((run) => run.id === item.subagentId));
+  const workflowCards = workflowRuns.map((coordinator) => (
+    <WorkflowCard
+      key={coordinator.id}
+      environmentId={props.environmentId}
+      coordinator={coordinator}
+      phaseDisclosure={{
+        expandedRows: props.expandedRows,
+        anchorKey: props.anchorKey,
+        onToggleRow: props.onToggleRow,
+      }}
+    />
+  ));
+  if (members.length === 0) return <>{workflowCards}</>;
   const agents = members.map((item) => {
     const live = liveAgents?.find((agent) => agent.id === item.subagentId);
     return {
@@ -97,7 +96,7 @@ export function ThreadSubagentGroup(props: {
   const expanded = props.expandedRows[props.anchorKey] ?? false;
   const iconUrl = (item: SubagentItem) =>
     config?.providers.find((provider) => provider.instanceId === item.providerInstanceId)?.iconUrl;
-  return (
+  const group = (
     <WorkLogBlock>
       {grouped ? (
         <Pressable
@@ -181,5 +180,13 @@ export function ThreadSubagentGroup(props: {
         </View>
       ) : null}
     </WorkLogBlock>
+  );
+  return workflowCards.length === 0 ? (
+    group
+  ) : (
+    <>
+      {workflowCards}
+      {group}
+    </>
   );
 }

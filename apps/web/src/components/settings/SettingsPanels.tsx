@@ -2080,6 +2080,39 @@ function AutoSettleDaysInput({
   );
 }
 
+/** A whole number within bounds; the field snaps back to the saved value on blur. */
+function IntegerSettingInput(props: {
+  value: number;
+  min: number;
+  max: number;
+  onCommit: (value: number) => void;
+  "aria-label": string;
+}) {
+  const [draft, setDraft] = useState(String(props.value));
+  useEffect(() => {
+    setDraft(String(props.value));
+  }, [props.value]);
+  return (
+    <Input
+      size="sm"
+      type="number"
+      min={props.min}
+      max={props.max}
+      className="w-full sm:w-24"
+      value={draft}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        const parsed = Number(event.target.value);
+        if (Number.isInteger(parsed) && parsed >= props.min && parsed <= props.max) {
+          props.onCommit(parsed);
+        }
+      }}
+      onBlur={() => setDraft(String(props.value))}
+      aria-label={props["aria-label"]}
+    />
+  );
+}
+
 // The legacy rows sit behind the fold, so a settings-search jump has to
 // expand the section before its target can mount and scroll.
 const LEGACY_FEATURE_TARGET_IDS: ReadonlySet<string> = new Set([
@@ -2906,6 +2939,59 @@ export function GeneralSettingsPanel() {
                 updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
               }
               aria-label="Check provider versions"
+            />
+          }
+        />
+
+        <SettingsRow
+          serverScoped
+          settingKeys={["workflowMaxConcurrency"]}
+          {...searchableSetting("workflow-max-concurrency")}
+          description="The most agents one workflow may run at once. A workflow file asking for more runs with this many."
+          resetAction={
+            settings.workflowMaxConcurrency !== DEFAULT_UNIFIED_SETTINGS.workflowMaxConcurrency ? (
+              <SettingResetButton
+                label="workflow agents at once"
+                onClick={() =>
+                  updateSettings({
+                    workflowMaxConcurrency: DEFAULT_UNIFIED_SETTINGS.workflowMaxConcurrency,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <IntegerSettingInput
+              value={settings.workflowMaxConcurrency}
+              min={1}
+              max={64}
+              onCommit={(value) => updateSettings({ workflowMaxConcurrency: value })}
+              aria-label="Workflow agents at once"
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          settingKeys={["workflowMaxAgents"]}
+          {...searchableSetting("workflow-max-agents")}
+          description="The most agents one workflow may start in total. Past it, the workflow's agent calls return nothing and its log says so."
+          resetAction={
+            settings.workflowMaxAgents !== DEFAULT_UNIFIED_SETTINGS.workflowMaxAgents ? (
+              <SettingResetButton
+                label="workflow agents per run"
+                onClick={() =>
+                  updateSettings({ workflowMaxAgents: DEFAULT_UNIFIED_SETTINGS.workflowMaxAgents })
+                }
+              />
+            ) : null
+          }
+          control={
+            <IntegerSettingInput
+              value={settings.workflowMaxAgents}
+              min={1}
+              max={1000}
+              onCommit={(value) => updateSettings({ workflowMaxAgents: value })}
+              aria-label="Workflow agents per run"
             />
           }
         />

@@ -1,6 +1,7 @@
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
 import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
 import { AutoSettleDaysField } from "./components/AutoSettleDaysField";
+import { IntegerSettingField } from "./components/IntegerSettingField";
 import { ScreenScrollView as ScrollView } from "../../components/ScreenScrollView";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
@@ -16,6 +17,7 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
+import { SettingsControlRow } from "./components/SettingsControlRow";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsScreen } from "./components/SettingsScreen";
 import {
@@ -96,6 +98,8 @@ function AutoSettleSettingsRows() {
     patch: Partial<AutoSettleSettings> & {
       autoResumeLimitedThreads?: boolean;
       snoozeLimitedThreads?: boolean;
+      workflowMaxConcurrency?: number;
+      workflowMaxAgents?: number;
     },
   ) => {
     if (
@@ -205,6 +209,40 @@ function AutoSettleSettingsRows() {
             disabled={disabled}
             onValueChange={(value) => writeToAll({ snoozeLimitedThreads: value })}
           />
+        </SettingsSection>
+      ) : null}
+      {!projectSelected ? (
+        <SettingsSection title="Workflows">
+          <SettingsControlRow
+            icon="person.2"
+            label="Workflow agents at once"
+            subtitle="The most agents one workflow may run at once. A workflow file asking for more runs with this many."
+            disabled={disabled}
+          >
+            <IntegerSettingField
+              value={uniformMobileSetting(displayTargets, "workflowMaxConcurrency")}
+              min={1}
+              max={64}
+              accessibilityLabel="Workflow agents at once"
+              disabled={disabled}
+              onValueChange={(value) => writeToAll({ workflowMaxConcurrency: value })}
+            />
+          </SettingsControlRow>
+          <SettingsControlRow
+            icon="list.number"
+            label="Workflow agents per run"
+            subtitle="The most agents one workflow may start in total."
+            disabled={disabled}
+          >
+            <IntegerSettingField
+              value={uniformMobileSetting(displayTargets, "workflowMaxAgents")}
+              min={1}
+              max={1000}
+              accessibilityLabel="Workflow agents per run"
+              disabled={disabled}
+              onValueChange={(value) => writeToAll({ workflowMaxAgents: value })}
+            />
+          </SettingsControlRow>
         </SettingsSection>
       ) : null}
       <SettingsSection title="Auto-settle">

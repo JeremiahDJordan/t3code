@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { ThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   isOrchestrationV2WorkActive,
@@ -10,7 +11,7 @@ import { deriveSubagentElapsedMs, formatDuration } from "@t3tools/shared/orchest
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import * as DateTime from "effect/DateTime";
 import * as Haptics from "expo-haptics";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Platform, Pressable, ScrollView, View } from "react-native";
 import { Screen, ScreenStack, ScreenStackHeaderConfig } from "react-native-screens";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -18,9 +19,12 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AndroidSheetHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text } from "../../components/AppText";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { useThreadShell } from "../../state/entities";
 import { environmentThreadDetails } from "../../state/threads";
 import { nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { SubagentRow } from "./SubagentRow";
+import { groupWorkflowAgentsByPhase } from "./threadAgentsPresentation";
+import { useWorkflowCoordinatorForThread } from "./WorkflowCard";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -38,6 +42,13 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const turn = useThreadTurnSubagents(target);
   const subagents = turn?.subagents ?? [];
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
+  const shell = useThreadShell(scopeThreadRef(target.environmentId, target.threadId));
+  const coordinator = useWorkflowCoordinatorForThread(target.environmentId, shell);
+  // A workflow coordinator thread's agents read under their phases, as on its card.
+  const phases = useMemo(
+    () => groupWorkflowAgentsByPhase(turn?.subagents ?? [], coordinator),
+    [coordinator, turn?.subagents],
+  );
 
   const openChildThread = (childThreadId: ThreadId) => {
     void Haptics.selectionAsync();
@@ -64,6 +75,26 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
         <Text className="pt-6 text-center text-sm text-foreground-muted">
           No agents in this turn.
         </Text>
+      ) : phases !== null ? (
+        phases.map((phase) => (
+          <View key={phase.title}>
+            <Text
+              accessibilityRole="header"
+              className="pt-5 pb-1 text-sm font-t3-medium text-foreground-muted"
+            >
+              {phase.title}
+            </Text>
+            {phase.subagents.map((subagent) => (
+              <AgentRow
+                key={subagent.id}
+                subagent={subagent}
+                environmentId={target.environmentId}
+                tickSeconds={hasLiveAgent}
+                onOpen={openChildThread}
+              />
+            ))}
+          </View>
+        ))
       ) : (
         subagents.map((subagent) => (
           <AgentRow
