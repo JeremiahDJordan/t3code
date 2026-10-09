@@ -45,6 +45,7 @@ describe("workspace connection status", () => {
           displayUrl: "",
           isRelayManaged: false,
           usesCloudflareAccess: false,
+          secureChannelFingerprint: null,
           isEnabled: true,
           connectionState: "reconnecting",
           connectionError: null,

@@ -45,7 +45,12 @@ import {
   orchestrationProtocolCompatibilityError,
 } from "./compatibility.ts";
 import { credentialConnectionId } from "./routes.ts";
-import { cloudflareAccessHeaders, setConnectionTransportHeaders } from "./transportHeaders.ts";
+import * as SecureChannel from "./secureChannel.ts";
+import {
+  cloudflareAccessHeaders,
+  markSecureChannelHost,
+  setConnectionTransportHeaders,
+} from "./transportHeaders.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 
 export class ConnectionResolver extends Context.Service<
@@ -121,6 +126,7 @@ const makePrimaryBroker = Effect.fn("clientRuntime.connection.broker.makePrimary
 const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")(function* () {
   const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
   const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
+  const forwarder = yield* Effect.serviceOption(SecureChannel.SecureChannelForwarder);
 
   return Effect.fn("clientRuntime.connection.broker.bearer")(function* (
     entry: ConnectionCatalogEntry & { readonly target: BearerConnectionTarget },
@@ -159,6 +165,37 @@ const makeBearerBroker = Effect.fn("clientRuntime.connection.broker.makeBearer")
     );
     if (!isBearerCredential(credential)) {
       return yield* credentialMissingError(target.connectionId);
+    }
+    // An encrypted route is used through its local forwarder; Access headers ride its outer socket.
+    const channel = profile.channel;
+    if (channel !== undefined) {
+      markSecureChannelHost(profile.httpBaseUrl);
+      const clientKey = credential.channelClientKey;
+      if (clientKey === undefined) return yield* credentialMissingError(target.connectionId);
+      if (Option.isNone(forwarder)) return yield* SecureChannel.unsupportedError();
+      const local = yield* forwarder.value.forward({
+        httpBaseUrl: profile.httpBaseUrl,
+        serverKey: channel.serverKey,
+        clientKey: clientKey.secretKey,
+        ...(credential.cloudflareAccess === undefined
+          ? {}
+          : { cloudflareAccess: credential.cloudflareAccess }),
+      });
+      const authorized = yield* remote.authorizeBearer({
+        expectedEnvironmentId: target.environmentId,
+        httpBaseUrl: local.httpBaseUrl,
+        wsBaseUrl: local.wsBaseUrl,
+        bearerToken: credential.token,
+        connectionMethod: "direct",
+      });
+      return {
+        environmentId: authorized.environmentId,
+        label: authorized.label,
+        httpBaseUrl: authorized.httpBaseUrl,
+        socketUrl: authorized.socketUrl,
+        httpAuthorization: authorized.httpAuthorization,
+        target,
+      } satisfies PreparedConnection;
     }
     // Only the route paired behind Cloudflare Access sends its token, never one learned from it.
     if (profile.transport === "cloudflare-access") {

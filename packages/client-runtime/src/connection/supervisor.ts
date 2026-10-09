@@ -35,6 +35,7 @@ import {
   connectionRoutes,
   entryWithRoutes,
   type ReportedEndpoint,
+  isSecureChannelRoute,
 } from "./routes.ts";
 
 const RETRY_BASE_DELAY_MS = 1_000;
@@ -334,7 +335,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     const activeRoute = (yield* currentRoutes).find(
       (route) => connectionRouteId(route.target) === activeId,
     );
-    if (activeRoute === undefined) return;
+    // Learning the server's LAN or Tailscale addresses would quietly move traffic off the
+    // encrypted path; a user who wants that fast path adds it.
+    if (activeRoute === undefined || isSecureChannelRoute(activeRoute)) return;
     const updated = yield* learn({ activeRoute, reported });
     if (Option.isSome(updated)) {
       yield* Ref.set(currentEntry, updated.value);

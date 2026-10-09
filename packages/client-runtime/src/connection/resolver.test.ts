@@ -32,6 +32,7 @@ import {
   type ConnectionTarget,
 } from "./model.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
+import * as SecureChannel from "./secureChannel.ts";
 import { connectionTransportHeaders, setConnectionTransportHeaders } from "./transportHeaders.ts";
 import * as RpcHttp from "../rpc/http.ts";
 import {
@@ -82,6 +83,8 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   readonly primaryBearerToken?: string;
   readonly prepareSsh?: ClientCapabilities.SshEnvironmentGateway["Service"]["prepare"];
   readonly descriptorProtocolVersion?: number | null | undefined;
+  readonly forwarder?: SecureChannel.SecureChannelForwarder["Service"];
+  readonly fetched?: Array<string>;
 }) => {
   const profiles = new Map(
     (options?.profiles ?? []).map((profile) => [profile.connectionId, profile]),
@@ -147,21 +150,25 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
   });
 
   const layerDependencies = Layer.mergeAll(
-    RpcHttp.layerRemoteHttpClient((() =>
-      Promise.resolve(
-        Response.json({
-          environmentId: ENVIRONMENT_ID,
-          label: "Compatible environment",
-          platform: { os: "linux", arch: "x64" },
-          serverVersion: "0.0.0-test",
-          ...(options?.descriptorProtocolVersion === undefined
-            ? { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }
-            : options.descriptorProtocolVersion === null
-              ? {}
-              : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
-          capabilities: { repositoryIdentity: true },
-        }),
-      )) satisfies typeof fetch),
+    RpcHttp.layerRemoteHttpClient(
+      ((input: RequestInfo | URL) => (
+        options?.fetched?.push(String(input)),
+        Promise.resolve(
+          Response.json({
+            environmentId: ENVIRONMENT_ID,
+            label: "Compatible environment",
+            platform: { os: "linux", arch: "x64" },
+            serverVersion: "0.0.0-test",
+            ...(options?.descriptorProtocolVersion === undefined
+              ? { orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION }
+              : options.descriptorProtocolVersion === null
+                ? {}
+                : { orchestrationProtocolVersion: options.descriptorProtocolVersion }),
+            capabilities: { repositoryIdentity: true },
+          }),
+        )
+      )) satisfies typeof fetch,
+    ),
     Layer.succeed(
       ConnectionProfileStore.ConnectionProfileStore,
       options?.profileStore ?? profileStore,
@@ -181,10 +188,29 @@ const makeDependencies = Effect.fn("TestConnectionResolver.makeDependencies")((o
     ),
     Layer.succeed(RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization, remote),
     Layer.succeed(ClientCapabilities.SshEnvironmentGateway, ssh),
+    options?.forwarder === undefined
+      ? Layer.empty
+      : Layer.succeed(SecureChannel.SecureChannelForwarder, options.forwarder),
   );
 
   return Effect.succeed(ConnectionResolver.layer.pipe(Layer.provide(layerDependencies)));
 });
+
+/** A saved route reached only through the channel, with the server key it was paired with. */
+const encryptedRoute = (connectionId: string) =>
+  catalogEntry(
+    new BearerConnectionTarget({ environmentId: ENVIRONMENT_ID, label: "Saved", connectionId }),
+    Option.some(
+      new BearerConnectionProfile({
+        connectionId,
+        environmentId: ENVIRONMENT_ID,
+        label: "Saved",
+        httpBaseUrl: "https://quiet.example.test/",
+        wsBaseUrl: "wss://quiet.example.test/",
+        channel: { serverKey: "server-key" },
+      }),
+    ),
+  );
 
 describe("ConnectionResolver", () => {
   it.effect("blocks an old host during discovery before opening orchestration RPC", () =>
@@ -382,6 +408,102 @@ describe("ConnectionResolver", () => {
       expect(seen).toEqual(["access-secret", undefined]);
       setConnectionTransportHeaders(ENDPOINT.httpBaseUrl, undefined);
     }),
+  );
+
+  it.effect("prepares an encrypted route through its forwarder, never its host in plain", () =>
+    Effect.gen(function* () {
+      const access = { clientId: "id.access", clientSecret: "access-secret" };
+      const forwarded: Array<SecureChannel.SecureChannelRouteRequest> = [];
+      const authorizedAt: Array<string> = [];
+      const fetched: Array<string> = [];
+      const brokerLayer = yield* makeDependencies({
+        fetched,
+        credentials: [
+          [
+            "encrypted-1",
+            new BearerConnectionCredential({
+              token: "t",
+              cloudflareAccess: access,
+              channelClientKey: { secretKey: "client-secret-key" },
+            }),
+          ],
+        ],
+        forwarder: SecureChannel.SecureChannelForwarder.of({
+          createClientKey: Effect.die("unused"),
+          forward: (request) =>
+            Effect.sync(() => {
+              forwarded.push(request);
+              return { httpBaseUrl: "http://127.0.0.1:52811/", wsBaseUrl: "ws://127.0.0.1:52811/" };
+            }),
+          release: () => Effect.void,
+          retain: () => Effect.void,
+        }),
+        authorizeBearer: (input) =>
+          Effect.sync(() => {
+            authorizedAt.push(input.httpBaseUrl);
+            return {
+              environmentId: input.expectedEnvironmentId,
+              label: "Saved",
+              httpBaseUrl: input.httpBaseUrl,
+              socketUrl: `${input.wsBaseUrl}ws?wsTicket=ticket`,
+              httpAuthorization: { _tag: "Bearer" as const, token: input.bearerToken },
+            };
+          }),
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
+      const prepared = yield* broker.prepare(encryptedRoute("encrypted-1"));
+      expect(forwarded).toEqual([
+        {
+          httpBaseUrl: "https://quiet.example.test/",
+          serverKey: "server-key",
+          clientKey: "client-secret-key",
+          cloudflareAccess: access,
+        },
+      ]);
+      expect(authorizedAt).toEqual(["http://127.0.0.1:52811/"]);
+      expect(prepared.httpBaseUrl).toBe("http://127.0.0.1:52811/");
+      expect(prepared.socketUrl.startsWith("ws://127.0.0.1:52811/ws")).toBe(true);
+      expect(fetched.every((url) => url.startsWith("http://127.0.0.1:52811/"))).toBe(true);
+      // Access rides the channel's outer socket, so plain requests never get the token.
+      expect(connectionTransportHeaders("https://quiet.example.test/")).toBeUndefined();
+    }),
+  );
+
+  it.effect(
+    "blocks an encrypted route without its device key, or where the app can't open channels",
+    () =>
+      Effect.gen(function* () {
+        const withoutKey = yield* makeDependencies({
+          credentials: [["encrypted-2", new BearerConnectionCredential({ token: "t" })]],
+          forwarder: SecureChannel.SecureChannelForwarder.of({
+            createClientKey: Effect.die("unused"),
+            forward: () => Effect.die("unused"),
+            release: () => Effect.void,
+            retain: () => Effect.void,
+          }),
+        });
+        const missingKey = yield* ConnectionResolver.ConnectionResolver.pipe(
+          Effect.flatMap((broker) => broker.prepare(encryptedRoute("encrypted-2"))),
+          Effect.provide(withoutKey),
+          Effect.flip,
+        );
+        expect(missingKey._tag).toBe("ConnectionBlockedError");
+
+        const noForwarder = yield* makeDependencies({
+          credentials: [
+            [
+              "encrypted-3",
+              new BearerConnectionCredential({ token: "t", channelClientKey: { secretKey: "k" } }),
+            ],
+          ],
+        });
+        const unsupported = yield* ConnectionResolver.ConnectionResolver.pipe(
+          Effect.flatMap((broker) => broker.prepare(encryptedRoute("encrypted-3"))),
+          Effect.provide(noForwarder),
+          Effect.flip,
+        );
+        expect(unsupported.message).toContain("desktop and mobile apps");
+      }),
   );
 
   it.effect("prepares relay connections with the authorized endpoint and credentials", () =>

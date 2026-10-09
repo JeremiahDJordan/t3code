@@ -234,6 +234,25 @@ describe("ConnectionCatalogDocument", () => {
     expect(restored.credentials[0]?.credential).toEqual(credential);
   });
 
+  it("round-trips an end-to-end encrypted route with its server key and device key", () => {
+    const profile = new BearerConnectionProfile({
+      ...BEARER_PROFILE,
+      channel: { serverKey: "T5hOzynTk5IgxTvBC0-98--ZeLNcTyLqHPg9zjxXT1Q" },
+    });
+    const credential = new BearerConnectionCredential({
+      ...BEARER_CREDENTIAL,
+      channelClientKey: { secretKey: "client-secret-key" },
+    });
+    const document = registerConnectionInCatalog(
+      EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      new BearerConnectionRegistration({ target: BEARER_TARGET, profile, credential }),
+    );
+    const schema = Schema.fromJsonString(ConnectionCatalogDocument);
+    const restored = Schema.decodeSync(schema)(Schema.encodeSync(schema)(document));
+    expect(restored.profiles).toEqual([profile]);
+    expect(restored.credentials[0]?.credential).toEqual(credential);
+  });
+
   it("registers a bearer connection as one catalog mutation", () => {
     const document = registerConnectionInCatalog(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,
