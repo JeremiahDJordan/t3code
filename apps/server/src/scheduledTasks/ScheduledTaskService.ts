@@ -552,6 +552,7 @@ export const layer = Layer.effect(
           model_selection_json = excluded.model_selection_json,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
+          created_by = excluded.created_by,
           creation_source = excluded.creation_source,
           updated_at = excluded.updated_at,
           next_run_at = excluded.next_run_at,
@@ -735,6 +736,9 @@ export const layer = Layer.effect(
         const messageId = MessageId.make(`scheduled-task-message:${fireKey}`);
         // A webhook prompt was rendered from the row when the request arrived.
         const prompt = webhook?.prompt ?? active.prompt;
+        // A webhook's run carries what an outside sender posted, so its message is the server's,
+        // not the user's own words, whoever wrote the template.
+        const creationSource = webhook === undefined ? active.creationSource : "server";
 
         // Effect.exit (not Effect.result) so defects and interruptions in the
         // dispatch are also captured and recorded as a failed run instead of
@@ -757,7 +761,7 @@ export const layer = Layer.effect(
                     attachments: [],
                   },
                   createdBy: active.createdBy,
-                  creationSource: active.creationSource,
+                  creationSource,
                 }),
               )
             : yield* Effect.exit(
@@ -772,7 +776,7 @@ export const layer = Layer.effect(
                   modelSelection: active.modelSelection,
                   mode: "queue",
                   createdBy: active.createdBy,
-                  creationSource: active.creationSource,
+                  creationSource,
                 }),
               );
 
@@ -1025,7 +1029,14 @@ export const layer = Layer.effect(
           modelSelection: input.modelSelection,
           runtimeMode: input.runtimeMode,
           interactionMode: input.interactionMode,
-          createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
+          // The writer of this version, so an agent's edit of a user's task is not the user's. A
+          // save that names no writer comes from the app, which agents cannot reach: a new prompt
+          // there is the user's, and an unchanged one keeps its writer.
+          createdBy:
+            input.createdBy ??
+            (existingTask === null || existingTask.prompt !== input.prompt
+              ? "user"
+              : existingTask.createdBy),
           creationSource: input.creationSource ?? "web",
           createdAt: existingTask?.createdAt ?? iso(now),
           updatedAt: iso(now),

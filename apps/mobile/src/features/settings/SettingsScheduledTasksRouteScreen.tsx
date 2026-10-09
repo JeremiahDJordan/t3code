@@ -680,7 +680,7 @@ function TaskForm({
               },
       runtimeMode: draft.runtimeMode,
       interactionMode: draft.task?.interactionMode ?? "default",
-      creationSource: draft.task?.creationSource ?? "mobile",
+      creationSource: "mobile",
     };
     submissionPending.current = true;
     setSaving(true);

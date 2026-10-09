@@ -190,13 +190,19 @@ const fromT3 = (line) => {
       inflight = key;
       lastPrompt = null;
       promptTools.clear();
-      // T3 sends steers that waited as Bob's next prompt, their texts joined, so they leave the
-      // meta once Bob has them; steers saved since stay for a T3 that takes Bob over.
+      // T3 sends steers that waited as Bob's next prompt, their texts joined and their attached
+      // files' text after, so they leave the meta once Bob has them; steers saved since stay for
+      // a T3 that takes Bob over.
       const steers = Array.isArray(meta.steers) ? meta.steers : [];
       const blocks = (msg.params && msg.params.prompt) || [];
-      const text = blocks.length === 1 && blocks[0].type === "text" ? blocks[0].text : undefined;
+      const text =
+        blocks.length > 0 &&
+        blocks[0].type === "text" &&
+        blocks.slice(1).every((block) => block.type === "resource")
+          ? blocks[0].text
+          : undefined;
       for (let count = steers.length; count > 0 && text !== undefined; count -= 1) {
-        if (steers.slice(0, count).join("\n\n") === text) {
+        if (steers.slice(0, count).map((steer) => steer.text).join("\n\n") === text) {
           meta = { ...meta, steers: steers.slice(count) };
           break;
         }
@@ -275,7 +281,7 @@ const killBob = () => {
 
 const state = () => ({
   t: "state",
-  relay: 2,
+  relay: 3,
   bobPid: bob ? bob.pid : null,
   exited,
   promptInFlight: inflight !== null,

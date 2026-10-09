@@ -1653,20 +1653,13 @@ const make = Effect.gen(function* () {
         const projectId = yield* resolveProjectTarget(parent, input.projectId);
         yield* assertLiveCallerForOtherProject(scope, parent, projectId);
         const project = yield* requireProject(projectId);
-        const bindToCurrentThread =
-          input.bindToCurrentThread ??
-          (parent !== undefined && parent.thread.projectId === projectId);
-        if (
-          bindToCurrentThread &&
-          (parent === undefined || parent.thread.projectId !== projectId)
-        ) {
-          return yield* failure(
-            "invalid_request",
-            parent === undefined
-              ? "bindToCurrentThread needs an agent running inside a T3 thread."
-              : "bindToCurrentThread binds to this thread, which belongs to a different project.",
-          );
-        }
+        const binding = scheduledTaskBinding({
+          requested: input.bindToCurrentThread,
+          caller: bindingCaller(parent),
+          projectId,
+        });
+        if ("refused" in binding) return yield* failure("invalid_request", binding.refused);
+        const bindToCurrentThread = binding.bind;
         const modelSelection =
           parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
         const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
@@ -1729,16 +1722,13 @@ const make = Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
         const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
-        if (
-          input.bindToCurrentThread === true &&
-          (parent === undefined || parent.thread.projectId !== existing.projectId)
-        ) {
-          return yield* failure(
-            "invalid_request",
-            parent === undefined
-              ? "bindToCurrentThread needs an agent running inside a T3 thread."
-              : "bindToCurrentThread binds to this thread, which belongs to a different project.",
-          );
+        if (input.bindToCurrentThread !== undefined) {
+          const binding = scheduledTaskBinding({
+            requested: input.bindToCurrentThread,
+            caller: bindingCaller(parent),
+            projectId: existing.projectId,
+          });
+          if ("refused" in binding) return yield* failure("invalid_request", binding.refused);
         }
         const threadId =
           input.bindToCurrentThread === undefined
@@ -1765,8 +1755,14 @@ const make = Effect.gen(function* () {
           modelSelection: existing.modelSelection,
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
-          createdBy: existing.createdBy,
-          creationSource: existing.creationSource,
+          // A prompt an agent wrote, or one it moved to another thread or none, is not the user's
+          // words where it now runs: runs dispatch it with this provenance, and Bob's Auto
+          // reviewer quotes only what the user wrote. Only a prompt the user rewrites in the app
+          // makes it theirs again; their other edits keep the agent's provenance.
+          ...((input.prompt !== undefined && input.prompt !== existing.prompt) ||
+          threadId !== existing.threadId
+            ? { createdBy: "agent" as const, creationSource: "mcp" as const }
+            : { createdBy: existing.createdBy, creationSource: existing.creationSource }),
         };
         const { task } = yield* scheduledTasks
           .upsert(upsertInput)
@@ -2795,6 +2791,51 @@ const make = Effect.gen(function* () {
       }),
   });
 });
+
+/** The calling thread as `scheduledTaskBinding` reads it. */
+function bindingCaller(
+  parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined,
+): { readonly projectId: ProjectId; readonly delegated: boolean } | undefined {
+  return parent === undefined
+    ? undefined
+    : {
+        projectId: parent.thread.projectId,
+        delegated: parent.thread.lineage.relationshipToParent === "subagent",
+      };
+}
+
+/**
+ * Whether a task an agent schedules binds to its thread, or why it cannot. Binding means "wake
+ * this thread", which only a thread caller in that project has, and it is the default there. A
+ * delegated task's thread ends with its task, so nothing would read what lands in it: its tasks
+ * run unbound.
+ */
+export function scheduledTaskBinding(input: {
+  readonly requested: boolean | undefined;
+  readonly caller: { readonly projectId: ProjectId; readonly delegated: boolean } | undefined;
+  readonly projectId: ProjectId;
+}): { readonly bind: boolean } | { readonly refused: string } {
+  const { caller } = input;
+  const bind =
+    input.requested ??
+    (caller !== undefined && !caller.delegated && caller.projectId === input.projectId);
+  if (!bind) return { bind };
+  if (caller === undefined) {
+    return { refused: "bindToCurrentThread needs an agent running inside a T3 thread." };
+  }
+  if (caller.delegated) {
+    return {
+      refused:
+        "This is a delegated task's thread, which ends with its task. Schedule the task without bindToCurrentThread.",
+    };
+  }
+  if (caller.projectId !== input.projectId) {
+    return {
+      refused: "bindToCurrentThread binds to this thread, which belongs to a different project.",
+    };
+  }
+  return { bind };
+}
 
 export const layer: Layer.Layer<
   OrchestratorMcpService,
