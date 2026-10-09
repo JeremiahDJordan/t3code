@@ -16,6 +16,7 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   type ServerProvider,
+  type ThreadTokenUsageSnapshot,
   ThreadId,
   TurnItemId,
   WORKFLOW_PROVIDER_INSTANCE_ID,
@@ -76,7 +77,13 @@ interface FakeTurn {
   readonly threadId: ThreadId;
   readonly text: string;
 }
-type FakeOutcome = { readonly text: string } | { readonly fail: string };
+type FakeOutcome =
+  | {
+      readonly text: string;
+      /** What the provider reports it used, as Bob reports its task's Bobcoins. */
+      readonly usage?: ThreadTokenUsageSnapshot;
+    }
+  | { readonly fail: string };
 
 function providerSnapshot(
   instanceId: ProviderInstanceId,
@@ -237,6 +244,19 @@ function makeFakeAdapter(input: {
                     return;
                   }
                   yield* publish([
+                    ...(outcome.usage === undefined
+                      ? []
+                      : [
+                          {
+                            type: "provider_thread.updated" as const,
+                            driver: input.driver,
+                            providerThread: {
+                              ...turnInput.providerThread,
+                              contextUsage: outcome.usage,
+                              updatedAt: at,
+                            },
+                          },
+                        ]),
                     {
                       type: "provider_turn.updated",
                       driver: input.driver,
@@ -1019,6 +1039,101 @@ return { a, b, c }`,
               "step c": 2,
             });
             expect(yield* harness.wakeCount).toBe(1);
+          }),
+      );
+    }),
+  );
+
+  it.live("says what the run's agents spent, in each provider's unit", () =>
+    withHarness(
+      {
+        name: "workflow-spend",
+        behave: () =>
+          Effect.succeed({
+            text: "done",
+            usage: {
+              usedTokens: 1_000,
+              totalProcessedTokens: 5_000,
+              cost: { amount: 1.25, currency: "Bobcoins" },
+            },
+          }),
+      },
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.startParent;
+          const started = yield* harness.runWorkflow({
+            source: String.raw`export const meta = { t3: 1, name: "spend" }
+return await parallel([() => agent("one"), () => agent("two")])`,
+          });
+          if (started.status !== "started") return yield* Effect.die("not started");
+          yield* harness.parentWoken;
+          const records = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+          const row = records.subagents.find((task) => task.id === started.taskId)!;
+          expect(row.status).toBe("completed");
+          // One attempt: nothing to total across.
+          expect(row.result).toContain("Its agents spent 2.5 Bobcoins.");
+        }),
+    ),
+  );
+
+  it.live("adds the spend to a failure and totals it across attempts", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const spend = {
+        usedTokens: 1_000,
+        totalProcessedTokens: 5_000,
+        cost: { amount: 1.25, currency: "Bobcoins" },
+      };
+      return yield* withHarness(
+        {
+          name: "workflow-retry-spend",
+          behave: (turn) =>
+            turn.text === "flaky"
+              ? Ref.updateAndGet(attempts, (count) => count + 1).pipe(
+                  Effect.map((count) =>
+                    count === 1 ? { fail: "flaky" } : { text: "fine", usage: spend },
+                  ),
+                )
+              : Effect.succeed({ text: "noted", usage: spend }),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const started = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "retry-spend" }
+await agent("steady")
+const result = await agent("flaky")
+if (result === null) throw new Error("the flaky agent failed")
+return result`,
+            });
+            if (started.status !== "started") return yield* Effect.die("not started");
+            yield* harness.parentWoken;
+            const failed = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+            // The spend is its own paragraph after the failure, and one attempt totals nothing.
+            expect(failed.subagents.find((task) => task.id === started.taskId)?.result).toMatch(
+              /the flaky agent failed\n\nIts agents spent 1\.25 Bobcoins\.$/,
+            );
+
+            yield* harness.threads.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:workflow-retry-spend:retry"),
+              threadId: started.childThreadId,
+              messageId: MessageId.make("message:workflow-retry-spend:retry"),
+              text: "Retry",
+              attachments: [],
+              modelSelection: {
+                instanceId: WORKFLOW_PROVIDER_INSTANCE_ID,
+                model: WorkflowAdapterV2.WORKFLOW_MODEL,
+              },
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* harness.parentWoken;
+            const retried = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+            expect(retried.subagents.find((task) => task.id === started.taskId)?.result).toMatch(
+              /^fine\n\nIts agents spent [\d.]+ Bobcoins in total, across attempts\.$/,
+            );
           }),
       );
     }),

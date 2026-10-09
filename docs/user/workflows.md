@@ -79,6 +79,9 @@ These limits count agents, not tokens or cost; a workflow has no spending budget
 full conversation with its provider and is billed like one. A workflow that sends a long plan to
 every agent pays for that plan once per agent.
 
+When a run ends, its result says what its agents spent where their providers report it, such as
+Bob Shell's Bobcoins. After a Retry the figure covers every attempt.
+
 ## Writing a workflow
 
 Agents can write workflows for you; describe the stages and ask for a workflow file. A workflow

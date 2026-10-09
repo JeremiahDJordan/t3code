@@ -297,6 +297,13 @@ function makeTurnOutput(turn: WorkflowTurn, startedAt: DateTime.Utc) {
   return { message, phases, terminal };
 }
 
+/** A spend in a provider's billing unit, to two decimals: 12.4, not 12.40000001. */
+const formatSpend = (amount: number) => Number(amount.toFixed(2)).toLocaleString("en-US");
+
+/** "a", "a and b", "a, b and c". */
+const joinParts = (parts: ReadonlyArray<string>) =>
+  parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
+
 const make = Effect.gen(function* () {
   const host = yield* WorkflowEngineHost;
   const threads = yield* ThreadManagementService.ThreadManagementService;
@@ -315,6 +322,29 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+
+  /**
+   * What a run's agents spent, from their threads' provider usage, in each
+   * billing unit a provider reports, such as Bob's Bobcoins. Every attempt's
+   * agents count, so after a Retry it is the whole run's total, and says so.
+   * Undefined when they reported none, or the threads could not be read.
+   */
+  const spentBy = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const costs = new Map<string, number>();
+      for (const task of yield* children(threadId)) {
+        if (task.childThreadId === null) continue;
+        const records = yield* threads.getThreadRecords(task.childThreadId, ["providerThreads"]);
+        for (const { contextUsage } of records.providerThreads) {
+          const cost = contextUsage?.cost;
+          if (cost) costs.set(cost.currency, (costs.get(cost.currency) ?? 0) + cost.amount);
+        }
+      }
+      const parts = [...costs].map(([currency, amount]) => `${formatSpend(amount)} ${currency}`);
+      if (parts.length === 0) return undefined;
+      const { runs } = yield* threads.getThreadRecords(threadId, ["runs"]);
+      return `Its agents spent ${joinParts(parts)}${runs.length > 1 ? " in total, across attempts" : ""}.`;
+    }).pipe(Effect.orElseSucceed(() => undefined));
 
   /**
    * Resolves each child's row once it is terminal, from one event stream per
@@ -896,9 +926,16 @@ const make = Effect.gen(function* () {
               ? null
               : `${unfinished} agent${unfinished === 1 ? "" : "s"} failed, stopped or returned no valid result, so agent() returned null for ${unfinished === 1 ? "it" : "them"}`,
           ].filter((note) => note !== null);
+          const spent = yield* spentBy(coordinatorThreadId);
           yield* Effect.uninterruptible(
             out
-              .message(notes.length === 0 ? result : `${result}\n\nNote: ${notes.join("; ")}.`)
+              .message(
+                [
+                  result,
+                  ...(spent === undefined ? [] : [spent]),
+                  ...(notes.length === 0 ? [] : [`Note: ${notes.join("; ")}.`]),
+                ].join("\n\n"),
+              )
               .pipe(Effect.andThen(finishTurn({ status: "completed" }))),
           );
           return;
@@ -910,18 +947,22 @@ const make = Effect.gen(function* () {
             cause: exit.cause,
           });
         }
+        const spent = yield* spentBy(coordinatorThreadId);
+        const ending = [
+          ...(created.size === 0
+            ? []
+            : [`Kept ${created.size} worktree${created.size === 1 ? "" : "s"} for Retry.`]),
+          ...(spent === undefined ? [] : [spent]),
+        ];
         yield* Effect.uninterruptible(
-          (created.size === 0
-            ? Effect.void
-            : out.message(
-                `Kept ${created.size} worktree${created.size === 1 ? "" : "s"} for Retry.`,
-              )
-          ).pipe(
+          (ending.length === 0 ? Effect.void : out.message(ending.join(" "))).pipe(
             Effect.andThen(
               finishTurn({
                 status: "failed",
-                message:
+                message: [
                   failure?._tag === "Fail" ? failure.error.message : "The workflow engine failed.",
+                  ...(spent === undefined ? [] : [spent]),
+                ].join("\n\n"),
               }),
             ),
           ),
@@ -931,9 +972,16 @@ const make = Effect.gen(function* () {
           Effect.suspend(() =>
             terminalSent
               ? Effect.void
-              : out
-                  .message("The workflow was stopped.")
-                  .pipe(Effect.andThen(finishTurn({ status: "interrupted" }))),
+              : spentBy(coordinatorThreadId).pipe(
+                  Effect.flatMap((spent) =>
+                    out.message(
+                      spent === undefined
+                        ? "The workflow was stopped."
+                        : `The workflow was stopped. ${spent}`,
+                    ),
+                  ),
+                  Effect.andThen(finishTurn({ status: "interrupted" })),
+                ),
           ),
         ),
       );
