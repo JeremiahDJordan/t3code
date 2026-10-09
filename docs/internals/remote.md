@@ -55,6 +55,74 @@ learned route still has to answer as this environment before it is used.
 GitHub routing trust covers the whole route list. Adding or changing a route
 revokes it; reordering does not, because the same addresses remain trusted.
 
+## End-to-end encrypted routes
+
+An encrypted route reaches the server through the
+[secure channel gateway](../../apps/server/src/secureChannel/SecureChannelGateway.ts),
+which a Cloudflare Tunnel points at. The server key in the pairing link is the root of
+trust and never travels through the tunnel. The gateway sends no byte to anything but a
+valid handshake from a paired client key or one carrying a live pairing code, so the
+hostname looks unused. An error page, a health route, or any other answer on that port
+gives the service away.
+
+Anyone holding the channel's path, such as a past holder of a pairing link, can send handshakes
+that cost the server 0.6 to 2.5 ms each, on the same thread as everything else. Every address
+is limited on its own. An address where a paired device completed a handshake in the last day
+is known and skips the rest, so a flood from strangers usually doesn't shed the user's devices
+on addresses they used lately. It still can when the flood comes from that exact address, such
+as behind the same carrier NAT, when the only device known there is gone, or when 63 or more
+keys have pushed the address out. A pairing code doesn't make an address known, since a
+handshake doesn't use the code up.
+
+Each key keeps at most 16 known addresses, shared with any other key that used them, and loses
+each a day after it last connected there, so even a stolen key holds little standing. Known
+addresses share no cap on attempts, so one key's can still spend about 0.5 to 2% of a core. A
+key loses its addresses at once when revoked in Settings. Revoked from the CLI, which runs in
+another process, it loses them at its next handshake that reaches the server, or within the
+hour if it holds a channel, and otherwise within a day, at a restart, or when the tunnel is
+switched off and on.
+
+Strangers, new pairings among them, are also limited per network block (IPv6 /48, IPv4 /24)
+and together under a cap of about a sixth of a core; during a flood, a new pairing or a device
+on an unfamiliar address is turned away until it passes. The known set lives in memory. A
+global limit on everyone would let a flood lock out every device, and no limit on strangers
+would leave the server's thread to whoever floods it. `t3 channel rotate` moves the path,
+which cuts off whoever held it.
+
+A saved encrypted environment pins its server key across every address: pairing refuses any
+link for it that doesn't carry that key, whichever flow opens the link, so no plain route is
+ever added to an encrypted environment. That shuts out a link that echoes the environment's id,
+which isn't secret, from a LAN address that would be tried first.
+
+The server knows a request came through the channel only because the gateway registers
+each upstream connection's local port, and the client key behind it, before writing to it.
+Every session paired through the channel, whether by token exchange, browser cookie or MCP
+approval, carries that key (`cck`), and
+[environment auth](../../apps/server/src/auth/EnvironmentAuth.ts) accepts its tokens only
+on a connection from the same client's channel. A credential check that bypasses that rule
+lets a token taken from the device work from anywhere else that can reach the server. The
+desktop keeps each route's channel key in its main process, so a compromised renderer can't
+take one.
+
+Clients use an encrypted route only through a loopback forwarder per route, in the desktop
+main process or the mobile native module, and use its local origin in place of the
+route's. The route's own host gets no plain request: the runtime's fetch and WebSocket
+refuse it, the driver skips its descriptor check, and the supervisor learns no routes over
+it. The one exception is a GET at the channel's path when a channel behind Cloudflare Access
+won't open, to tell Access refusing the token from a gateway that's down; the gateway never
+answers it. A network path that skips the runtime's guarded fetch or WebSocket breaks this.
+Other processes on the device, and on iOS other apps, can reach a forwarder's port, and so
+the server's unauthenticated routes as this device; anything else still needs a session.
+
+The channel is our own `Noise_IK_25519_ChaChaPoly_SHA256` on the `@noble` primitives, checked
+against the cacophony vector: React Native has no TLS over an arbitrary stream, and Noise
+libraries assume libp2p or `sodium-native`. It carries plain byte streams rather than HTTP so
+that every loader, from images and video to WebViews and uploads, works unchanged through the
+forwarder. Nothing is compressed inside it, because compressing before encrypting shows the
+carrier how well each message compressed; the server compresses what it serves, and a client
+that negotiates WebSocket compression on the RPC socket gets that inside the channel, as on
+any other route.
+
 ## Hosted web is a client
 
 The hosted web app stores its connection catalog in the browser and connects

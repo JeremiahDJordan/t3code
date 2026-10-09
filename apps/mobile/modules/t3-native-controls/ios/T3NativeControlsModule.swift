@@ -12,13 +12,11 @@ public final class T3NativeControlsModule: Module {
   private var filePresentation: T3NativeFilePresentation?
 
   public func definition() -> ModuleDefinition {
-    Constants {
+    Constant("supportsWorkspaceColumns") { () -> Bool in
       if #available(iOS 26.0, *) {
-        return [
-          "supportsWorkspaceColumns": NSClassFromString("RNSSplitHostComponentView") != nil,
-        ]
+        return NSClassFromString("RNSSplitHostComponentView") != nil
       }
-      return ["supportsWorkspaceColumns": false]
+      return false
     }
     View(T3SegmentedControlView.self) {
       ViewName("SegmentedControl")

@@ -6,9 +6,7 @@ public class T3TerminalModule: Module {
 
     // Bumped when native hardware-keyboard handling changes; surfaced in the JS debug
     // logs so a stale native binary is distinguishable from a broken key pipeline.
-    Constants([
-      "hardwareKeyRevision": 3,
-    ])
+    Constant("hardwareKeyRevision") { 3 }
 
     View(T3TerminalView.self) {
       Prop("terminalKey") { (view: T3TerminalView, terminalKey: String) in

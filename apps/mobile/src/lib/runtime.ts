@@ -4,6 +4,8 @@ import * as Socket from "effect/socket/Socket";
 
 import {
   connectionTransportHeaders,
+  isSecureChannelHost,
+  SecureChannelRequiredError,
   withConnectionTransportHeaders,
 } from "@t3tools/client-runtime/connection";
 import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
@@ -14,6 +16,7 @@ import { resolveCloudPublicConfig } from "../features/cloud/publicConfig";
 import * as Tracing from "../features/observability/tracing";
 import * as Persistence from "../persistence/layer";
 import { disposeOnFoundationReplace, type FoundationHotModule } from "./foundation-fast-refresh";
+import { layerSecureChannelForwarder } from "./secureChannel";
 
 declare const module: { readonly hot?: FoundationHotModule } | undefined;
 
@@ -32,6 +35,8 @@ const ReactNativeWebSocket = WebSocket as unknown as new (
 ) => WebSocket;
 
 const layerWebSocketConstructor = Layer.succeed(Socket.WebSocketConstructor)((url, options) => {
+  // An encrypted route is used through its local forwarder; its own host gets nothing in plain.
+  if (isSecureChannelHost(url)) throw new SecureChannelRequiredError(url);
   const protocols = typeof options === "string" || Array.isArray(options) ? options : undefined;
   const headers = {
     ...(typeof options === "object" && !Array.isArray(options) ? options.headers : undefined),
@@ -45,14 +50,16 @@ const layerWebSocketConstructor = Layer.succeed(Socket.WebSocketConstructor)((ur
 type RuntimeLayerSource =
   | ReturnType<typeof ManagedRelayLayer.layer>
   | typeof layerWebSocketConstructor
+  | typeof layerSecureChannelForwarder
   | typeof Dpop.layer
   | typeof layerHttpClient
   | typeof Persistence.layer
   | typeof Tracing.layer;
 
-const layerRuntime = Layer.merge(
+const layerRuntime = Layer.mergeAll(
   ManagedRelayLayer.layer(configuredRelayUrl()),
   layerWebSocketConstructor,
+  layerSecureChannelForwarder,
 ).pipe(
   Layer.provideMerge(Dpop.layer),
   Layer.provideMerge(layerHttpClient),
