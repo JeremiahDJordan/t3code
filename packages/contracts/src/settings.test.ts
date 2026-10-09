@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
 import { type CommandId, ProjectId } from "./baseSchemas.ts";
+import { AuthEnvironmentMaintainScope, AuthSettingsWriteScope } from "./auth.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
@@ -9,6 +10,7 @@ import {
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
   requiredScopesForProjectMutation,
+  requiredScopesForServerSettingsPatch,
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -48,6 +50,35 @@ describe("ServerSettings response streaming", () => {
       expect(() => decodeServerSettings(input)).toThrow();
       expect(() => decodeServerSettingsPatch(input)).toThrow();
     }
+  });
+});
+
+describe("secure channel settings", () => {
+  it("keeps the gateway off for existing installations", () => {
+    expect(decodeServerSettings({}).secureChannel).toEqual({
+      enabled: false,
+      port: 3774,
+      publicOrigin: "",
+    });
+  });
+
+  it("needs environment maintenance to change, since it opens a listener", () => {
+    const patch = decodeServerSettingsPatch({
+      secureChannel: { enabled: true, port: 3774, publicOrigin: "https://quiet.example.com" },
+    });
+    expect(requiredScopesForServerSettingsPatch(patch)).toEqual([
+      AuthSettingsWriteScope,
+      AuthEnvironmentMaintainScope,
+    ]);
+    expect(requiredScopesForServerSettingsPatch({ worktreeCleanup: null })).toEqual([
+      AuthSettingsWriteScope,
+    ]);
+  });
+
+  it.each([0, 65536, 1.5])("rejects port %s", (port) => {
+    expect(() =>
+      decodeServerSettingsPatch({ secureChannel: { enabled: true, port, publicOrigin: "" } }),
+    ).toThrow();
   });
 });
 

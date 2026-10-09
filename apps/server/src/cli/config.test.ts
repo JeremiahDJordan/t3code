@@ -39,6 +39,8 @@ const minimalDesktopFlags = (baseDir: string) => ({
   logWebSocketEvents: Option.none<boolean>(),
   tailscaleServeEnabled: Option.none<boolean>(),
   tailscaleServePort: Option.none<number>(),
+  secureChannelPort: Option.none<number>(),
+  secureChannelOrigin: Option.none<string>(),
 });
 
 const encodeDesktopBootstrap = Schema.encodeEffect(Schema.fromJsonString(DesktopBackendBootstrap));
@@ -160,6 +162,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: Option.none<boolean>(),
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
+        secureChannelPort: Option.none(),
+        secureChannelOrigin: Option.none(),
       };
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromEnv({
@@ -204,6 +208,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logWebSocketEvents: Option.none<boolean>(),
         tailscaleServeEnabled: Option.none<boolean>(),
         tailscaleServePort: Option.none<number>(),
+        secureChannelPort: Option.none(),
+        secureChannelOrigin: Option.none(),
       };
       const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromEnv({ env: { T3CODE_DEV_AUTH_TOKEN: secret } }),
@@ -251,6 +257,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -324,6 +332,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.some(true),
           tailscaleServeEnabled: Option.some(true),
           tailscaleServePort: Option.some(8443),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.some("Debug"),
       ).pipe(
@@ -402,6 +412,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.some(false),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -482,6 +494,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -581,6 +595,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -642,6 +658,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.some("Debug"),
       ).pipe(
@@ -718,6 +736,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -789,6 +809,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -838,6 +860,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -878,6 +902,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
         {
@@ -940,6 +966,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -983,6 +1011,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -1028,6 +1058,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -1068,6 +1100,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           logWebSocketEvents: Option.none(),
           tailscaleServeEnabled: Option.none(),
           tailscaleServePort: Option.none(),
+          secureChannelPort: Option.none(),
+          secureChannelOrigin: Option.none(),
         },
         Option.none(),
       ).pipe(
@@ -1100,6 +1134,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     logWebSocketEvents: Option.none<boolean>(),
     tailscaleServeEnabled: Option.none<boolean>(),
     tailscaleServePort: Option.none<number>(),
+    secureChannelPort: Option.none(),
+    secureChannelOrigin: Option.none(),
   });
 
   it.effect(

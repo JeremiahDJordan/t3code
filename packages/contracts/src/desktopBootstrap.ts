@@ -26,6 +26,8 @@ export const DesktopBackendBootstrap = Schema.Struct({
   shellEnvironmentPrepared: Schema.optionalKey(Schema.Boolean),
   tailscaleServeEnabled: Schema.Boolean,
   tailscaleServePort: PortSchema,
+  secureChannelPort: Schema.optionalKey(PortSchema),
+  secureChannelOrigin: Schema.optionalKey(Schema.String),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
   otlpLogsUrl: Schema.optional(Schema.String),

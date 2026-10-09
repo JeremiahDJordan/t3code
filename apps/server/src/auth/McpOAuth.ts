@@ -28,6 +28,7 @@ import { HttpServerRequest } from "effect/http";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
+import * as SecureChannelConnections from "../secureChannel/SecureChannelConnections.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
@@ -260,6 +261,14 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
 
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  // An MCP client paired through a secure channel gets a session that works only through it.
+  const channelConnections = yield* Effect.serviceOption(
+    SecureChannelConnections.SecureChannelConnections,
+  );
+  const channelClientKeyOf = (request: HttpServerRequest.HttpServerRequest) => {
+    const clientKey = Option.getOrUndefined(channelConnections)?.clientKeyOf(request);
+    return clientKey === undefined ? {} : { channelClientKey: clientKey };
+  };
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
   const signingKey = yield* secretStore
@@ -523,6 +532,7 @@ const make = Effect.gen(function* () {
           label: pending.clientName,
           access: pending.access,
           client: deriveAuthClientMetadata({ request }),
+          ...channelClientKeyOf(request),
         })
         .pipe(
           Effect.catch((cause) =>
