@@ -1681,8 +1681,13 @@ const make = Effect.gen(function* () {
           modelSelection: existing.modelSelection,
           runtimeMode: existing.runtimeMode,
           interactionMode: existing.interactionMode,
-          createdBy: existing.createdBy,
-          creationSource: existing.creationSource,
+          // A prompt an agent wrote, or one it moved to another thread or none, is not the user's
+          // words where it now runs: runs dispatch it with this provenance, and Bob's Auto
+          // reviewer quotes only what the user wrote. The user's next edit makes it theirs again.
+          ...((input.prompt !== undefined && input.prompt !== existing.prompt) ||
+          threadId !== existing.threadId
+            ? { createdBy: "agent" as const, creationSource: "mcp" as const }
+            : { createdBy: existing.createdBy, creationSource: existing.creationSource }),
         };
         const { task } = yield* scheduledTasks
           .upsert(upsertInput)

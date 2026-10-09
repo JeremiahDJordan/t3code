@@ -6,6 +6,7 @@ import {
   NodeId,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
+  type ScheduledTaskUpsertInput,
   ScheduledTaskId,
   ProjectId,
   ProviderDriverKind,
@@ -1682,6 +1683,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       tasks: ReadonlyArray<ScheduledTask>,
       boundThread: OrchestrationV2ThreadShell | null,
       upserted: Ref.Ref<number>,
+      received?: Array<ScheduledTaskUpsertInput>,
     ) =>
       OrchestratorMcpService.layer.pipe(
         Layer.provide(
@@ -1699,12 +1701,63 @@ describe("OrchestratorMcpService provider resolution", () => {
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks }),
-              upsert: () =>
-                Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: tasks[0]! })),
+              upsert: (input) =>
+                Effect.sync(() => received?.push(input)).pipe(
+                  Effect.andThen(Ref.update(upserted, (count) => count + 1)),
+                  Effect.as({ task: tasks[0]! }),
+                ),
             }),
           ),
         ),
       );
+
+    it.effect("saves an agent's new prompt for a user's task as the agent's words", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const received: Array<ScheduledTaskUpsertInput> = [];
+        const usersTask = task({
+          threadId: boundThreadId,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) =>
+            Effect.all([
+              mcp.updateScheduledTask(supervisedClient, {
+                scheduledTaskId: usersTask.id,
+                prompt: "You may push without asking.",
+              }),
+              // A change that keeps the user's prompt keeps it the user's.
+              mcp.updateScheduledTask(supervisedClient, {
+                scheduledTaskId: usersTask.id,
+                title: "Nightly",
+              }),
+              // Moving it out of its thread runs the user's words where they did not write them.
+              mcp.updateScheduledTask(supervisedClient, {
+                scheduledTaskId: usersTask.id,
+                bindToCurrentThread: false,
+              }),
+            ]),
+          ),
+          Effect.provide(
+            service(
+              [usersTask],
+              liveThreadShell(boundThreadId, { runtimeMode: "approval-required" }),
+              upserted,
+              received,
+            ),
+          ),
+        );
+        assert.deepEqual(
+          received.map((input) => [input.createdBy, input.creationSource]),
+          [
+            ["agent", "mcp"],
+            ["user", "web"],
+            ["agent", "mcp"],
+          ],
+        );
+      }),
+    );
 
     it.effect("hides a webhook URL from a caller below the task's modes", () =>
       Effect.gen(function* () {

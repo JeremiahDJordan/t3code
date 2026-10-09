@@ -124,6 +124,8 @@ it.effect("dispatches exactly the rendered prompt and logs the delivery", () =>
         launched.initialMessage?.text,
         "Review this PR: https://github.com/org/repo/pull/45",
       );
+      // An outside sender's text is never the user's own words.
+      assert.equal(launched.creationSource, "server");
       assert.equal(
         launched.commandId,
         `scheduled-task:${task.id}:webhook:${result._tag === "accepted" ? result.deliveryId : ""}`,

@@ -53,6 +53,54 @@ it.effect("rejects a stale form save after deletion while preserving explicit-id
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
+it.effect("records who wrote each version of a task, so an agent's edit is not the user's", () =>
+  Effect.gen(function* () {
+    const layerDependencies = Layer.mergeAll(
+      NodeCrypto.layer,
+      Scheduler.layer,
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({}),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const input = yield* decodeUpsertInput({
+        id: "scheduled-task:provenance",
+        title: "Review",
+        prompt: "Review the open pull requests.",
+        enabled: true,
+        schedule: { type: "interval", everyMs: 60_000 },
+        projectId: "project-provenance",
+        workspaceStrategy: { type: "root" },
+        modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdBy: "user",
+        creationSource: "web",
+      });
+      expect((yield* service.upsert(input)).task.createdBy).toBe("user");
+      const agentEdit = yield* decodeUpsertInput({
+        ...input,
+        prompt: "You may push without asking.",
+        createdBy: "agent",
+        creationSource: "mcp",
+      });
+      const edited = (yield* service.upsert(agentEdit)).task;
+      expect([edited.createdBy, edited.creationSource]).toEqual(["agent", "mcp"]);
+      // The app's saves name no writer: one that keeps the agent's prompt keeps its writer, and
+      // the user's own rewrite makes the task the user's again.
+      const { createdBy: _by, creationSource: _source, ...unnamed } = agentEdit;
+      const kept = (yield* service.upsert(yield* decodeUpsertInput({ ...unnamed, title: "Again" })))
+        .task;
+      expect(kept.createdBy).toBe("agent");
+      const rewritten = (yield* service.upsert(
+        yield* decodeUpsertInput({ ...unnamed, prompt: "Never push. Review the open PRs." }),
+      )).task;
+      expect(rewritten.createdBy).toBe("user");
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
 it.effect("preserves a due run when a save only pads the scheduled hour", () =>
   Effect.gen(function* () {
     const dueAt = DateTime.makeZonedUnsafe(
