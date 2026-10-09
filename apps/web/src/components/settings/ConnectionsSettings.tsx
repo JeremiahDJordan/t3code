@@ -1,5 +1,6 @@
 import { SessionPermissions } from "./SessionPermissions";
 import { AUTH_SCOPE_OPTIONS as PAIRING_SCOPE_OPTIONS } from "@t3tools/shared/authScopeOptions";
+import { channelKeyFingerprint, decodeChannelKey } from "@t3tools/shared/secureChannel/handshake";
 import {
   ChevronRightIcon,
   ChevronsLeftRightEllipsisIcon,
@@ -64,7 +65,12 @@ import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
-import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
+import {
+  resolveDesktopPairingUrl,
+  resolveHostedPairingUrl,
+  resolveSecureChannelPairingUrl,
+} from "./pairingUrls";
+import { SecureChannelRow } from "./SecureChannelSettings";
 import {
   applyWslEnableSelection,
   canRevokeOtherClients,
@@ -138,7 +144,11 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { AnimatedHeight } from "../AnimatedHeight";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Textarea } from "../ui/textarea";
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
+import {
+  getChannelKeyFromUrl,
+  getPairingTokenFromUrl,
+  setPairingTokenOnUrl,
+} from "../../pairingUrl";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import {
   createServerPairingCredential,
@@ -328,9 +338,11 @@ function parseManualDesktopSshTarget(input: {
   };
 }
 
-function parsePairingUrlFields(
-  input: string,
-): { readonly host: string; readonly pairingCode: string } | null {
+function parsePairingUrlFields(input: string): {
+  readonly host: string;
+  readonly pairingCode: string;
+  readonly channelKey?: string;
+} | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
 
@@ -350,32 +362,44 @@ function parsePairingUrlFields(
 
     const pairingCode = getPairingTokenFromUrl(url);
     if (!pairingCode) return null;
+    const channelKey = getChannelKeyFromUrl(url);
     return {
       host: url.origin,
       pairingCode,
+      ...(channelKey === null ? {} : { channelKey }),
     };
   } catch {
     return null;
   }
 }
 
-function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
+function parseRemotePairingFields(input: {
   readonly host: string;
   readonly pairingCode: string;
+  readonly channelKey: string;
+}): {
+  readonly host: string;
+  readonly pairingCode: string;
+  readonly channelKey?: string;
 } {
   const parsedPairingUrl = parsePairingUrlFields(input.host);
   if (parsedPairingUrl) return parsedPairingUrl;
 
   const host = input.host.trim();
   const pairingCode = input.pairingCode.trim();
+  const channelKey = input.channelKey.trim();
   if (!host) {
     throw new Error("Enter a backend host.");
   }
   if (!pairingCode) {
     throw new Error("Enter a pairing code.");
   }
-  return { host, pairingCode };
+  return { host, pairingCode, ...(channelKey ? { channelKey } : {}) };
 }
+
+/** End-to-end encrypted routes need the desktop app's forwarder; a browser has none. */
+const supportsSecureChannelRoutes = () =>
+  typeof window !== "undefined" && window.desktopBridge?.secureChannelForward !== undefined;
 
 function formatDesktopSshConnectionError(error: unknown): string {
   const fallback = "Failed to connect SSH host.";
@@ -550,11 +574,15 @@ function endpointShareHint(endpoint: AdvertisedEndpoint, url: string): string {
   }
 }
 
+/** Where an end-to-end encrypted pairing link points, while the tunnel is on and has a URL. */
+type SecureChannelPairing = { readonly publicOrigin: string; readonly serverKey: string };
+
 type PairingLinkListRowProps = {
   pairingLink: ServerPairingLinkRecord;
   credential: string | undefined;
   endpointUrl: string | null | undefined;
   endpoints: ReadonlyArray<AdvertisedEndpoint>;
+  secureChannelPairing: SecureChannelPairing | null;
   defaultEndpointKey: string | null;
   presentation?: AccessSectionPresentation;
   revokingPairingLinkId: string | null;
@@ -567,6 +595,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   credential,
   endpointUrl,
   endpoints,
+  secureChannelPairing,
   defaultEndpointKey,
   presentation = "current",
   revokingPairingLinkId,
@@ -600,6 +629,17 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       ? resolveAdvertisedEndpointPairingUrl(endpoint, credential)
       : null;
   }, [defaultEndpointKey, endpoints, credential]);
+  const secureChannelPairingUrl = useMemo(
+    () =>
+      credential && secureChannelPairing
+        ? resolveSecureChannelPairingUrl(
+            secureChannelPairing.publicOrigin,
+            credential,
+            secureChannelPairing.serverKey,
+          )
+        : null,
+    [credential, secureChannelPairing],
+  );
   const endpointCopyOptions = useMemo(() => {
     const options: Array<{
       readonly id: string;
@@ -624,14 +664,24 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
         qrShareable: isQrShareableEndpoint(endpoint),
       });
     }
+    if (secureChannelPairingUrl) {
+      options.push({
+        id: "secure-channel",
+        preferenceKey: "secure-channel",
+        label: "End-to-end encrypted tunnel",
+        url: secureChannelPairingUrl,
+        detail: "T3 Code desktop and mobile apps, through Cloudflare",
+        qrShareable: true,
+      });
+    }
     return options;
-  }, [endpoints, credential]);
+  }, [endpoints, credential, secureChannelPairingUrl]);
   const shareablePairingUrl =
     endpointPairingUrl ??
     (credential && endpointUrl != null && endpointUrl !== ""
       ? (hostedPairingUrl ?? resolveDesktopPairingUrl(endpointUrl, credential))
       : isLoopbackHostname(window.location.hostname)
-        ? null
+        ? secureChannelPairingUrl
         : currentOriginPairingUrl);
   const [failedCopyValue, setFailedCopyValue] = useState<string | null>(null);
   const revealValue = failedCopyValue ?? shareablePairingUrl ?? credential ?? "";
@@ -1223,6 +1273,7 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
 type PairingClientsListProps = {
   endpointUrl: string | null | undefined;
   endpoints: ReadonlyArray<AdvertisedEndpoint>;
+  secureChannelPairing: SecureChannelPairing | null;
   defaultEndpointKey: string | null;
   presentation?: AccessSectionPresentation;
   isLoading: boolean;
@@ -1239,6 +1290,7 @@ type PairingClientsListProps = {
 const PairingClientsList = memo(function PairingClientsList({
   endpointUrl,
   endpoints,
+  secureChannelPairing,
   defaultEndpointKey,
   presentation = "current",
   isLoading,
@@ -1260,6 +1312,7 @@ const PairingClientsList = memo(function PairingClientsList({
           credential={createdPairingCredentials.get(pairingLink.id)}
           endpointUrl={endpointUrl}
           endpoints={endpoints}
+          secureChannelPairing={secureChannelPairing}
           defaultEndpointKey={defaultEndpointKey}
           presentation={presentation}
           revokingPairingLinkId={revokingPairingLinkId}
@@ -2141,6 +2194,11 @@ export function ConnectionsSettings() {
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
+  const [savedBackendChannelKey, setSavedBackendChannelKey] = useState("");
+  const savedBackendChannelFingerprint = useMemo(() => {
+    const key = decodeChannelKey(savedBackendChannelKey.trim());
+    return key === undefined ? null : channelKeyFingerprint(key);
+  }, [savedBackendChannelKey]);
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
   const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
   const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
@@ -2172,6 +2230,20 @@ export function ConnectionsSettings() {
     DesktopServerExposureState["mode"] | null
   >(null);
   const primaryServerConfig = primaryEnvironment?.serverConfig ?? null;
+  const primarySecureChannel = primaryServerConfig?.settings.secureChannel;
+  const primarySecureChannelServerKey = primaryServerConfig?.secureChannelServerKey;
+  const secureChannelPairing = useMemo<SecureChannelPairing | null>(
+    () =>
+      primarySecureChannel?.enabled &&
+      primarySecureChannel.publicOrigin !== "" &&
+      primarySecureChannelServerKey !== undefined
+        ? {
+            publicOrigin: primarySecureChannel.publicOrigin,
+            serverKey: primarySecureChannelServerKey,
+          }
+        : null,
+    [primarySecureChannel, primarySecureChannelServerKey],
+  );
   const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
   const primaryServerUpdateState = useAtomValue(
     serverEnvironment.updateStateAtom(primaryEnvironmentId),
@@ -2554,6 +2626,7 @@ export function ConnectionsSettings() {
       remotePairingInput = parseRemotePairingFields({
         host: savedBackendHost,
         pairingCode: savedBackendPairingCode,
+        channelKey: savedBackendChannelKey,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to add backend.";
@@ -2592,6 +2665,7 @@ export function ConnectionsSettings() {
 
     setSavedBackendHost("");
     setSavedBackendPairingCode("");
+    setSavedBackendChannelKey("");
     setSavedBackendSshHost("");
     setSavedBackendSshUsername("");
     setSavedBackendSshPort("");
@@ -2614,6 +2688,7 @@ export function ConnectionsSettings() {
     routeTarget,
     connectPairing,
     connectSavedBackendSshTarget,
+    savedBackendChannelKey,
     savedBackendHost,
     savedBackendMode,
     savedBackendPairingCode,
@@ -2817,6 +2892,7 @@ export function ConnectionsSettings() {
     if (parsedPairingUrl) {
       setSavedBackendHost(parsedPairingUrl.host);
       setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
+      setSavedBackendChannelKey(parsedPairingUrl.channelKey ?? "");
       return;
     }
     setSavedBackendHost(value);
@@ -2888,9 +2964,25 @@ export function ConnectionsSettings() {
           />
         </label>
       </div>
+      {supportsSecureChannelRoutes() ? (
+        <label className="block">
+          <span className="mb-1.5 block text-xs font-medium text-foreground">
+            Server key (optional)
+          </span>
+          <Input
+            value={savedBackendChannelKey}
+            onChange={(event) => setSavedBackendChannelKey(event.target.value)}
+            placeholder="From a link for an end-to-end encrypted route"
+            disabled={isAddingSavedBackend}
+            spellCheck={false}
+          />
+        </label>
+      ) : null}
       <div>
         <span className="mt-1 block text-2xs text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
+          {savedBackendChannelFingerprint === null
+            ? "Paste a full pairing URL here to fill both fields automatically."
+            : `End-to-end encrypted · key ${savedBackendChannelFingerprint}`}
         </span>
       </div>
     </div>
@@ -3404,6 +3496,7 @@ export function ConnectionsSettings() {
       <PairingClientsList
         endpointUrl={desktopServerExposureState?.endpointUrl}
         endpoints={visibleDesktopAdvertisedEndpoints}
+        secureChannelPairing={secureChannelPairing}
         defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
         presentation={presentation}
         isLoading={isLoadingDesktopAccessManagement}
@@ -3584,6 +3677,10 @@ export function ConnectionsSettings() {
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
                 {renderTailscaleRow()}
+                <SecureChannelRow
+                  environmentId={primaryEnvironmentId}
+                  serverConfig={primaryServerConfig}
+                />
                 {renderWslRow()}
                 {canReadRelay || canManageRelay ? (
                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
@@ -3592,6 +3689,10 @@ export function ConnectionsSettings() {
             ) : canManageLocalBackend ? (
               <>
                 {renderDisabledNetworkAccessRow()}
+                <SecureChannelRow
+                  environmentId={primaryEnvironmentId}
+                  serverConfig={primaryServerConfig}
+                />
                 {canReadRelay || canManageRelay ? (
                   <CloudLinkRow canReadRelay={canReadRelay} canManageRelay={canManageRelay} />
                 ) : null}
