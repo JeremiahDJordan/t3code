@@ -164,6 +164,44 @@ revoked, the environment says Cloudflare Access rejected it; enter a new one in 
 environment's settings. In a browser, open the hostname itself and sign in to Access; the
 hosted web app cannot reach a server behind Access.
 
+### Cloudflare Tunnel, end-to-end encrypted
+
+The desktop and mobile apps can reach the machine through a Cloudflare Tunnel that carries only
+ciphertext. The tunnel points at a gateway that answers nothing to anyone without a pairing link,
+so the hostname looks like nothing runs there.
+
+1. In **Settings → Connections**, enter the tunnel's public URL under **End-to-end encrypted
+   tunnel**, such as `https://quiet.example.com`, then turn it on. From the command line, start
+   the server with `--secure-channel-port 3774 --secure-channel-origin https://quiet.example.com`
+   instead.
+2. Give the tunnel a public hostname that points at `http://localhost:3774`, the gateway's port,
+   not the port T3 Code serves on. Pick a hostname that says nothing about T3 Code.
+3. Create a pairing link and choose **End-to-end encrypted tunnel** under **Share**, or run:
+
+   ```bash
+   t3 pair --secure-channel --base-url https://quiet.example.com
+   ```
+
+The link carries the server's key, and the app checks every connection against it. When you
+add the environment by hand, enter the server key too and compare its fingerprint with the one
+in **Settings → Connections**. A browser at the hostname gets no answer; use the desktop or
+mobile app. The desktop app keeps its keys for these routes in the system keychain, so on Linux
+it needs one, such as GNOME Keyring or KWallet.
+
+Cloudflare Access is optional here. With it, Cloudflare turns away anyone without the service
+token before they reach your machine. On the phone, turn on **Behind Cloudflare Access** when
+adding the environment, as above; the desktop app doesn't take a service token yet, so leave
+Access off for a hostname it uses.
+
+Revoking a client in **Authorized clients** closes its encrypted connection at once. A session
+revoked with `t3 auth session revoke` can't connect again, but a connection it already has can
+stay open for up to an hour; for a lost or stolen device, restart the server afterwards.
+
+A saved environment keeps the key it was paired with: a pairing link for it with a different
+key, or none, is refused, whatever address the link names and however it's added. It takes
+only encrypted links with its key. To replace the key, run `t3 channel rotate` and restart the
+server, then remove the environment on each device and pair it again.
+
 ### Hosted web app
 
 [app.t3.codes](https://app.t3.codes) needs an HTTPS endpoint. It connects directly
