@@ -5,7 +5,9 @@ import {
   RemoteBackendUrlMissingError,
   RemotePairingTokenMissingError,
   RemotePairingUrlInvalidError,
+  getChannelKeyFromUrl,
   resolveRemotePairingTarget,
+  setPairingTokenOnUrl,
 } from "./remote.ts";
 
 describe("remote", () => {
@@ -19,6 +21,40 @@ describe("remote", () => {
       httpBaseUrl: "https://remote.example.com/",
       wsBaseUrl: "wss://remote.example.com/",
     });
+  });
+
+  it("carries the server's channel key from a link's fragment, or as typed", () => {
+    const key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    expect(
+      resolveRemotePairingTarget({
+        pairingUrl: `https://quiet.example.com/pair#token=pairing-token&sk=${key}`,
+      }),
+    ).toEqual({
+      credential: "pairing-token",
+      httpBaseUrl: "https://quiet.example.com/",
+      wsBaseUrl: "wss://quiet.example.com/",
+      channelKey: key,
+    });
+    expect(
+      resolveRemotePairingTarget({
+        host: "quiet.example.com",
+        pairingCode: "CODE",
+        channelKey: key,
+      }),
+    ).toMatchObject({ channelKey: key });
+  });
+
+  it("writes the channel key beside the token, so old clients still read the token", () => {
+    const url = setPairingTokenOnUrl(
+      new URL("https://quiet.example.com/pair#stale=1"),
+      "CODE",
+      "KEY",
+    );
+    expect(url.hash).toBe("#token=CODE&sk=KEY");
+    expect(getChannelKeyFromUrl(url)).toBe("KEY");
+    expect(setPairingTokenOnUrl(new URL("https://quiet.example.com/pair"), "CODE").hash).toBe(
+      "#token=CODE",
+    );
   });
 
   it("accepts pairing urls that still use a query token", () => {
