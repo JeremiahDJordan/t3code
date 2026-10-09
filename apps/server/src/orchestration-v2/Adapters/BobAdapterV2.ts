@@ -79,6 +79,7 @@ import {
   type BobUserQuote,
 } from "../../provider/acp/bobAutoJudge.ts";
 import {
+  type BobAutoReviewContext,
   type BobPermissionMode,
   type BobRuleSuggestion,
   type BobUserRules,
@@ -1024,6 +1025,9 @@ interface BobRuntimeExtras {
         readonly mode: BobPermissionMode;
         readonly workspace: string | null;
         readonly sandbox: BobSandbox | undefined;
+        /** The home folder, and T3's folders as the sandbox takes them, for the reviewer. */
+        readonly home: string;
+        readonly folders: NonNullable<BobAutoReviewContext["folders"]>;
       }
     | undefined;
   /** The user's rules, outside Full access. */
@@ -1510,7 +1514,10 @@ function wrapBobRuntime(
         });
         const reviewer = `reviewer (${hooks.autoJudge.name})`;
         if (judgement.decision !== "allow") return asks(reviewer, judgement.reason);
-        // A message or a rule that came while the model judged may say otherwise.
+        // A message or a rule that came while the model judged may say otherwise. One written
+        // where the work started reaches this runtime only by a read, so it is read again before
+        // the allow counts; the read bumps the revision every judgement shares.
+        if (requests.delegated !== undefined) yield* readStarted;
         const unchanged = revision() === asked.requests && rules?.revision === asked.rules;
         if (!reviewing() || !unchanged) {
           return asks(reviewer, `allowed, then the request or rules changed: ${judgement.reason}`);
@@ -1848,6 +1855,11 @@ function wrapBobRuntime(
   return wrapped;
 }
 
+/** The temporary folders Bob's commands may write in, as the sandbox and reviewer take them. */
+function bobTemporaryFolders(): ReadonlyArray<string> {
+  return [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp"];
+}
+
 /**
  * The sandbox for a Bob runtime's commands, or none where the host has none or it cannot be set
  * up, in which case the modes answer as without one.
@@ -1869,7 +1881,7 @@ function openBobSandbox(
       stateDir: options.host.paths.stateDir,
       attachmentsDir: options.host.paths.attachmentsDir,
       key: `${options.instanceId}\0${rules.threadId ?? ""}\0${cwd}`,
-      temporaryFolders: [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp"],
+      temporaryFolders: bobTemporaryFolders(),
       searchPath: options.environment.PATH,
       rules: bobUserRules(rules),
     }),
@@ -1991,7 +2003,19 @@ export function makeBobAcpAdapterFlavor(
           terminated,
           mcpAuthorization,
           review:
-            mode === "full-access" ? undefined : { mode, workspace: runtimePolicy.cwd, sandbox },
+            mode === "full-access"
+              ? undefined
+              : {
+                  mode,
+                  workspace: runtimePolicy.cwd,
+                  sandbox,
+                  home: options.environment.HOME ?? NodeOS.homedir(),
+                  folders: {
+                    state: options.host.paths.stateDir,
+                    cache: options.host.paths.providerStatusCacheDir,
+                    temporary: bobTemporaryFolders(),
+                  },
+                },
           rules,
           threadId: input.threadId ?? undefined,
           turns,
