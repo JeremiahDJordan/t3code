@@ -3,7 +3,12 @@ import * as Option from "effect/Option";
 
 import type { ConnectionCatalogEntry } from "./catalog.ts";
 import type { ConnectionTarget, SupervisorConnectionState } from "./model.ts";
-import { connectionRouteId, connectionRoutes, routeHttpBaseUrl } from "./routes.ts";
+import {
+  connectionRouteId,
+  connectionRoutes,
+  isSecureChannelRoute,
+  routeHttpBaseUrl,
+} from "./routes.ts";
 
 export type EnvironmentConnectionPhase =
   | "available"
@@ -95,7 +100,7 @@ export function presentEnvironmentConnection(
 
 /**
  * SSH connections ride a local forward that disappears with the client, so they have no stable
- * address.
+ * address, and an end-to-end encrypted route's public address answers no plain request.
  */
 export function environmentMcpUrl(input: {
   readonly entry: ConnectionCatalogEntry;
@@ -108,6 +113,7 @@ export function environmentMcpUrl(input: {
     (route) => connectionRouteId(route.target) === connectedRouteId,
   );
   for (const route of connectedRoute ? [connectedRoute, ...routes] : routes) {
+    if (isSecureChannelRoute(route)) continue;
     const httpBaseUrl =
       route.target._tag === "RelayConnectionTarget"
         ? (input.relayHttpBaseUrl ?? null)
