@@ -34,6 +34,7 @@ import { ChildProcessSpawner } from "effect/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import { bobDelegatedTaskEnded } from "../bobDelegatedTask.ts";
 import { readBobStartingThread } from "../bobUserMessages.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeBobAdapterV2 } from "../../orchestration-v2/Adapters/BobAdapterV2.ts";
@@ -329,8 +330,12 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
         const activation = yield* ServerActivation;
         yield* Effect.gen(function* () {
           const keeps = tmuxBobInstanceIds(yield* serverSettings.getSettings);
-          const owners: Array<{ readonly threadId: string; readonly providerThreadId: string }> =
-            [];
+          const owners: Array<{
+            readonly threadId: string;
+            readonly providerThreadId: string;
+            readonly relayId: string;
+            readonly sessionId: string;
+          }> = [];
           for (const { relayId, state } of yield* relayHost.scan) {
             const meta = readBobRelayMeta(state);
             if (meta === undefined || !keeps.has(meta.instanceId)) {
@@ -348,12 +353,29 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
               mode: meta.mode,
             });
             if (meta.threadId !== undefined && meta.providerThreadId !== undefined) {
-              owners.push({ threadId: meta.threadId, providerThreadId: meta.providerThreadId });
+              owners.push({
+                threadId: meta.threadId,
+                providerThreadId: meta.providerThreadId,
+                relayId,
+                sessionId: meta.sessionId,
+              });
             }
           }
           yield* Deferred.succeed(scanned, undefined);
           yield* activation ?? Effect.void;
           for (const owner of owners) {
+            // A delegated task's answer was taken when recovery ended its row; finishing its
+            // prompt would answer no one, beside a Retry doing the same work.
+            const ended = Option.isSome(sql)
+              ? yield* bobDelegatedTaskEnded(ThreadId.make(owner.threadId)).pipe(
+                  Effect.provideService(SqlClient.SqlClient, sql.value),
+                )
+              : false;
+            if (ended) {
+              adoptable.delete(owner.sessionId);
+              yield* relayHost.kill(owner.relayId);
+              continue;
+            }
             yield* continuationRequests.offer({
               threadId: ThreadId.make(owner.threadId),
               providerThreadId: ProviderThreadId.make(owner.providerThreadId),
