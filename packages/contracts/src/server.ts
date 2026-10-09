@@ -597,6 +597,11 @@ export const ServerConfig = Schema.Struct({
    * before using it.
    */
   directEndpoints: Schema.optionalKey(ForwardCompatibleArray(ServerDirectEndpoint)),
+  /**
+   * The secure channel's public server key (base64url), for pairing links that carry it. Only
+   * this authenticated config has it; the public descriptor never does.
+   */
+  secureChannelServerKey: Schema.optionalKey(Schema.String),
   observability: ServerObservability,
   settings: ServerSettings,
   shellResumeCompletionMarker: Schema.optionalKey(Schema.Boolean),

@@ -29,6 +29,8 @@ export function formatIssuedPairingCredential(
   options?: {
     readonly json?: boolean;
     readonly baseUrl?: string;
+    /** The server's secure channel key, for a link that pairs end-to-end encrypted. */
+    readonly channelKey?: string;
   },
 ): string {
   const pairUrl =
@@ -36,7 +38,9 @@ export function formatIssuedPairingCredential(
       ? (() => {
           const url = new URL("/pair", options.baseUrl);
           url.searchParams.delete("token");
-          url.hash = new URLSearchParams([["token", credential.credential]]).toString();
+          const hash = new URLSearchParams([["token", credential.credential]]);
+          if (options.channelKey) hash.set("sk", options.channelKey);
+          url.hash = hash.toString();
           return url.toString();
         })()
       : undefined;
