@@ -470,6 +470,34 @@
     "./mcpResponsePayloads": {
       "types": "./src/mcpResponsePayloads.ts",
       "import": "./src/mcpResponsePayloads.ts"
+    },
+    "./secureChannel/channel": {
+      "types": "./src/secureChannel/channel.ts",
+      "import": "./src/secureChannel/channel.ts"
+    },
+    "./secureChannel/connector": {
+      "types": "./src/secureChannel/connector.ts",
+      "import": "./src/secureChannel/connector.ts"
+    },
+    "./secureChannel/frames": {
+      "types": "./src/secureChannel/frames.ts",
+      "import": "./src/secureChannel/frames.ts"
+    },
+    "./secureChannel/handshake": {
+      "types": "./src/secureChannel/handshake.ts",
+      "import": "./src/secureChannel/handshake.ts"
+    },
+    "./secureChannel/link": {
+      "types": "./src/secureChannel/link.ts",
+      "import": "./src/secureChannel/link.ts"
+    },
+    "./secureChannel/nodeForwarder": {
+      "types": "./src/secureChannel/nodeForwarder.ts",
+      "import": "./src/secureChannel/nodeForwarder.ts"
+    },
+    "./secureChannel/noise": {
+      "types": "./src/secureChannel/noise.ts",
+      "import": "./src/secureChannel/noise.ts"
     }
   },
   "scripts": {
@@ -477,6 +505,7 @@
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
+    "@noble/ciphers": "catalog:",
     "@noble/curves": "catalog:",
     "@noble/hashes": "catalog:",
     "@t3tools/contracts": "workspace:*",
