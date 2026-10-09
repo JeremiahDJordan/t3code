@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["T3SecureChannelModule"] },
+  "android": { "modules": ["expo.modules.t3securechannel.T3SecureChannelModule"] }
+}
