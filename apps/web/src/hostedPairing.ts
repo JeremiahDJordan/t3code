@@ -1,11 +1,16 @@
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
 
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
+import { getChannelKeyFromUrl, getPairingTokenFromUrl, setPairingTokenOnUrl } from "./pairingUrl";
 
 export interface HostedPairingRequest {
   readonly host: string;
   readonly token: string;
   readonly label: string;
+  /**
+   * The server key of an end-to-end encrypted route. Kept so pairing refuses in a browser,
+   * which has no forwarder, instead of sending the code to the host in plain.
+   */
+  readonly channelKey?: string;
 }
 
 export type HostedAppChannel = "latest" | "nightly";
@@ -54,6 +59,7 @@ export function readHostedPairingRequest(url: URL = new URL(window.location.href
   const host = url.searchParams.get("host")?.trim() ?? "";
   const token = getPairingTokenFromUrl(url)?.trim() ?? "";
   const label = url.searchParams.get("label")?.trim() ?? "";
+  const channelKey = getChannelKeyFromUrl(url);
 
   if (!host || !token) {
     return null;
@@ -63,6 +69,7 @@ export function readHostedPairingRequest(url: URL = new URL(window.location.href
     host,
     token,
     label,
+    ...(channelKey === null ? {} : { channelKey }),
   } satisfies HostedPairingRequest;
 }
 

@@ -859,6 +859,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     localBackendManagementOnly: true,
   },
   {
+    id: "encrypted-tunnel",
+    title: "End-to-end encrypted tunnel",
+    to: "/settings/connections",
+    targetId: "connections-environment",
+    searchTerms: ["cloudflare tunnel cloudflared gateway remote private hostname ciphertext"],
+    localBackendManagementOnly: true,
+  },
+  {
     id: "wsl-backend",
     title: "WSL backend",
     to: "/settings/connections",

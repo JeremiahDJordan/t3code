@@ -24,6 +24,19 @@ describe("hostedPairing", () => {
     expect(hasHostedPairingRequest(url)).toBe(true);
   });
 
+  it("keeps an encrypted route's server key, so pairing refuses instead of going plain", () => {
+    const url = new URL(
+      "https://app.t3.codes/pair?host=https://quiet.example.com#token=ABCD&sk=KEY",
+    );
+
+    expect(readHostedPairingRequest(url)).toEqual({
+      host: "https://quiet.example.com",
+      token: "ABCD",
+      label: "",
+      channelKey: "KEY",
+    });
+  });
+
   it("prefers hash tokens so generated hosted links do not put credentials in search params", () => {
     vi.stubEnv("VITE_HOSTED_APP_URL", "https://preview.t3.codes");
 

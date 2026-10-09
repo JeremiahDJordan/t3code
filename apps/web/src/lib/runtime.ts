@@ -3,6 +3,10 @@ import type * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Socket from "effect/socket/Socket";
 
+import {
+  isSecureChannelHost,
+  SecureChannelRequiredError,
+} from "@t3tools/client-runtime/connection";
 import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
 import * as RelayTracing from "@t3tools/shared/relayTracing";
 import * as PrimaryEnvironmentHttpClient from "../environments/primary/httpClient";
@@ -12,12 +16,28 @@ import * as Dpop from "../cloud/dpop";
 import * as ManagedRelayLayer from "../cloud/managedRelayLayer";
 import { resolveCloudPublicConfig, resolveRelayTracingConfig } from "../cloud/publicConfig";
 import * as ClientTracer from "../observability/clientTracer";
+import { layerSecureChannelForwarder } from "../connection/secureChannel";
 
 function configuredRelayUrl(): string {
   return resolveCloudPublicConfig().relayUrl ?? "http://relay.invalid";
 }
 
-const layerHttpClient = layerRemoteHttpClient((input, init) => globalThis.fetch(input, init));
+// An encrypted route is used through its local forwarder; its own host gets nothing in plain.
+const layerHttpClient = layerRemoteHttpClient((input, init) => {
+  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  return isSecureChannelHost(url)
+    ? Promise.reject(new SecureChannelRequiredError(url))
+    : globalThis.fetch(input, init);
+});
+const layerWebSocketConstructor = Layer.succeed(Socket.WebSocketConstructor)((url, options) => {
+  if (isSecureChannelHost(url)) throw new SecureChannelRequiredError(url);
+  if (options !== undefined && typeof options !== "string" && !Array.isArray(options)) {
+    throw new TypeError(
+      "WebSocket client options are not supported by the global WebSocket constructor",
+    );
+  }
+  return new globalThis.WebSocket(url, options);
+});
 const layerRelayTracing = RelayTracing.layer(resolveRelayTracingConfig(), {
   serviceName: "t3code-web",
   serviceVersion: import.meta.env.APP_VERSION,
@@ -28,7 +48,8 @@ const layerRelayTracing = RelayTracing.layer(resolveRelayTracingConfig(), {
 type RuntimeLayerSource =
   | typeof layerHttpClient
   | typeof Dpop.layer
-  | typeof Socket.layerWebSocketConstructorGlobal
+  | typeof layerWebSocketConstructor
+  | typeof layerSecureChannelForwarder
   | typeof layerRelayTracing
   | typeof ClientTracer.layer
   | ReturnType<typeof ManagedRelayLayer.layer>;
@@ -57,7 +78,8 @@ export function __setPrimaryHttpRunnerForTests(runner?: PrimaryHttpEffectRunner)
 const layerRuntime = Layer.mergeAll(
   layerHttpClient,
   Dpop.layer,
-  Socket.layerWebSocketConstructorGlobal,
+  layerWebSocketConstructor,
+  layerSecureChannelForwarder,
   ClientTracer.layer,
   layerRelayTracing,
   ManagedRelayLayer.layer(configuredRelayUrl()).pipe(

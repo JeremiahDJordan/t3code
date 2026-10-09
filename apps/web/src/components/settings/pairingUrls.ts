@@ -18,3 +18,14 @@ export function resolveHostedPairingUrl(endpointUrl: string, credential: string)
     token: credential,
   });
 }
+
+/** A pairing link for the end-to-end encrypted tunnel, carrying the server key it pins. */
+export function resolveSecureChannelPairingUrl(
+  publicOrigin: string,
+  credential: string,
+  serverKey: string,
+): string {
+  return setPairingTokenOnUrl(new URL("/pair", publicOrigin), credential, serverKey).toString();
+}
+
+export { parseChannelOrigin as parseSecureChannelOrigin } from "@t3tools/shared/secureChannel/handshake";
