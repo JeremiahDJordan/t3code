@@ -679,7 +679,7 @@ export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   bindToCurrentThread: Schema.optional(
     Schema.Boolean.annotate({
       description:
-        "True (default) posts each run into this thread; false creates a fresh top-level thread per run.",
+        "True (default in this thread's project) posts each run into this thread; false creates a fresh top-level thread per run. A delegated task's thread defaults to false and refuses true.",
     }),
   ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
