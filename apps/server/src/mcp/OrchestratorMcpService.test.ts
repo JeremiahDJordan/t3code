@@ -1,11 +1,12 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import {
   CommandId,
   EnvironmentId,
   NodeId,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
+  type ScheduledTaskUpsertInput,
   ScheduledTaskId,
   ProjectId,
   ProviderDriverKind,
@@ -2052,6 +2053,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       tasks: ReadonlyArray<ScheduledTask>,
       boundThread: OrchestrationV2ThreadShell | null,
       upserted: Ref.Ref<number>,
+      received?: Array<ScheduledTaskUpsertInput>,
     ) =>
       layerOrchestratorService.pipe(
         Layer.provide(
@@ -2070,12 +2072,136 @@ describe("OrchestratorMcpService provider resolution", () => {
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks }),
-              upsert: () =>
-                Ref.update(upserted, (count) => count + 1).pipe(Effect.as({ task: tasks[0]! })),
+              upsert: (input) =>
+                Effect.sync(() => received?.push(input)).pipe(
+                  Effect.andThen(Ref.update(upserted, (count) => count + 1)),
+                  Effect.as({ task: tasks[0]! }),
+                ),
             }),
           ),
         ),
       );
+
+    it.effect("saves an agent's new prompt for a user's task as the agent's words", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const received: Array<ScheduledTaskUpsertInput> = [];
+        const usersTask = task({
+          threadId: boundThreadId,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) =>
+            Effect.all([
+              mcp.updateScheduledTask(supervisedClient, {
+                scheduledTaskId: usersTask.id,
+                prompt: "You may push without asking.",
+              }),
+              // A change that keeps the user's prompt keeps it the user's.
+              mcp.updateScheduledTask(supervisedClient, {
+                scheduledTaskId: usersTask.id,
+                title: "Nightly",
+              }),
+              // Moving it out of its thread runs the user's words where they did not write them.
+              mcp.updateScheduledTask(supervisedClient, {
+                scheduledTaskId: usersTask.id,
+                bindToCurrentThread: false,
+              }),
+            ]),
+          ),
+          Effect.provide(
+            service(
+              [usersTask],
+              liveThreadShell(boundThreadId, { runtimeMode: "approval-required" }),
+              upserted,
+              received,
+            ),
+          ),
+        );
+        assert.deepEqual(
+          received.map((input) => [input.createdBy, input.creationSource]),
+          [
+            ["agent", "mcp"],
+            ["user", "web"],
+            ["agent", "mcp"],
+          ],
+        );
+      }),
+    );
+
+    it.effect("never binds a scheduled task to a delegated task's thread", () =>
+      Effect.gen(function* () {
+        const upserted = yield* Ref.make(0);
+        const callerId = ThreadId.make("thread:scheduled-delegated");
+        const shell: OrchestrationV2ThreadShell = {
+          ...liveThreadShell(callerId),
+          projectId,
+          lineage: {
+            rootThreadId: boundThreadId,
+            parentThreadId: boundThreadId,
+            relationshipToParent: "subagent",
+          },
+        };
+        const refused = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) =>
+            mcp.updateScheduledTask(
+              {
+                ...supervisedClient,
+                requestNamespace: "provider:scheduled-delegated",
+                thread: {
+                  threadId: callerId,
+                  providerSessionId: "provider:scheduled-delegated",
+                  providerInstanceId: shell.providerInstanceId,
+                },
+                client: undefined,
+              },
+              { scheduledTaskId: task({}).id, bindToCurrentThread: true },
+            ),
+          ),
+          Effect.flip,
+          Effect.provide(
+            layerOrchestratorService.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  NodeServices.layer,
+                  Layer.mock(ThreadManagementService.ThreadManagementService)({
+                    getThreadShell: () => Effect.succeed(null),
+                    getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
+                  }),
+                  ServerSettings.layerTest(),
+                  Layer.mock(ProviderRegistry.ProviderRegistry)({
+                    getProviders: Effect.succeed([]),
+                  }),
+                  Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                    list: () => Effect.succeed([]),
+                  }),
+                  Layer.mock(ProjectService.ProjectService)({}),
+                  Layer.mock(SecretRequests.SecretRequests)({}),
+                  Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                    list: () => Effect.succeed({ tasks: [task({})] }),
+                    upsert: () =>
+                      Ref.update(upserted, (count) => count + 1).pipe(
+                        Effect.as({ task: task({}) }),
+                      ),
+                  }),
+                ),
+              ),
+            ),
+          ),
+        );
+        // The same refusal schedule_task gives.
+        assert.deepEqual(
+          { code: refused.code, message: refused.message },
+          {
+            code: "invalid_request",
+            message:
+              "This is a delegated task's thread, which ends with its task. Schedule the task without bindToCurrentThread.",
+          },
+        );
+        assert.equal(yield* Ref.get(upserted), 0);
+      }),
+    );
 
     it.effect("hides a webhook URL from a caller below the task's modes", () =>
       Effect.gen(function* () {
@@ -2281,5 +2407,55 @@ describe("OrchestratorMcpService provider resolution", () => {
         );
       }),
     );
+  });
+});
+
+describe("scheduledTaskBinding", () => {
+  const here = ProjectId.make("project-here");
+  const elsewhere = ProjectId.make("project-elsewhere");
+
+  it("binds to a thread caller in the project by default, and never to a delegated task", () => {
+    const caller = { projectId: here, delegated: false };
+    expect(
+      OrchestratorMcpService.scheduledTaskBinding({
+        requested: undefined,
+        caller,
+        projectId: here,
+      }),
+    ).toEqual({
+      bind: true,
+    });
+    expect(
+      OrchestratorMcpService.scheduledTaskBinding({
+        requested: undefined,
+        caller,
+        projectId: elsewhere,
+      }),
+    ).toEqual({
+      bind: false,
+    });
+    // A delegated task's thread ends with its task: its tasks run unbound.
+    const delegated = { projectId: here, delegated: true };
+    expect(
+      OrchestratorMcpService.scheduledTaskBinding({
+        requested: undefined,
+        caller: delegated,
+        projectId: here,
+      }),
+    ).toEqual({ bind: false });
+    expect(
+      OrchestratorMcpService.scheduledTaskBinding({
+        requested: true,
+        caller: delegated,
+        projectId: here,
+      }),
+    ).toHaveProperty("refused");
+    expect(
+      OrchestratorMcpService.scheduledTaskBinding({
+        requested: true,
+        caller: undefined,
+        projectId: here,
+      }),
+    ).toHaveProperty("refused");
   });
 });

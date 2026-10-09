@@ -10,12 +10,16 @@
  * @module orchestration-v2/Adapters/BobAdapterV2
  */
 import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 
 import {
   type BobAuthMethod,
   type BobRule,
   type BobRuleScope,
   type BobSettings,
+  type ChatAttachment,
+  type ChatFileAttachment,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   type ProjectId,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
@@ -89,6 +93,7 @@ import {
   makeBobSandbox,
 } from "../../provider/acp/bobSandbox.ts";
 import { bobBudgetResetsAt } from "../../provider/bobUsageLimits.ts";
+import { isUserWritten, type BobStartingThread } from "../../provider/bobUserMessages.ts";
 import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { TaskTranscript } from "../../provider/taskTranscript.ts";
@@ -111,21 +116,6 @@ export const BOB_EMPTY_REPLY_MESSAGE = "Bob ended its turn without replying.";
 const BOB_EMPTY_REPLY_MARKER = "t3/bob-empty-reply";
 /** How many of the latest messages to Bob Auto's reviewer judges a call against. */
 const BOB_AUTO_REVIEW_REQUESTS = 6;
-/**
- * Whether the user wrote a message, rather than the server on their behalf, such as the "go on"
- * after a usage limit lifts.
- */
-function isUserWritten(message: {
-  readonly createdBy: string;
-  readonly creationSource: string;
-}): boolean {
-  return (
-    message.createdBy === "user" &&
-    message.creationSource !== "server" &&
-    message.creationSource !== "provider"
-  );
-}
-
 const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
 
 const BobProviderCapabilitiesV2 = {
@@ -463,6 +453,13 @@ export interface BobAdapterV2Hooks {
   readonly autoJudge?: BobAutoJudge | undefined;
   /** Keeps the reviewer open while a Bob runtime, which outlives a settings change, runs. */
   readonly holdAutoJudge?: Effect.Effect<void, never, Scope.Scope> | undefined;
+  /**
+   * The thread delegated work started in, from the agent's parent, and what the user wrote there,
+   * or undefined when they cannot be read: the restrictions and permissions the agent works under.
+   */
+  readonly readStartingThread?: (
+    parentThreadId: ThreadId,
+  ) => Effect.Effect<BobStartingThread | undefined>;
 }
 
 /**
@@ -496,7 +493,7 @@ interface BobRuntimeState {
   /** Whether a prompt is with Bob, which a steer can interrupt. */
   prompting: boolean;
   /** Messages to steer the running prompt with, sent together as Bob's next prompt. */
-  readonly steers: Array<string>;
+  readonly steers: Array<BobSteer>;
   /** Whether the running prompt was cancelled for the waiting steers. */
   steerCancelled: boolean;
   /** The user stopped the running prompt, which sends Bob nothing more in this turn. */
@@ -518,6 +515,93 @@ interface BobRuntimeState {
 
 const bobRuntimeStates = new WeakMap<object, BobRuntimeState>();
 
+/**
+ * A message steering Bob's running prompt, its attached text files, and their text. The relay
+ * keeps the files rather than their text, which a T3 that takes Bob over reads again.
+ */
+interface BobSteer {
+  readonly text: string;
+  readonly attachments: ReadonlyArray<ChatFileAttachment>;
+  readonly resources: ReadonlyArray<EffectAcpSchema.ContentBlock>;
+}
+
+/** MIME types Bob is given the text of, besides `text/*`, `+json` and `+xml`. */
+const BOB_TEXT_MIME_TYPES = new Set([
+  "application/json",
+  "application/xml",
+  "application/javascript",
+  "application/typescript",
+  "application/yaml",
+  "application/x-yaml",
+  "application/toml",
+  "application/sql",
+  "application/graphql",
+  "application/x-sh",
+]);
+
+function isBobTextAttachment(attachment: ChatAttachment): attachment is ChatFileAttachment {
+  if (attachment.type !== "file") return false;
+  const mimeType = (attachment.mimeType.toLowerCase().split(";", 1)[0] ?? "").trim();
+  return (
+    mimeType.startsWith("text/") ||
+    mimeType.endsWith("+json") ||
+    mimeType.endsWith("+xml") ||
+    BOB_TEXT_MIME_TYPES.has(mimeType)
+  );
+}
+
+/**
+ * The text of a message's text attachments, as ACP `resource` blocks. Bob 2.0.6 refuses any tool
+ * outside the workspace, T3's attachments folder included, so the path line T3 adds for every
+ * attachment leaves Bob unable to open the file; pasted text goes inline too, since Bob cannot read
+ * it later either. The texts together stay within the input cap. An attachment past it, unreadable
+ * or not UTF-8 keeps only its path line, as does any file that is not text.
+ */
+function bobAttachmentResources(
+  attachments: ReadonlyArray<ChatAttachment>,
+  resolveAttachmentPath: ProviderHost.ProviderHost["Service"]["resolveAttachmentPath"],
+  fileSystem: FileSystem.FileSystem,
+): Effect.Effect<ReadonlyArray<EffectAcpSchema.ContentBlock>> {
+  return Effect.gen(function* () {
+    const blocks: Array<EffectAcpSchema.ContentBlock> = [];
+    let room = PROVIDER_SEND_TURN_MAX_INPUT_CHARS;
+    for (const attachment of attachments) {
+      if (!isBobTextAttachment(attachment)) continue;
+      const path = resolveAttachmentPath(attachment);
+      // UTF-8 takes at most three bytes a character, so a larger file cannot fit.
+      if (path === null || attachment.sizeBytes > room * 3) continue;
+      const text = yield* fileSystem.readFile(path).pipe(
+        Effect.flatMap((bytes) =>
+          Effect.try(() => new TextDecoder("utf-8", { fatal: true }).decode(bytes)),
+        ),
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (text === undefined || text.length > room) continue;
+      room -= text.length;
+      blocks.push({
+        type: "resource",
+        resource: { uri: NodeURL.pathToFileURL(path).href, mimeType: attachment.mimeType, text },
+      });
+    }
+    return blocks;
+  });
+}
+
+/** Reads the text of a message's attached text files, as `bobAttachmentResources` does. */
+type BobAttachmentResources = (
+  attachments: ReadonlyArray<ChatAttachment>,
+) => Effect.Effect<ReadonlyArray<EffectAcpSchema.ContentBlock>>;
+
+/** `prompt` with `resources` after its first text block, the message they were attached to. */
+function withBobResources(
+  prompt: ReadonlyArray<EffectAcpSchema.ContentBlock>,
+  resources: ReadonlyArray<EffectAcpSchema.ContentBlock>,
+): ReadonlyArray<EffectAcpSchema.ContentBlock> {
+  if (resources.length === 0) return prompt;
+  const at = prompt.findIndex((block) => block.type === "text") + 1;
+  return [...prompt.slice(0, at), ...resources, ...prompt.slice(at)];
+}
+
 /** What a Bob session's next prompt does with a prompt Bob kept going while T3 restarted. */
 interface BobTurnContext {
   /** The thread and project the turn belongs to, whose rules Bob's calls are answered by. */
@@ -525,8 +609,17 @@ interface BobTurnContext {
   readonly projectId: ProjectId;
   /** The turn's message as Bob gets it, when the user wrote it, attachments included. */
   readonly userRequest: string | undefined;
+  /** The text of the message's attached text files, which Bob gets beside the message. */
+  readonly resources: ReadonlyArray<EffectAcpSchema.ContentBlock>;
   /** What the user typed, without attachments, which Auto's reviewer reads and quotes. */
   readonly userText: string | undefined;
+  /**
+   * The task another agent delegated to the thread, when this turn starts it: Auto's reviewer
+   * judges by it but never quotes it, so nothing in it forbids or allows anything.
+   */
+  readonly delegatedTask: string | undefined;
+  /** The thread that delegated the task, from which the thread the work started in is found. */
+  readonly delegatedFrom: ThreadId | undefined;
   /** The thread picked to be asked about every call left to Auto's reviewer. */
   readonly asksAboutNetwork: boolean;
   /** A run T3 started to finish the prompt Bob kept going while T3 restarted: never prompts Bob. */
@@ -544,6 +637,8 @@ interface BobThreadTurns {
   readonly projects: Map<string, ProjectId>;
   /** What the user asked lately, which a runtime started for the thread keeps reading. */
   readonly requests: Map<string, BobUserRequests>;
+  /** What the user wrote in threads delegated work started in, by thread id, quoted once. */
+  readonly started: Map<string, BobStartedRequests>;
 }
 
 /**
@@ -564,6 +659,20 @@ interface BobUserMessage {
 interface BobUserRequests {
   readonly messages: Array<BobUserMessage>;
   revision: number;
+  /**
+   * Set when the thread works on a task another agent delegated: its messages are that task, and
+   * the user's words come from the thread the work started in.
+   */
+  delegated?: {
+    readonly from: ThreadId | undefined;
+    startedIn: ThreadId | undefined;
+    unreadable: boolean;
+  };
+}
+
+/** What the user wrote in a thread delegated work started in, and the messages read so far, by id. */
+interface BobStartedRequests extends BobUserRequests {
+  readonly read: Set<string>;
 }
 
 /**
@@ -580,8 +689,13 @@ const BOB_REQUEST_THREADS = 100;
 const quoted = (quotes: ReadonlyArray<BobUserQuote>, kind: BobUserQuote["kind"]) =>
   quotes.filter((quote) => quote.kind === kind).map((quote) => quote.text);
 
-/** Forgets what the reviewer no longer needs, keeping the latest messages whole. */
-function trimBobUserRequests(requests: BobUserRequests): void {
+/**
+ * Forgets what the reviewer no longer needs, keeping the latest messages whole. The messages of a
+ * thread delegated work started in skip the cap on unquoted text: they arrive together, at most
+ * a read's worth, and the reviewer sees them only as quotes, so one dropped before it is quoted
+ * would lose its restriction for good.
+ */
+function trimBobUserRequests(requests: BobUserRequests, keepUnquoted = false): void {
   const latest = requests.messages.length - BOB_AUTO_REVIEW_REQUESTS;
   let quotes = 0;
   let unquoted = 0;
@@ -591,7 +705,7 @@ function trimBobUserRequests(requests: BobUserRequests): void {
     if (at < latest) {
       if (message.quotes === undefined) {
         unquoted += message.text.length;
-        if (unquoted > BOB_UNQUOTED_CHARACTERS) continue;
+        if (unquoted > BOB_UNQUOTED_CHARACTERS && !keepUnquoted) continue;
       } else {
         if (message.quotes.length === 0 || quotes >= BOB_STANDING_RESTRICTIONS) continue;
         message.text = "";
@@ -627,7 +741,24 @@ const makeBobThreadTurns = (): BobThreadTurns => ({
   next: new Map(),
   projects: new Map(),
   requests: new Map(),
+  started: new Map(),
 });
+
+/** What the user wrote in the thread `threadId`, kept for the least recently served threads. */
+function startedRequestsOf(turns: BobThreadTurns, threadId: ThreadId): BobStartedRequests {
+  const started = turns.started.get(threadId) ?? {
+    messages: [],
+    revision: 0,
+    read: new Set<string>(),
+  };
+  turns.started.delete(threadId);
+  turns.started.set(threadId, started);
+  for (const oldest of turns.started.keys()) {
+    if (turns.started.size <= BOB_REQUEST_THREADS) break;
+    turns.started.delete(oldest);
+  }
+  return started;
+}
 
 /** How Bob's session wrapper reaches the runtime of a Bob session, by Bob's task id. */
 interface BobSessionControl {
@@ -635,8 +766,8 @@ interface BobSessionControl {
    * Steers the running prompt with a message, which Auto's reviewer reads when the user wrote it;
    * false when no prompt is with Bob.
    */
-  /** Steers the running prompt with `text`; `userText` is what the user typed, if they wrote it. */
-  readonly steer: (text: string, userText: string | undefined) => Effect.Effect<boolean>;
+  /** Steers the running prompt with `steer`; `userText` is what the user typed, if they wrote it. */
+  readonly steer: (steer: BobSteer, userText: string | undefined) => Effect.Effect<boolean>;
   /** Tells a relay whose thread its Bob works for, so a T3 that restarts mid-turn finds it. */
   readonly describe: (owner: {
     readonly threadId: string;
@@ -902,6 +1033,8 @@ interface BobRuntimeExtras {
   readonly turns?: BobThreadTurns | undefined;
   /** The runtime's scope, which owns its work apart from the turn. */
   readonly scope?: Scope.Scope | undefined;
+  /** The text of attached text files, for steers a T3 before this one kept in the relay. */
+  readonly attachmentResources?: BobAttachmentResources | undefined;
 }
 
 /**
@@ -924,6 +1057,7 @@ function wrapBobRuntime(
     threadId,
     turns = makeBobThreadTurns(),
     scope,
+    attachmentResources = () => Effect.succeed([]),
   }: BobRuntimeExtras = {},
 ): AcpSessionRuntime.AcpSessionRuntime["Service"] {
   const state: BobRuntimeState = {
@@ -950,6 +1084,61 @@ function wrapBobRuntime(
       return quoteRestrictions;
     });
   /**
+   * Keeps the task another agent delegated to this thread, which the reviewer judges calls by
+   * but never quotes, and reads what the user wrote in the thread the work started in.
+   */
+  const rememberTask = (task: string, from: ThreadId | undefined) =>
+    Effect.suspend(() => {
+      const requests = state.requests;
+      // Unreadable until read: with no way to read the user's words, the task's calls ask.
+      requests.delegated = { from, startedIn: undefined, unreadable: from !== undefined };
+      if (task) {
+        requests.revision += 1;
+        requests.messages.push({ text: task, quotes: [], quoting: undefined });
+        trimBobUserRequests(requests);
+      }
+      return readStarted;
+    });
+  /**
+   * Adds what the user wrote since the last read in the thread the delegated work started in,
+   * then quotes it: its restrictions and permissions are the ones the task works under.
+   */
+  const readStarted = Effect.suspend(() => {
+    const delegated = state.requests.delegated;
+    const read = hooks.readStartingThread;
+    if (delegated?.from === undefined || read === undefined) return Effect.void;
+    return read(delegated.from).pipe(
+      Effect.flatMap((starting) =>
+        Effect.suspend(() => {
+          // A starting thread where the user wrote nothing, such as an agent's fork or a thread
+          // an agent created, gives no restrictions to keep: the task's calls ask, as a thread
+          // the user never wrote in does.
+          delegated.unreadable = starting === undefined || starting.messages.length === 0;
+          if (starting === undefined || starting.messages.length === 0) {
+            state.requests.revision += 1;
+            return Effect.void;
+          }
+          delegated.startedIn = starting.threadId;
+          const started = startedRequestsOf(turns, starting.threadId);
+          let added = false;
+          for (const message of starting.messages) {
+            if (started.read.has(message.id)) continue;
+            started.read.add(message.id);
+            const text = message.text.trim();
+            if (!text) continue;
+            started.messages.push({ text, quotes: undefined, quoting: undefined });
+            added = true;
+          }
+          if (added) {
+            started.revision += 1;
+            trimBobUserRequests(started, true);
+          }
+          return quoteRestrictions;
+        }),
+      ),
+    );
+  });
+  /**
    * In Auto, while the thread lets the reviewer decide, quotes what the messages not quoted yet
    * forbid or allow, newest first, apart from the turn and within the runtime's life; nothing else
    * sends the user's messages to the reviewer. At the first that fails the rest wait for the next
@@ -957,7 +1146,13 @@ function wrapBobRuntime(
    * what the reviewer judges by.
    */
   const quoteRestrictions = Effect.suspend(() => {
-    const requests = state.requests;
+    const startedIn = state.requests.delegated?.startedIn;
+    const sets = [
+      ...(startedIn === undefined
+        ? []
+        : [{ requests: startedRequestsOf(turns, startedIn), from: startedIn, started: true }]),
+      { requests: state.requests, from: threadId, started: false },
+    ];
     const extract = hooks.autoJudge?.extract;
     if (
       extract === undefined ||
@@ -967,15 +1162,18 @@ function wrapBobRuntime(
     ) {
       return Effect.void;
     }
-    const idle = requests.messages
-      .filter((message) => message.quotes === undefined && message.quoting === undefined)
-      .toReversed();
+    const idle = sets.flatMap(({ requests, from, started }) =>
+      requests.messages
+        .filter((message) => message.quotes === undefined && message.quoting === undefined)
+        .map((message) => ({ message, requests, from, started }))
+        .toReversed(),
+    );
     if (idle.length === 0) return Effect.void;
     return Effect.gen(function* () {
       const quoting = yield* Deferred.make<void>();
-      for (const message of idle) message.quoting = quoting;
+      for (const { message } of idle) message.quoting = quoting;
       yield* Effect.gen(function* () {
-        for (const message of idle) {
+        for (const { message, requests, from, started } of idle) {
           const quotes = yield* extract(message.text);
           // What the reviewer took from each message, in the trace file for the Auto audit.
           yield* Effect.logInfo(
@@ -985,7 +1183,7 @@ function wrapBobRuntime(
           ).pipe(
             Effect.withSpan("bob.auto.quote", {
               attributes: {
-                "bob.thread": threadId ?? "",
+                "bob.thread": from ?? "",
                 "bob.reviewer": hooks.autoJudge?.name ?? "",
                 "bob.characters": message.text.length,
                 "bob.quoted": quotes !== undefined,
@@ -1002,12 +1200,12 @@ function wrapBobRuntime(
           message.quotes = quotes;
           message.quoting = undefined;
           if (quotes.length > 0) requests.revision += 1;
-          trimBobUserRequests(requests);
+          trimBobUserRequests(requests, started);
         }
       }).pipe(
         Effect.ensuring(
           Effect.sync(() => {
-            for (const message of idle) {
+            for (const { message } of idle) {
               if (message.quoting === quoting) message.quoting = undefined;
             }
           }).pipe(Effect.andThen(Deferred.succeed(quoting, undefined))),
@@ -1039,16 +1237,32 @@ function wrapBobRuntime(
       return Effect.void;
     }).pipe(Effect.forkDetach, Effect.asVoid);
   });
-  /** Keeps the waiting steers in the relay, so a T3 that takes Bob's prompt over sends them. */
+  /**
+   * Keeps the waiting steers in the relay, so a T3 that takes Bob's prompt over sends them; their
+   * attached files go as references, whose text that T3 reads again.
+   */
   const saveSteers = link
-    ? Effect.suspend(() => link.setMeta({ steers: [...state.steers] }))
+    ? Effect.suspend(() =>
+        link.setMeta({
+          steers: state.steers.map(({ text, attachments }) => ({ text, attachments })),
+        }),
+      )
     : Effect.void;
   /** Sends the waiting steers as Bob's next prompt until none wait; the relay drops them then. */
-  const promptSteers = (payload: Parameters<typeof runtime.prompt>[0], steers: Array<string>) =>
+  const promptSteers = (
+    payload: Parameters<typeof runtime.prompt>[0],
+    steers: ReadonlyArray<BobSteer>,
+  ) =>
     Effect.suspend(() => {
       state.openTools.clear();
       state.steerCancelled = false;
-      return runtime.prompt({ ...payload, prompt: [{ type: "text", text: steers.join("\n\n") }] });
+      return runtime.prompt({
+        ...payload,
+        prompt: [
+          { type: "text", text: steers.map((steer) => steer.text).join("\n\n") },
+          ...steers.flatMap((steer) => steer.resources),
+        ],
+      });
     });
   const sendSteers = (
     payload: Parameters<typeof runtime.prompt>[0],
@@ -1063,10 +1277,10 @@ function wrapBobRuntime(
       return result;
     });
   const control: BobSessionControl = {
-    steer: (text, userText) =>
+    steer: (steer, userText) =>
       Effect.suspend(() => {
         if (!state.prompting) return Effect.succeed(false);
-        state.steers.push(text);
+        state.steers.push(steer);
         return (userText === undefined ? Effect.void : remember(userText)).pipe(
           Effect.andThen(saveSteers),
           Effect.andThen(interruptForSteer),
@@ -1248,36 +1462,56 @@ function wrapBobRuntime(
         if (state.requests.messages.length === 0) return asks("rules", "no message from the user");
         // Restrictions being quoted are waited for, so a long message does not make its turn's
         // calls ask. A message still not quoted is judged by only while it is shown whole; one
-        // that left the latest messages unquoted asks, and is quoted again meanwhile.
+        // that left the latest messages unquoted asks, and is quoted again meanwhile. A delegated
+        // task works under what the user wrote where the work started, which the reviewer sees
+        // only as quotes, so all of it must be quoted.
         const requests = state.requests;
+        // What the user wrote where the work started since the turn began binds this call too.
+        if (requests.delegated !== undefined) yield* readStarted;
+        const startedIn = requests.delegated?.startedIn;
+        const started = startedIn === undefined ? undefined : startedRequestsOf(turns, startedIn);
+        if (requests.delegated?.unreadable) {
+          return asks("rules", "the user's messages where the work started could not be read");
+        }
         yield* quoteRestrictions;
         yield* Effect.forEach(
-          [...requests.messages],
+          [...(started?.messages ?? []), ...requests.messages],
           (message) => (message.quoting ? Deferred.await(message.quoting) : Effect.void),
           { discard: true },
         ).pipe(Effect.timeout(BOB_QUOTE_WAIT), Effect.ignore);
-        const older = requests.messages.slice(0, -BOB_AUTO_REVIEW_REQUESTS);
+        const unquoted = [
+          ...(started?.messages ?? []),
+          ...requests.messages.slice(0, -BOB_AUTO_REVIEW_REQUESTS),
+        ].some((message) => message.quotes === undefined);
         if (
-          hooks.autoJudge.extract !== undefined &&
-          older.some((message) => message.quotes === undefined)
+          started !== undefined &&
+          hooks.autoJudge.extract === undefined &&
+          started.messages.length > 0
         ) {
+          return asks(
+            "rules",
+            "the reviewer cannot quote the user's messages where the work started",
+          );
+        }
+        if (hooks.autoJudge.extract !== undefined && unquoted) {
           return asks("rules", "an older message is not quoted yet");
         }
-        const asked = { requests: requests.revision, rules: rules?.revision };
+        const revision = () => requests.revision + (started?.revision ?? 0);
+        const asked = { requests: revision(), rules: rules?.revision };
         const judgement = yield* hooks.autoJudge.judge({
           userMessages: requests.messages
             .slice(-BOB_AUTO_REVIEW_REQUESTS)
             .map((message) => ({ text: message.text, extracted: message.quotes !== undefined })),
-          standing: requests.messages.flatMap((message) =>
+          standing: [...(started?.messages ?? []), ...requests.messages].flatMap((message) =>
             message.quotes !== undefined && message.quotes.length > 0 ? [message.quotes] : [],
           ),
+          ...(requests.delegated === undefined ? {} : { delegated: true }),
           call: describeBobToolCall(request.toolCall, context),
         });
         const reviewer = `reviewer (${hooks.autoJudge.name})`;
         if (judgement.decision !== "allow") return asks(reviewer, judgement.reason);
         // A message or a rule that came while the model judged may say otherwise.
-        const unchanged =
-          state.requests.revision === asked.requests && rules?.revision === asked.rules;
+        const unchanged = revision() === asked.requests && rules?.revision === asked.rules;
         if (!reviewing() || !unchanged) {
           return asks(reviewer, `allowed, then the request or rules changed: ${judgement.reason}`);
         }
@@ -1529,7 +1763,17 @@ function wrapBobRuntime(
         if (turn?.userRequest !== undefined && turn.userRequest === request) {
           yield* remember(turn.userText ?? "");
         }
+        if (turn?.delegatedTask !== undefined) {
+          yield* rememberTask(turn.delegatedTask, turn.delegatedFrom);
+        } else if (state.requests.delegated !== undefined) {
+          // A later turn of the task: the user may have written more where the work started.
+          yield* readStarted;
+        }
         if (link) yield* link.turnStarted;
+        // Bob gets the text of the message's attached text files beside it.
+        if (turn !== undefined) {
+          payload = { ...payload, prompt: withBobResources(payload.prompt, turn.resources) };
+        }
         let result: EffectAcpSchema.PromptResponse;
         if (link && (yield* link.adopt)) {
           // Bob kept a prompt going while T3 restarted. This prompt takes it over: the relay
@@ -1539,7 +1783,13 @@ function wrapBobRuntime(
           // message unless it only asks Bob to go on, then steers sent since; after a Stop,
           // none of them.
           for (const id of yield* link.openTools) state.openTools.add(id);
-          const restored = [...((yield* link.kept)?.steers ?? [])];
+          const restored = yield* Effect.forEach(
+            (yield* link.kept)?.steers ?? [],
+            ({ text, attachments }) =>
+              attachmentResources(attachments).pipe(
+                Effect.map((resources): BobSteer => ({ text, attachments, resources })),
+              ),
+          );
           state.steers.push(...restored);
           result = yield* runtime.prompt(payload, options);
           const earlier = state.steers.splice(0, restored.length);
@@ -1746,6 +1996,12 @@ export function makeBobAcpAdapterFlavor(
           threadId: input.threadId ?? undefined,
           turns,
           scope: yield* Effect.scope,
+          attachmentResources: (attachments) =>
+            bobAttachmentResources(
+              attachments,
+              options.host.resolveAttachmentPath,
+              options.fileSystem,
+            ),
         });
       }),
     preferResumeSession: true,
@@ -1882,9 +2138,13 @@ function wrapBobSession(
     readonly noticeItemId: (nativeItemId: string) => TurnItemId;
   },
   sessions: ReadonlyMap<string, BobSessionControl>,
-  resolveAttachmentPath: ProviderHost.ProviderHost["Service"]["resolveAttachmentPath"],
+  attachments: {
+    readonly resolvePath: ProviderHost.ProviderHost["Service"]["resolveAttachmentPath"];
+    readonly resources: BobAttachmentResources;
+  },
   turns: BobThreadTurns,
 ): ProviderAdapter.ProviderAdapterV2SessionRuntime {
+  const resolveAttachmentPath = attachments.resolvePath;
   // Bob's tasks belong to a folder; the session follows the folder of its latest turn.
   let cwd = openedIn;
   const follow = (policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy | undefined) => {
@@ -1979,7 +2239,12 @@ function wrapBobSession(
         });
         // Too late once Bob's prompt ended; the message then follows the turn instead.
         const userText = isUserWritten(input.message) ? input.message.text.trim() : undefined;
-        if (steer === undefined || !(yield* steer(text, userText))) {
+        const resources = yield* attachments.resources(input.message.attachments);
+        const textAttachments = input.message.attachments.filter(isBobTextAttachment);
+        if (
+          steer === undefined ||
+          !(yield* steer({ text, attachments: textAttachments, resources }, userText))
+        ) {
           return yield* new ProviderAdapter.ProviderAdapterSteerRunError({
             driver: BOB_PROVIDER,
             providerThreadId: input.providerThread.id,
@@ -2001,6 +2266,15 @@ function wrapBobSession(
         : undefined;
       // Only what the user typed is quoted, never an attachment's path or text.
       const userText = userRequest === undefined ? undefined : input.message.text.trim();
+      // A subagent thread's first message is the task another agent delegated: what the reviewer
+      // judges calls by, while the user's words where the work started say what it may do.
+      const { lineage } = input.appThread;
+      const delegatedTask =
+        lineage.relationshipToParent === "subagent" &&
+        input.runOrdinal === 1 &&
+        userRequest === undefined
+          ? input.message.text.trim()
+          : undefined;
       const mode = modes.missing(input);
       if (mode !== undefined) missingModes.set(input.attemptId, { input, mode });
       // A wake T3 starts for a prompt Bob kept going while T3 restarted carries no request of its
@@ -2008,19 +2282,28 @@ function wrapBobSession(
       const isWake =
         input.message.createdBy === "agent" && input.message.creationSource === "provider";
       // Whichever runtime serves the thread takes the turn, one started for it included.
-      turns.next.set(input.threadId, {
-        threadId: input.threadId,
-        projectId: input.appThread.projectId,
-        userRequest,
-        userText,
-        asksAboutNetwork:
-          input.modelSelection.options?.find((option) => option.id === BOB_NETWORK_OPTION_ID)
-            ?.value === BOB_NETWORK_ASK,
-        adoptOnly: isWake,
-        skipTextAfterAdoption: isWake || input.restartContinuationOfRunId !== undefined,
-      });
-      turns.projects.set(input.threadId, input.appThread.projectId);
-      return session.startTurn(input).pipe(
+      const announce = (resources: ReadonlyArray<EffectAcpSchema.ContentBlock>) =>
+        Effect.sync(() => {
+          turns.next.set(input.threadId, {
+            threadId: input.threadId,
+            projectId: input.appThread.projectId,
+            userRequest,
+            resources,
+            userText,
+            delegatedTask,
+            delegatedFrom:
+              delegatedTask === undefined ? undefined : (lineage.parentThreadId ?? undefined),
+            asksAboutNetwork:
+              input.modelSelection.options?.find((option) => option.id === BOB_NETWORK_OPTION_ID)
+                ?.value === BOB_NETWORK_ASK,
+            adoptOnly: isWake,
+            skipTextAfterAdoption: isWake || input.restartContinuationOfRunId !== undefined,
+          });
+          turns.projects.set(input.threadId, input.appThread.projectId);
+        });
+      return attachments.resources(input.message.attachments).pipe(
+        Effect.flatMap(announce),
+        Effect.andThen(session.startTurn(input)),
         Effect.mapError(explainSetup),
         Effect.tapError(() =>
           Effect.sync(() => {
@@ -2213,7 +2496,15 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
             explainSetup,
             modes,
             sessions,
-            options.host.resolveAttachmentPath,
+            {
+              resolvePath: options.host.resolveAttachmentPath,
+              resources: (attachments) =>
+                bobAttachmentResources(
+                  attachments,
+                  options.host.resolveAttachmentPath,
+                  options.fileSystem,
+                ),
+            },
             turns,
           ),
         ),

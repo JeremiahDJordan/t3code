@@ -679,7 +679,7 @@ function TaskForm({
               },
       runtimeMode: draft.runtimeMode,
       interactionMode: draft.task?.interactionMode ?? "default",
-      creationSource: draft.task?.creationSource ?? "mobile",
+      creationSource: "mobile",
     };
     // Lock before React renders, and keep successful creates locked until the form closes.
     submissionPending.current = true;

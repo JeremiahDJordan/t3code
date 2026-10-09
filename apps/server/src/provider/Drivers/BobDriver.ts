@@ -35,6 +35,7 @@ import { ChildProcessSpawner } from "effect/process";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { bobDelegatedTaskEnded } from "../bobDelegatedTask.ts";
+import { readBobStartingThread } from "../bobUserMessages.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeBobAdapterV2 } from "../../orchestration-v2/Adapters/BobAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -429,6 +430,14 @@ export const BobDriver: ProviderDriver<
           }),
           () => releaseJudge,
         ).pipe(Effect.asVoid),
+        readStartingThread: (threadId) =>
+          Option.match(sql, {
+            onNone: () => Effect.succeed(undefined),
+            onSome: (client) =>
+              readBobStartingThread(threadId).pipe(
+                Effect.provideService(SqlClient.SqlClient, client),
+              ),
+          }),
         rules: {
           get: serverSettings.getSettings.pipe(
             Effect.map(savedRules),

@@ -19,6 +19,8 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import { ChatFileAttachment } from "@t3tools/contracts";
+
 import type { TmuxServer } from "../../tmux/TmuxServer.ts";
 import { BOB_RELAY_SOURCE } from "./bobRelaySource.ts";
 
@@ -49,8 +51,15 @@ const BobRelayMeta = Schema.Struct({
    * calling T3's tools with, so the T3 that takes over can accept it.
    */
   mcpTokenHash: Schema.optional(Schema.String),
-  /** Messages steering the prompt that wait for Bob's running tool calls. */
-  steers: Schema.optional(Schema.Array(Schema.String)),
+  /**
+   * Messages steering the prompt that wait for Bob's running tool calls, with the text files
+   * attached to them, whose text the T3 that takes over reads again for Bob.
+   */
+  steers: Schema.optional(
+    Schema.Array(
+      Schema.Struct({ text: Schema.String, attachments: Schema.Array(ChatFileAttachment) }),
+    ),
+  ),
   /**
    * Bob was started with `--auto-approve`: it approves its tools itself and asks only about
    * protected operations, which T3 answers by Full access.
@@ -98,7 +107,7 @@ export function readBobRelayMeta(state: BobRelayState): BobRelayMeta | undefined
 }
 
 /** The relay protocol this build speaks; relays of other builds are stopped, not attached. */
-const BOB_RELAY_PROTOCOL = 2;
+const BOB_RELAY_PROTOCOL = 3;
 
 /** Whether a relay's Bob has a prompt no run has finished: running, or ended while T3 was away. */
 export function bobRelayHasTurn(state: BobRelayState): boolean {
