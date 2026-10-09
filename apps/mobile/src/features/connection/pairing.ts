@@ -27,24 +27,28 @@ export class PairingQrPayloadEmptyError extends Schema.TaggedError<PairingQrPayl
   }
 }
 
-export function buildPairingUrl(host: string, code: string): string {
+/** A pairing URL from the form's fields; a server key makes the route end-to-end encrypted. */
+export function buildPairingUrl(host: string, code: string, serverKey?: string): string {
   const h = host.trim();
   const c = code.trim();
+  const k = serverKey?.trim() ?? "";
   if (!h) return "";
   if (!c) return h;
 
+  const hash = new URLSearchParams([["token", c]]);
+  if (k) hash.set("sk", k);
   try {
     const url = new URL(h.includes("://") ? h : `${isIpLiteral(h) ? "http" : "https"}://${h}`);
-    url.hash = new URLSearchParams([["token", c]]).toString();
+    url.hash = hash.toString();
     return url.toString();
   } catch {
-    return `${h}#token=${c}`;
+    return `${h}#${hash.toString()}`;
   }
 }
 
-export function parsePairingUrl(url: string): { host: string; code: string } {
+export function parsePairingUrl(url: string): { host: string; code: string; serverKey: string } {
   const trimmed = url.trim();
-  if (!trimmed) return { host: "", code: "" };
+  if (!trimmed) return { host: "", code: "", serverKey: "" };
 
   try {
     const parsed = new URL(trimmed);
@@ -53,6 +57,7 @@ export function parsePairingUrl(url: string): { host: string; code: string } {
       return {
         host: hostedPairingRequest.host.replace(/\/$/, ""),
         code: hostedPairingRequest.token,
+        serverKey: "",
       };
     }
 
@@ -60,13 +65,14 @@ export function parsePairingUrl(url: string): { host: string; code: string } {
     const hashToken = hashParams.get("token");
     const queryToken = parsed.searchParams.get("token");
     const code = hashToken || queryToken || "";
+    const serverKey = hashParams.get("sk") ?? "";
 
     parsed.hash = "";
     parsed.search = "";
     parsed.pathname = "/";
-    return { host: parsed.toString().replace(/\/$/, ""), code };
+    return { host: parsed.toString().replace(/\/$/, ""), code, serverKey };
   } catch {
-    return { host: trimmed, code: "" };
+    return { host: trimmed, code: "", serverKey: "" };
   }
 }
 

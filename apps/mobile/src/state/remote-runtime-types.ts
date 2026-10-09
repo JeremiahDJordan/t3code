@@ -15,6 +15,8 @@ export interface ConnectedEnvironmentSummary {
   readonly isRelayManaged: boolean;
   /** Whether the direct route an edit changes sits behind Cloudflare Access. */
   readonly usesCloudflareAccess: boolean;
+  /** The pinned server key's fingerprint when that route is end-to-end encrypted. */
+  readonly secureChannelFingerprint: string | null;
   /** False when the user switched the environment off in Settings. */
   readonly isEnabled: boolean;
   readonly connectionState: EnvironmentConnectionPhase;

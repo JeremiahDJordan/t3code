@@ -16,6 +16,7 @@ function connectedEnvironment(
     displayUrl: input.displayUrl ?? `https://${input.environmentId}.example.test/`,
     isRelayManaged: input.isRelayManaged,
     usesCloudflareAccess: false,
+    secureChannelFingerprint: null,
     isEnabled: input.isEnabled ?? true,
     connectionState: input.connectionState ?? "connected",
     connectionError: input.connectionError ?? null,

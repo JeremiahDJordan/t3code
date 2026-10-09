@@ -10,8 +10,9 @@ import {
   type StaticScreenProps,
 } from "@react-navigation/native";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { channelKeyFingerprint, decodeChannelKey } from "@t3tools/shared/secureChannel/handshake";
 import { AsyncResult } from "effect/reactivity";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Linking, Pressable, StyleSheet, View } from "react-native";
 import Svg, { Defs, RadialGradient, Rect, Stop } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -62,6 +63,12 @@ export function ConnectionsNewRouteScreen({
   const insets = useSafeAreaInsets();
   const [hostInput, setHostInput] = useState("");
   const [codeInput, setCodeInput] = useState("");
+  // A pairing link's server key makes the route end-to-end encrypted through the server's channel.
+  const [serverKeyInput, setServerKeyInput] = useState("");
+  const serverKeyFingerprint = useMemo(() => {
+    const key = decodeChannelKey(serverKeyInput.trim());
+    return key === undefined ? null : channelKeyFingerprint(key);
+  }, [serverKeyInput]);
   // An address behind Cloudflare Access takes a service token with every request.
   const [behindAccess, setBehindAccess] = useState(false);
   const [accessClientId, setAccessClientId] = useState("");
@@ -83,9 +90,10 @@ export function ConnectionsNewRouteScreen({
       (accessClientId.trim().length === 0 || accessClientSecret.trim().length === 0));
 
   useEffect(() => {
-    const { host, code } = parsePairingUrl(connectionPairingUrl);
+    const { host, code, serverKey } = parsePairingUrl(connectionPairingUrl);
     setHostInput(host);
     setCodeInput(code);
+    setServerKeyInput(serverKey);
   }, [connectionPairingUrl]);
 
   useEffect(() => {
@@ -93,9 +101,10 @@ export function ConnectionsNewRouteScreen({
       return;
     }
 
-    const { host, code } = parsePairingUrl(routePairingUrl);
+    const { host, code, serverKey } = parsePairingUrl(routePairingUrl);
     setHostInput(host);
     setCodeInput(code);
+    setServerKeyInput(serverKey);
   }, [routePairingUrl]);
 
   useEffect(() => {
@@ -111,6 +120,11 @@ export function ConnectionsNewRouteScreen({
 
   const handleCodeChange = useCallback((value: string) => {
     setCodeInput(value);
+    setPendingConnectionError(null);
+  }, []);
+
+  const handleServerKeyChange = useCallback((value: string) => {
+    setServerKeyInput(value);
     setPendingConnectionError(null);
   }, []);
 
@@ -145,9 +159,10 @@ export function ConnectionsNewRouteScreen({
 
       try {
         const pairingUrl = extractPairingUrlFromQrPayload(data);
-        const { host, code } = parsePairingUrl(pairingUrl);
+        const { host, code, serverKey } = parsePairingUrl(pairingUrl);
         setHostInput(host);
         setCodeInput(code);
+        setServerKeyInput(serverKey);
         onChangeConnectionPairingUrl(pairingUrl);
         setScanComplete(true);
         setScannerLocked(false);
@@ -196,13 +211,21 @@ export function ConnectionsNewRouteScreen({
 
   const handleSubmit = useCallback(async () => {
     await connectAndClose(
-      buildPairingUrl(hostInput, codeInput),
+      buildPairingUrl(hostInput, codeInput, serverKeyInput),
       false,
       behindAccess
         ? { clientId: accessClientId.trim(), clientSecret: accessClientSecret.trim() }
         : undefined,
     );
-  }, [accessClientId, accessClientSecret, behindAccess, codeInput, connectAndClose, hostInput]);
+  }, [
+    accessClientId,
+    accessClientSecret,
+    behindAccess,
+    codeInput,
+    connectAndClose,
+    hostInput,
+    serverKeyInput,
+  ]);
 
   useEffect(() => {
     if (!shouldAutoConnect || attemptedAutoConnectRef.current === routePairingUrl) {
@@ -278,6 +301,13 @@ export function ConnectionsNewRouteScreen({
                 }}
               />
               <View className="ml-4 border-t border-border-subtle" />
+              <PairingInputRow
+                label="Key"
+                placeholder="Optional, for an encrypted route"
+                value={serverKeyInput}
+                onChangeText={handleServerKeyChange}
+              />
+              <View className="ml-4 border-t border-border-subtle" />
               <View collapsable={false} className="h-13 flex-row items-center gap-3 px-4">
                 <Text className="flex-1 text-base leading-[23px] text-foreground">
                   Behind Cloudflare Access
@@ -308,17 +338,27 @@ export function ConnectionsNewRouteScreen({
                 </>
               ) : null}
             </View>
-            <Text
-              accessibilityLiveRegion="polite"
-              className={cn(
-                "px-4 text-sm leading-normal",
-                pairingConnectionError ? "text-danger-foreground" : "text-foreground-muted",
-              )}
-            >
-              {pairingConnectionError ??
-                (behindAccess
+            {pairingConnectionError ? (
+              <Text
+                accessibilityLiveRegion="polite"
+                className="px-4 text-sm leading-normal text-danger-foreground"
+              >
+                {pairingConnectionError}
+              </Text>
+            ) : null}
+            <Text className="px-4 text-sm leading-normal text-foreground-muted">
+              {[
+                serverKeyFingerprint === null
+                  ? null
+                  : `End-to-end encrypted · key ${serverKeyFingerprint}.`,
+                behindAccess
                   ? "Sends the Access service token with every request to this address only."
-                  : "For machines on your local network or tailnet. The machine keeps its own provider credentials.")}
+                  : serverKeyFingerprint === null
+                    ? "For machines on your local network or tailnet. The machine keeps its own provider credentials."
+                    : null,
+              ]
+                .filter((line) => line !== null)
+                .join(" ")}
             </Text>
           </View>
 

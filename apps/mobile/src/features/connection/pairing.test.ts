@@ -20,6 +20,15 @@ describe("buildPairingUrl", () => {
     );
   });
 
+  it("adds the server key beside the token for an encrypted route", () => {
+    expect(buildPairingUrl("quiet.example.com", "CODE", " SERVERKEY ")).toBe(
+      "https://quiet.example.com/#token=CODE&sk=SERVERKEY",
+    );
+    expect(buildPairingUrl("quiet.example.com", "CODE", "")).toBe(
+      "https://quiet.example.com/#token=CODE",
+    );
+  });
+
   it("preserves an explicit scheme for an IP address", () => {
     expect(buildPairingUrl("https://192.168.1.100:3773", "pairing-token")).toBe(
       "https://192.168.1.100:3773/#token=pairing-token",
@@ -59,6 +68,15 @@ describe("parsePairingUrl", () => {
     ).toEqual({
       host: "https://desktop.tailnet.ts.net",
       code: "pairing-token",
+      serverKey: "",
+    });
+  });
+
+  it("keeps an encrypted route's server key from the link's fragment", () => {
+    expect(parsePairingUrl("https://quiet.example.com/pair#token=CODE&sk=SERVERKEY")).toEqual({
+      host: "https://quiet.example.com",
+      code: "CODE",
+      serverKey: "SERVERKEY",
     });
   });
 });

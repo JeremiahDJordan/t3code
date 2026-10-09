@@ -18,6 +18,7 @@ function environment(
     displayUrl,
     isRelayManaged: false,
     usesCloudflareAccess: false,
+    secureChannelFingerprint: null,
     isEnabled: true,
     connectionState: "connected",
     connectionError: null,

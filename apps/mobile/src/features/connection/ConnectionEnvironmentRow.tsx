@@ -193,6 +193,12 @@ export function ConnectionEnvironmentRow(props: {
                 onChangeText={setUrl}
               />
 
+              {props.environment.secureChannelFingerprint === null ? null : (
+                <Text className="text-xs leading-normal text-foreground-muted">
+                  End-to-end encrypted · key {props.environment.secureChannelFingerprint}
+                </Text>
+              )}
+
               {props.environment.usesCloudflareAccess ? (
                 <>
                   <ConnectionFormField
