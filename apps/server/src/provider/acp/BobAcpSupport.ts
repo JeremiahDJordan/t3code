@@ -34,9 +34,11 @@ type BobAcpRuntimeBobSettings = Pick<BobSettings, "binaryPath" | "authMethod">;
 
 interface BobAcpSpawnOptions {
   /**
-   * Skips the user's MCP servers and subagents, for one-shot sessions that only return text.
-   * `--disable-mcp` and `--disable-subagents` are options of `bob acp` (its `--help` in Bob
-   * 2.0.4 and 2.0.5), verified live on both; `BobAdapterCliProbe.test.ts` rechecks them.
+   * Hides MCP tools and subagents, for one-shot sessions that only return text. Bob 2.0.5 still
+   * starts the servers its configuration and a trusted folder name before hiding their tools (read
+   * from its bundle), so such a session runs in a folder T3 owns. `--disable-mcp` and
+   * `--disable-subagents` are options of `bob acp` (its `--help` in Bob 2.0.4 and 2.0.5), verified
+   * live on both; `BobAdapterCliProbe.test.ts` rechecks them.
    */
   readonly disableMcpAndSubagents?: boolean;
 }
@@ -95,8 +97,9 @@ export function bobApprovesItsOwnTools(runtimeMode?: RuntimeMode): boolean {
 }
 
 /**
- * The user opened the project in T3, so Bob trusts it. Only Full access skips
- * Bob's permission prompts; every other mode forwards them through T3.
+ * Bob trusts the folder it starts in: a project the user opened in a Bob thread, or the folder
+ * T3 keeps for Bob's text generation. Only Full access skips Bob's permission prompts; every
+ * other mode forwards them through T3.
  */
 export function bobAcpSpawnArgs(
   runtimeMode?: RuntimeMode,

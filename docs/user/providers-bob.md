@@ -38,9 +38,10 @@ one instance's environment variables give Bob a different `HOME`.
 T3 Code tells Bob to trust each project folder you open, and Bob remembers it, so
 you do not need to trust the folder in Bob first. A trusted folder's own Bob setup runs
 when a Bob thread opens there: the MCP servers in its `.bob/mcp.json` and `.bob/plugins`,
-and the hooks in its `.bob/settings.json`. Bob starts them on your computer, in every mode
-and outside T3 Code's sandbox, so use Bob only in projects you trust, as you would before
-running their build.
+and the hooks in its `.bob/settings.json`. Bob starts them on the environment's machine, in
+every mode and outside T3 Code's sandbox, so use Bob only in projects you trust, as you would
+before running their build. When Bob writes thread titles, branch names, commit messages or
+pull request text, it works in a folder of T3 Code's own, so that never trusts a project.
 
 After Bob has run in a project, its skills and MCP prompts appear in the composer's `/`
 menu. When a thread moves to another folder, such as picking a branch that lives in another

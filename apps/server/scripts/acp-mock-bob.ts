@@ -228,6 +228,8 @@ function handle(method: string, params: Json): Json {
             params: {
               SHELL: process.env.SHELL ?? "",
               PROFILE: process.env.T3_BOB_SANDBOX_PROFILE ?? "",
+              // The folder Bob was started in, which `--trust` trusts.
+              CWD: process.cwd(),
             },
           })}\n`,
         );

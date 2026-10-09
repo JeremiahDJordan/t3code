@@ -25,7 +25,9 @@ import {
   BOB_API_KEY_REQUIRED_MESSAGE,
   BOB_SSO_SIGN_IN_MESSAGE,
 } from "../provider/acp/BobAcpSupport.ts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { execScriptSource, writeFakeCli } from "@t3tools/provider-testing/fakeCli";
+import { layerTestProviderHost } from "@t3tools/provider-testing/host";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
 
@@ -36,7 +38,7 @@ const modelSelection = createModelSelection(ProviderInstanceId.make("bob"), BOB_
 
 const BobTextGenerationTestLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-bob-text-generation-test-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+}).pipe(Layer.provideMerge(layerTestProviderHost()), Layer.provideMerge(NodeServices.layer));
 
 /**
  * Runs `effectFn` against a Bob instance whose `bob` is the mock agent in its Bob profile,
@@ -53,6 +55,7 @@ function withFakeAcpBob<A, E, R>(
     textGeneration: TextGeneration.TextGeneration["Service"],
     requestLogPath: string,
     argvLogPath: string,
+    workingFolder: string,
   ) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
@@ -74,11 +77,14 @@ function withFakeAcpBob<A, E, R>(
         argvLogPath,
       }),
     });
+    // In T3's provider cache, and not created yet: the first prompt creates it.
+    const host = yield* ProviderHost.ProviderHost;
+    const workingFolder = NodePath.join(host.paths.providerStatusCacheDir, "bob-text-generation");
     const textGeneration = yield* makeBobTextGeneration(
       decodeBobSettings({ binaryPath, authMethod: input.authMethod ?? "sso" }),
       input.environment ?? process.env,
     );
-    return yield* effectFn(textGeneration, requestLogPath, argvLogPath);
+    return yield* effectFn(textGeneration, requestLogPath, argvLogPath, workingFolder);
   }).pipe(Effect.scoped);
 }
 
@@ -100,20 +106,28 @@ function readJsonRpcRequests(
 }
 
 it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
-  it.effect("starts Bob without the user's MCP servers or subagents", () =>
+  it.effect("starts Bob in T3's own folder, without the user's MCP servers or subagents", () =>
     withFakeAcpBob(
       {
         mockEnv: {
           T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({ branch: "fix-bob-sign-in" }),
         },
       },
-      (textGeneration, _requestLogPath, argvLogPath) =>
+      (textGeneration, requestLogPath, argvLogPath, workingFolder) =>
         Effect.gen(function* () {
           yield* textGeneration.generateBranchName({
             cwd: process.cwd(),
             message: "bob says I'm signed out",
             modelSelection,
           });
+          // Never the project's folder, which `--trust` would trust and whose setup Bob runs.
+          const requests = readJsonRpcRequests(requestLogPath);
+          expect(requests.find((request) => request.method === "_mock/env")?.params?.CWD).toBe(
+            NodeFS.realpathSync(workingFolder),
+          );
+          expect(requests.find((request) => request.method === "session/new")?.params?.cwd).toBe(
+            workingFolder,
+          );
           expect(NodeFS.readFileSync(argvLogPath, "utf8").trim().split("\t")).toEqual([
             "acp",
             "--trust",

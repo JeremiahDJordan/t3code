@@ -1,6 +1,8 @@
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
@@ -10,6 +12,7 @@ import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shar
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 import { TextGenerationError } from "@t3tools/contracts";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -32,18 +35,30 @@ const BOB_TIMEOUT_MS = 180_000;
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
-/** Bob uses its configured model, so `modelSelection` only routes requests to this instance. */
+/**
+ * Bob uses its configured model, so `modelSelection` only routes requests to this instance.
+ *
+ * Every prompt runs in `bob-text-generation` in T3's provider cache, never the project's folder:
+ * T3 starts Bob with `--trust`, and Bob trusts its folder for good and runs that folder's own
+ * hooks and MCP servers. Text generation serves threads of every provider, so a project's folder
+ * would be trusted and its setup run without the user ever opening a Bob thread there. Each
+ * prompt carries all Bob needs, so the folder stays the same, which leaves one entry in Bob's
+ * trusted folders.
+ */
 export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function* (
   bobSettings: BobSettings,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
   const crypto = yield* Crypto.Crypto;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const host = yield* ProviderHost.ProviderHost;
+  const workingFolder = path.join(host.paths.providerStatusCacheDir, "bob-text-generation");
 
   /** Runs one prompt in a throwaway Bob session and decodes the JSON object Bob answers with. */
   const runBobJson = <S extends Schema.Top>({
     operation,
-    cwd,
     prompt,
     outputSchemaJson,
   }: {
@@ -52,19 +67,28 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
       | "generatePrContent"
       | "generateBranchName"
       | "generateThreadTitle";
-    cwd: string;
     prompt: string;
     outputSchemaJson: S;
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
       const outputRef = yield* Ref.make("");
+      yield* fileSystem.makeDirectory(workingFolder, { recursive: true }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation,
+              detail: "Could not create Bob's working folder.",
+              cause,
+            }),
+        ),
+      );
       // No runtime mode, so Bob asks before running tools and, with no handler, is refused.
-      // A one-shot session needs none of the user's MCP servers or subagents.
+      // A one-shot session needs no MCP tools or subagents.
       const runtime = yield* makeBobAcpRuntime({
         bobSettings,
         environment,
         childProcessSpawner: commandSpawner,
-        cwd,
+        cwd: workingFolder,
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
         disableMcpAndSubagents: true,
       }).pipe(Effect.provideService(Crypto.Crypto, crypto));
@@ -166,7 +190,6 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
 
       const generated = yield* runBobJson({
         operation: "generateCommitMessage",
-        cwd: input.cwd,
         prompt,
         outputSchemaJson: outputSchema,
       });
@@ -194,7 +217,6 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
 
       const generated = yield* runBobJson({
         operation: "generatePrContent",
-        cwd: input.cwd,
         prompt,
         outputSchemaJson: outputSchema,
       });
@@ -214,7 +236,6 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
 
       const generated = yield* runBobJson({
         operation: "generateBranchName",
-        cwd: input.cwd,
         prompt,
         outputSchemaJson: outputSchema,
       });
@@ -235,7 +256,6 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
 
       const generated = yield* runBobJson({
         operation: "generateThreadTitle",
-        cwd: input.cwd,
         prompt,
         outputSchemaJson: outputSchema,
       });
