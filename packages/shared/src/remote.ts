@@ -1,6 +1,8 @@
 import * as Schema from "effect/Schema";
 
 const PAIRING_TOKEN_PARAM = "token";
+/** The server's secure channel key, base64url; a link with it pairs end-to-end encrypted. */
+const CHANNEL_KEY_PARAM = "sk";
 const HOSTED_PAIRING_HOST_PARAM = "host";
 const HOSTED_PAIRING_LABEL_PARAM = "label";
 const SUPPORTED_REMOTE_BACKEND_PROTOCOLS = new Set(["http:", "https:", "ws:", "wss:"]);
@@ -133,6 +135,8 @@ export interface ResolvedRemotePairingTarget {
   readonly credential: string;
   readonly httpBaseUrl: string;
   readonly wsBaseUrl: string;
+  /** Present for a route reached only through the end-to-end encrypted channel. */
+  readonly channelKey?: string;
 }
 
 export interface HostedPairingRequest {
@@ -162,10 +166,18 @@ export const stripPairingTokenFromUrl = (url: URL): URL => {
   return next;
 };
 
-export const setPairingTokenOnUrl = (url: URL, credential: string): URL => {
+/** The secure channel key in a pairing link's fragment, which never reaches a server. */
+export const getChannelKeyFromUrl = (url: URL): string | null => {
+  const key = readHashParams(url).get(CHANNEL_KEY_PARAM)?.trim() ?? "";
+  return key.length > 0 ? key : null;
+};
+
+export const setPairingTokenOnUrl = (url: URL, credential: string, channelKey?: string): URL => {
   const next = new URL(url.toString());
   next.searchParams.delete(PAIRING_TOKEN_PARAM);
-  next.hash = new URLSearchParams([[PAIRING_TOKEN_PARAM, credential]]).toString();
+  const hash = new URLSearchParams([[PAIRING_TOKEN_PARAM, credential]]);
+  if (channelKey) hash.set(CHANNEL_KEY_PARAM, channelKey);
+  next.hash = hash.toString();
   return next;
 };
 
@@ -189,7 +201,10 @@ export const resolveRemotePairingTarget = (input: {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
+  /** A server key entered by hand, for a route without a scanned link. */
+  readonly channelKey?: string;
 }): ResolvedRemotePairingTarget => {
+  const typedChannelKey = input.channelKey?.trim() ?? "";
   const pairingUrl = input.pairingUrl?.trim() ?? "";
   if (pairingUrl.length > 0) {
     let url: URL;
@@ -220,10 +235,12 @@ export const resolveRemotePairingTarget = (input: {
     if (!credential) {
       throw new RemotePairingTokenMissingError({ host: url.host });
     }
+    const channelKey = getChannelKeyFromUrl(url) ?? typedChannelKey;
     return {
       credential,
       httpBaseUrl: toHttpBaseUrl(url),
       wsBaseUrl: toWsBaseUrl(url),
+      ...(channelKey ? { channelKey } : {}),
     };
   }
 
@@ -241,5 +258,6 @@ export const resolveRemotePairingTarget = (input: {
     credential: pairingCode,
     httpBaseUrl: toHttpBaseUrl(normalizedHost),
     wsBaseUrl: toWsBaseUrl(normalizedHost),
+    ...(typedChannelKey ? { channelKey: typedChannelKey } : {}),
   };
 };
