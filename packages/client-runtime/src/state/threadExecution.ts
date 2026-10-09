@@ -22,6 +22,7 @@ import {
   orchestrationV2RunWorkStartedAt,
   type ThreadId,
   type TurnItemId,
+  WORKFLOW_PROVIDER_INSTANCE_ID,
 } from "@t3tools/contracts";
 import {
   backgroundWorkHoldsCompletion,
@@ -331,7 +332,16 @@ export function deriveRetryableThreadRun(
     message === undefined ||
     message.role !== "user" ||
     message.notification !== undefined ||
-    message.delegatedCompletion !== undefined
+    message.delegatedCompletion !== undefined ||
+    // A delegated task's own answer is taken when its run ends: a rerun's would reach no one,
+    // and the agent that delegated it, or its workflow, retries it. A turn the user started
+    // there afterwards is theirs to retry, and a workflow's coordinator reruns. T3's own resume
+    // after a usage limit (`server`) is not the user's turn.
+    (projection.thread.lineage.relationshipToParent === "subagent" &&
+      projection.thread.providerInstanceId !== WORKFLOW_PROVIDER_INSTANCE_ID &&
+      (message.createdBy !== "user" ||
+        message.creationSource === "server" ||
+        message.creationSource === "provider"))
   ) {
     return null;
   }

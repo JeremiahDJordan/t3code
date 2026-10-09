@@ -10,6 +10,7 @@ import {
   RunId,
   RuntimeRequestId,
   ThreadId,
+  WORKFLOW_PROVIDER_INSTANCE_ID,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2RunStatus,
@@ -362,6 +363,38 @@ describe("deriveRetryableThreadRun", () => {
     expect(
       deriveRetryableThreadRun({ ...projection, messages: [prompt, steer] })?.message.text,
     ).toBe("Summarize the diff");
+  });
+
+  it("offers nothing for a delegated task's own run, but the user's follow-up and a workflow's coordinator retry", () => {
+    const delegated = {
+      ...projection,
+      // The task another agent wrote.
+      messages: [{ ...prompt, createdBy: "agent" as const, creationSource: "mcp" as const }],
+      thread: {
+        ...projection.thread,
+        lineage: {
+          rootThreadId: ThreadId.make("thread-parent"),
+          parentThreadId: ThreadId.make("thread-parent"),
+          relationshipToParent: "subagent" as const,
+        },
+      },
+    };
+    expect(deriveRetryableThreadRun(delegated)).toBeNull();
+    // A turn the user started in the task's thread afterwards is theirs to retry.
+    expect(deriveRetryableThreadRun({ ...delegated, messages: [prompt] })?.runId).toBe(failed.id);
+    // T3 resuming the task after a usage limit is not, nor a turn the provider started.
+    for (const creationSource of ["server", "provider"] as const) {
+      expect(
+        deriveRetryableThreadRun({ ...delegated, messages: [{ ...prompt, creationSource }] }),
+        creationSource,
+      ).toBeNull();
+    }
+    expect(
+      deriveRetryableThreadRun({
+        ...delegated,
+        thread: { ...delegated.thread, providerInstanceId: WORKFLOW_PROVIDER_INSTANCE_ID },
+      })?.runId,
+    ).toBe(failed.id);
   });
 
   it("offers nothing for failures a resend would not fix", () => {
