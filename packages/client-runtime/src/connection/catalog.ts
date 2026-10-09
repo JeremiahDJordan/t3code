@@ -38,6 +38,11 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
      * carries the service token kept in the route's credential.
      */
     transport: Schema.optionalKey(Schema.Literal("cloudflare-access")),
+    /**
+     * Set when the route is reached only through the server's end-to-end encrypted channel, with
+     * the server key the pairing link pinned (base64url). Combines freely with `transport`.
+     */
+    channel: Schema.optionalKey(Schema.Struct({ serverKey: Schema.String })),
   },
 ) {}
 
@@ -83,6 +88,11 @@ export class BearerConnectionCredential extends Schema.TaggedClass<BearerConnect
     cloudflareAccess: Schema.optionalKey(
       Schema.Struct({ clientId: Schema.String, clientSecret: Schema.String }),
     ),
+    /**
+     * This device's static key for an end-to-end encrypted route, as its platform keeps it: the
+     * base64url secret key on mobile, an id for it on desktop, whose main process holds the key.
+     */
+    channelClientKey: Schema.optionalKey(Schema.Struct({ secretKey: Schema.String })),
   },
 ) {}
 

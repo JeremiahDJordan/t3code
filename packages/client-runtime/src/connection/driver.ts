@@ -14,7 +14,7 @@ import type {
 } from "./model.ts";
 import { ConnectionTransientError } from "./model.ts";
 import * as ConnectionResolver from "./resolver.ts";
-import { connectionRoutes, routeEntry, routeHttpBaseUrl } from "./routes.ts";
+import { connectionRoutes, routeEntry, isSecureChannelRoute, routeHttpBaseUrl } from "./routes.ts";
 import * as RpcSession from "../rpc/session.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 
@@ -143,7 +143,10 @@ export const make = Effect.gen(function* () {
 
   const checkRoute = (entry: ConnectionCatalogEntry, route: ConnectionRoute) => {
     const httpBaseUrl = routeHttpBaseUrl(route);
-    if (httpBaseUrl === null) return Effect.succeed<RouteCheck>("unchecked");
+    // An encrypted route's host answers nothing in plain; the resolver opens its channel.
+    if (httpBaseUrl === null || isSecureChannelRoute(route)) {
+      return Effect.succeed<RouteCheck>("unchecked");
+    }
     // The descriptor is public, so this sends no credential to whatever
     // answers at a saved LAN address on a different network.
     return fetchRemoteEnvironmentDescriptor({

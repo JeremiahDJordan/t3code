@@ -4,7 +4,11 @@ import {
   CloudflareAccessDeniedError,
   cloudflareAccessHeaders,
   connectionTransportHeaders,
+  holdSecureChannelHost,
   isCloudflareAccessDenied,
+  isSecureChannelHost,
+  markSecureChannelHost,
+  SecureChannelRequiredError,
   setConnectionTransportHeaders,
   withConnectionTransportHeaders,
 } from "./transportHeaders.ts";
@@ -37,6 +41,38 @@ describe("connection transport headers", () => {
     // Plain HTTP is never registered, so the token cannot travel in the clear.
     setConnectionTransportHeaders("http://plain.example.test/", ACCESS);
     expect(connectionTransportHeaders("http://plain.example.test/")).toBeUndefined();
+  });
+
+  it("refuse any plain request to an end-to-end encrypted route's host", async () => {
+    markSecureChannelHost("https://quiet.example.test/");
+    let sent = 0;
+    const fetchWith = withConnectionTransportHeaders(async (input) => {
+      sent += 1;
+      return response(String(input), 200, "application/json");
+    });
+    const failure = await fetchWith("https://quiet.example.test/.well-known/t3/environment").catch(
+      (cause: unknown) => cause,
+    );
+    expect(failure).toBeInstanceOf(SecureChannelRequiredError);
+    expect(isSecureChannelHost("wss://quiet.example.test/ws")).toBe(true);
+    // Its local forwarder, and every other host, are untouched.
+    await fetchWith("http://127.0.0.1:52811/.well-known/t3/environment");
+    expect(sent).toBe(1);
+  });
+
+  it("hold a host for each pairing to it until that pairing ends, however they overlap", () => {
+    const first = holdSecureChannelHost("https://overlap.example.test");
+    const second = holdSecureChannelHost("https://overlap.example.test");
+    first();
+    first();
+    expect(isSecureChannelHost("https://overlap.example.test/api")).toBe(true);
+    second();
+    expect(isSecureChannelHost("https://overlap.example.test/api")).toBe(false);
+
+    const pairing = holdSecureChannelHost("https://kept.example.test");
+    markSecureChannelHost("https://kept.example.test");
+    pairing();
+    expect(isSecureChannelHost("https://kept.example.test/api")).toBe(true);
   });
 
   it("are added to requests to that host and to no other", async () => {

@@ -8,6 +8,58 @@
  */
 
 const headersByHost = new Map<string, Readonly<Record<string, string>>>();
+/** Hosts reached only through the end-to-end encrypted channel, which never get a plain request. */
+const secureChannelHosts = new Set<string>();
+/** Hosts held for pairings still running, counted, so one pairing's end leaves another's hold. */
+const pairingHolds = new Map<string, number>();
+
+function hostOf(url: string): string | undefined {
+  try {
+    return new URL(url).host;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Marks a channel route's host, so a plain request to it fails instead of leaving the channel.
+ * The route itself is used through its local forwarder; this guards any path that forgets.
+ */
+export function markSecureChannelHost(httpBaseUrl: string): void {
+  const host = hostOf(httpBaseUrl);
+  if (host !== undefined) secureChannelHosts.add(host);
+}
+
+/**
+ * Treats a host as encrypted-only while a pairing to it runs; the returned release undoes only
+ * this hold. A pairing that succeeds marks the host for good with `markSecureChannelHost`.
+ */
+export function holdSecureChannelHost(httpBaseUrl: string): () => void {
+  const host = hostOf(httpBaseUrl);
+  if (host === undefined) return () => undefined;
+  pairingHolds.set(host, (pairingHolds.get(host) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const remaining = (pairingHolds.get(host) ?? 1) - 1;
+    if (remaining > 0) pairingHolds.set(host, remaining);
+    else pairingHolds.delete(host);
+  };
+}
+
+export function isSecureChannelHost(url: string): boolean {
+  const host = hostOf(url);
+  return host !== undefined && (secureChannelHosts.has(host) || pairingHolds.has(host));
+}
+
+/** What a plain request to a channel route's host fails with. */
+export class SecureChannelRequiredError extends Error {
+  readonly _tag = "SecureChannelRequiredError";
+  constructor(url: string) {
+    super(`${hostOf(url) ?? url} is reached only through its end-to-end encrypted channel.`);
+  }
+}
 
 /** The host of a secure URL; none for plain HTTP or WS, which would send the headers in the clear. */
 function secureHost(url: string): string | undefined {
@@ -65,7 +117,7 @@ export class CloudflareAccessDeniedError extends Error {
  * Access sends a request it refuses to its login page, which `fetch` follows, or answers it with
  * a page of its own; T3 itself answers 401 and 403 in JSON.
  */
-function deniedByCloudflareAccess(response: Response): boolean {
+export function deniedByCloudflareAccess(response: Response): boolean {
   if (response.url.includes("/cdn-cgi/access/")) return true;
   return (
     (response.status === 401 || response.status === 403) &&
@@ -79,6 +131,7 @@ export function withConnectionTransportHeaders(
 ): typeof globalThis.fetch {
   return async (input, init) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (isSecureChannelHost(url)) throw new SecureChannelRequiredError(url);
     const extra = connectionTransportHeaders(url);
     if (extra === undefined) return fetchFn(input, init);
     const headers = new Headers(

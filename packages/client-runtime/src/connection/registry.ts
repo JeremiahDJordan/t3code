@@ -39,6 +39,7 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentSupervisor from "./supervisor.ts";
 import * as ConnectionDriver from "./driver.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+import * as SecureChannel from "./secureChannel.ts";
 import {
   GitHubRoutingPermissions,
   gitHubRoutingConnectionKey,
@@ -47,6 +48,7 @@ import {
   RELAY_ROUTE_ID,
   connectionRouteId,
   connectionRoutes,
+  enabledSecureChannelRoutes,
   entryWithRoutes,
   findRouteToSameAddress,
   isLearned,
@@ -1103,6 +1105,18 @@ export const make = Effect.gen(function* () {
     Stream.runForEach((status) => SubscriptionRef.set(networkStatus, status)),
     Effect.forkScoped,
   );
+  // An encrypted route's forwarder stops once the route is removed, switched off or re-keyed.
+  const forwarder = yield* Effect.serviceOption(SecureChannel.SecureChannelForwarder);
+  if (Option.isSome(forwarder)) {
+    yield* SubscriptionRef.changes(entries).pipe(
+      Stream.map((current) => enabledSecureChannelRoutes(current.values())),
+      Stream.changesWith(
+        (previous, current) => JSON.stringify(previous) === JSON.stringify(current),
+      ),
+      Stream.runForEach((routes) => forwarder.value.retain(routes)),
+      Effect.forkScoped,
+    );
+  }
 
   const setCompatibility = Effect.fn("EnvironmentRegistry.setCompatibility")(function* (
     environmentId: EnvironmentId,

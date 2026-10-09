@@ -68,6 +68,28 @@ export function routeEntry(
   return entryWithRoutes(entry, [route]);
 }
 
+/** The encrypted routes of the enabled entries, whose forwarders stay running. */
+export function enabledSecureChannelRoutes(
+  entries: Iterable<ConnectionCatalogEntry>,
+): Array<{ readonly httpBaseUrl: string; readonly serverKey: string }> {
+  const routes: Array<{ readonly httpBaseUrl: string; readonly serverKey: string }> = [];
+  for (const entry of entries) {
+    if (!entry.enabled) continue;
+    for (const route of connectionRoutes(entry)) {
+      const profile = Option.getOrNull(route.profile);
+      if (profile?._tag !== "BearerConnectionProfile" || profile.channel === undefined) continue;
+      routes.push({ httpBaseUrl: profile.httpBaseUrl, serverKey: profile.channel.serverKey });
+    }
+  }
+  return routes;
+}
+
+/** Whether a route is reached only through the server's end-to-end encrypted channel. */
+export function isSecureChannelRoute(route: ConnectionRoute): boolean {
+  const profile = Option.getOrNull(route.profile);
+  return profile?._tag === "BearerConnectionProfile" && profile.channel !== undefined;
+}
+
 /** The base URL of a direct route, or null for T3 Connect and SSH. */
 export function routeHttpBaseUrl(route: ConnectionRoute): string | null {
   if (route.target._tag === "PrimaryConnectionTarget") return route.target.httpBaseUrl;
@@ -168,6 +190,11 @@ function routeAddressKey(route: ConnectionRoute): string | null {
 
 /** Short user-facing route description: "LAN", "Tailscale", "T3 Connect", a URL, or an SSH host. */
 export function connectionRouteLabel(route: ConnectionRoute): string {
+  const label = routeKindLabel(route);
+  return isSecureChannelRoute(route) ? `${label} · End-to-end encrypted` : label;
+}
+
+function routeKindLabel(route: ConnectionRoute): string {
   switch (connectionRouteKind(route)) {
     case "relay":
       return "T3 Connect";

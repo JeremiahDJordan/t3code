@@ -20,6 +20,7 @@ import {
   removedWithRelay,
   routesAfterRemoving,
   upsertRoute,
+  isSecureChannelRoute,
 } from "./routes.ts";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
@@ -80,6 +81,47 @@ describe("connection routes", () => {
         ),
       }),
     ).toBe("t3.example.test · Cloudflare Access");
+    const encrypted = (transport: boolean): ConnectionRoute => ({
+      target: new BearerConnectionTarget({
+        environmentId: ENVIRONMENT_ID,
+        label: "Desk",
+        connectionId: "encrypted",
+      }),
+      profile: Option.some(
+        new BearerConnectionProfile({
+          connectionId: "encrypted",
+          environmentId: ENVIRONMENT_ID,
+          label: "Desk",
+          httpBaseUrl: "https://quiet.example.test/",
+          wsBaseUrl: "wss://quiet.example.test/",
+          channel: { serverKey: "server-key" },
+          ...(transport ? { transport: "cloudflare-access" as const } : {}),
+        }),
+      ),
+    });
+    expect(connectionRouteLabel(encrypted(false))).toBe(
+      "quiet.example.test · End-to-end encrypted",
+    );
+    expect(connectionRouteLabel(encrypted(true))).toBe(
+      "quiet.example.test · Cloudflare Access · End-to-end encrypted",
+    );
+    // Any kind of address says so, not just a public hostname.
+    const lanEncrypted: ConnectionRoute = {
+      ...encrypted(false),
+      profile: Option.some(
+        new BearerConnectionProfile({
+          connectionId: "encrypted-lan",
+          environmentId: ENVIRONMENT_ID,
+          label: "Desk",
+          httpBaseUrl: "http://192.168.1.10:17231/",
+          wsBaseUrl: "ws://192.168.1.10:17231/",
+          channel: { serverKey: "server-key" },
+        }),
+      ),
+    };
+    expect(connectionRouteLabel(lanEncrypted)).toBe("LAN · End-to-end encrypted");
+    expect(isSecureChannelRoute(encrypted(false))).toBe(true);
+    expect(isSecureChannelRoute(LAN)).toBe(false);
   });
 
   it("places a new route after faster kinds and ahead of T3 Connect", () => {

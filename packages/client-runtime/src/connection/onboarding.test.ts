@@ -9,22 +9,35 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as RpcHttp from "../rpc/http.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import { fetchRemoteSessionState } from "../authorization/remote.ts";
-import { BearerConnectionCredential, BearerConnectionProfile } from "./catalog.ts";
-import { BearerConnectionTarget } from "./model.ts";
+import {
+  BearerConnectionCredential,
+  BearerConnectionProfile,
+  type ConnectionCatalogEntry,
+} from "./catalog.ts";
+import { BearerConnectionTarget, type NetworkStatus } from "./model.ts";
+import { encodeChannelKey } from "@t3tools/shared/secureChannel/handshake";
+
+import * as SecureChannel from "./secureChannel.ts";
 import {
   connectionTransportHeaders,
+  isSecureChannelHost,
   setConnectionTransportHeaders,
   withConnectionTransportHeaders,
 } from "./transportHeaders.ts";
+import { ConnectionTransientError } from "./model.ts";
+import * as ConnectionOnboarding from "./onboarding.ts";
 import {
   prepareBearerConnectionUpdate,
   preparePairingRegistration,
   prepareSshRegistration,
 } from "./onboarding.ts";
+import * as ConnectionCredentialStore from "./credentialStore.ts";
+import * as EnvironmentRegistry from "./registry.ts";
 
 const layerClientPresentation = Layer.succeed(
   ClientCapabilities.ClientPresentation,
@@ -36,6 +49,29 @@ const layerClientPresentation = Layer.succeed(
     },
   }),
 );
+
+/** A valid 32-byte key, as a pairing link carries it. */
+const CHANNEL_SERVER_KEY = encodeChannelKey(new Uint8Array(32).fill(7));
+
+/** A forwarder that records what it was asked to open, at a fixed local origin. */
+function makeForwarderLog() {
+  const requests: Array<SecureChannel.SecureChannelRouteRequest> = [];
+  const released: Array<SecureChannel.SecureChannelRouteRequest> = [];
+  const layer = Layer.succeed(
+    SecureChannel.SecureChannelForwarder,
+    SecureChannel.SecureChannelForwarder.of({
+      createClientKey: Effect.succeed("client-secret-key"),
+      forward: (request) =>
+        Effect.sync(() => {
+          requests.push(request);
+          return { httpBaseUrl: "http://127.0.0.1:52811/", wsBaseUrl: "ws://127.0.0.1:52811/" };
+        }),
+      release: (request) => Effect.sync(() => void released.push(request)),
+      retain: () => Effect.void,
+    }),
+  );
+  return { requests, released, layer };
+}
 
 function layerPairingHttp(
   calls: Array<{ readonly url: string; readonly init: RequestInit }>,
@@ -362,6 +398,265 @@ describe("connection onboarding", () => {
         cloudflareAccess: ACCESS_TOKEN,
       }).pipe(Effect.provide(layer), Effect.flip);
       expect(plain.message).toContain("https");
+    }),
+  );
+
+  it.effect(
+    "pairs a link carrying the server key through the route's channel, never in plain",
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+        const forwarded = makeForwarderLog();
+        const registration = yield* preparePairingRegistration({
+          pairingUrl: `https://quiet.example.test/pair#token=pairing-token&sk=${CHANNEL_SERVER_KEY}`,
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls), forwarded.layer),
+          ),
+        );
+        // The descriptor and the token exchange went to the local forwarder only.
+        expect(calls.map((call) => new URL(call.url).origin)).toEqual([
+          "http://127.0.0.1:52811",
+          "http://127.0.0.1:52811",
+        ]);
+        expect(forwarded.requests).toEqual([
+          {
+            httpBaseUrl: "https://quiet.example.test/",
+            serverKey: CHANNEL_SERVER_KEY,
+            clientKey: "client-secret-key",
+            pairingCode: "pairing-token",
+          },
+        ]);
+        expect(forwarded.released).toEqual(forwarded.requests);
+        expect(registration.profile.httpBaseUrl).toBe("https://quiet.example.test/");
+        expect(registration.profile.channel).toEqual({ serverKey: CHANNEL_SERVER_KEY });
+        expect(registration.credential.channelClientKey).toEqual({
+          secretKey: "client-secret-key",
+        });
+        expect(isSecureChannelHost("https://quiet.example.test/api/x")).toBe(true);
+      }),
+  );
+
+  it.effect("pairs a host, code and typed-in server key through the channel", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const forwarded = makeForwarderLog();
+      const registration = yield* preparePairingRegistration({
+        host: "typed.example.test",
+        pairingCode: "pairing-token",
+        channelKey: CHANNEL_SERVER_KEY,
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls), forwarded.layer),
+        ),
+      );
+      expect(forwarded.requests[0]?.serverKey).toBe(CHANNEL_SERVER_KEY);
+      expect(registration.profile.channel).toEqual({ serverKey: CHANNEL_SERVER_KEY });
+      expect(calls.every((call) => call.url.startsWith("http://127.0.0.1:52811/"))).toBe(true);
+    }),
+  );
+
+  it.effect("lets a host take plain requests again once its encrypted pairing failed", () =>
+    Effect.gen(function* () {
+      const failing = Layer.succeed(
+        SecureChannel.SecureChannelForwarder,
+        SecureChannel.SecureChannelForwarder.of({
+          createClientKey: Effect.succeed("client-key"),
+          forward: () =>
+            Effect.fail(
+              new ConnectionTransientError({ reason: "network", detail: "Not answering." }),
+            ),
+          release: () => Effect.void,
+          retain: () => Effect.void,
+        }),
+      );
+      yield* Effect.flip(
+        preparePairingRegistration({
+          host: "https://failing.example.test",
+          pairingCode: "pairing-token",
+          channelKey: CHANNEL_SERVER_KEY,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp([]), failing)),
+        ),
+      );
+      expect(isSecureChannelHost("https://failing.example.test/api/x")).toBe(false);
+    }),
+  );
+
+  it.effect("keeps a saved route's pinned key: a link can neither swap nor drop it", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const forwarded = makeForwarderLog();
+      const target = new BearerConnectionTarget({
+        environmentId: EnvironmentId.make("environment-paired"),
+        label: "Paired environment",
+        connectionId: "bearer:environment-paired:https://quiet.example.test",
+      });
+      const entries = yield* SubscriptionRef.make<
+        ReadonlyMap<EnvironmentId, ConnectionCatalogEntry>
+      >(
+        new Map([
+          [
+            target.environmentId,
+            {
+              target,
+              enabled: true,
+              profile: Option.some(
+                new BearerConnectionProfile({
+                  connectionId: target.connectionId,
+                  environmentId: target.environmentId,
+                  label: target.label,
+                  httpBaseUrl: "https://quiet.example.test/",
+                  wsBaseUrl: "wss://quiet.example.test/",
+                  channel: { serverKey: CHANNEL_SERVER_KEY },
+                }),
+              ),
+            },
+          ],
+        ]),
+      );
+      const registered: Array<unknown> = [];
+      const onboarding = yield* ConnectionOnboarding.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
+              entries,
+              networkStatus: yield* SubscriptionRef.make<NetworkStatus>("online"),
+              register: (registration) => Effect.sync(() => void registered.push(registration)),
+            }),
+            layerClientPresentation,
+            layerPairingHttp(calls),
+            Layer.mock(ClientCapabilities.SshEnvironmentGateway)({}),
+            Layer.mock(ConnectionCredentialStore.ConnectionCredentialStore)({}),
+          ),
+        ),
+      );
+      const pair = (channelKey?: string) =>
+        onboarding
+          .registerPairing({
+            host: "https://quiet.example.test",
+            pairingCode: "pairing-token",
+            ...(channelKey === undefined ? {} : { channelKey }),
+          })
+          .pipe(Effect.provide(forwarded.layer));
+
+      const swapped = yield* Effect.flip(pair(encodeChannelKey(new Uint8Array(32).fill(8))));
+      expect(swapped).toMatchObject({ detail: expect.stringContaining("isn't the one saved") });
+      const dropped = yield* Effect.flip(pair());
+      expect(dropped).toMatchObject({ detail: expect.stringContaining("has no server key") });
+      expect(calls).toEqual([]);
+      expect(forwarded.requests).toEqual([]);
+      expect(registered).toEqual([]);
+
+      // Another address whose descriptor echoes the pinned environment: refused before the code is spent.
+      const elsewhere = yield* Effect.flip(
+        onboarding.registerPairing({
+          host: "http://192.168.1.50:3773",
+          pairingCode: "pairing-token",
+        }),
+      );
+      expect(elsewhere).toMatchObject({
+        detail: expect.stringContaining("is saved as end-to-end encrypted"),
+      });
+      expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+        "/.well-known/t3/environment",
+      ]);
+      expect(registered).toEqual([]);
+
+      // Adding it as a route to that environment, as a deep link can open, is refused the same way.
+      const added = yield* Effect.flip(
+        onboarding.registerPairing({
+          host: "http://192.168.1.50:3773",
+          pairingCode: "pairing-token",
+          expectedEnvironmentId: target.environmentId,
+        }),
+      );
+      expect(added).toMatchObject({
+        detail: expect.stringContaining("is saved as end-to-end encrypted"),
+      });
+      expect(registered).toEqual([]);
+
+      yield* pair(CHANNEL_SERVER_KEY);
+      expect(registered).toHaveLength(1);
+    }),
+  );
+
+  it.effect("sends an encrypted route's Access token on the channel, not on plain requests", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const forwarded = makeForwarderLog();
+      const registration = yield* preparePairingRegistration({
+        pairingUrl: `https://hidden.example.test/pair#token=pairing-token&sk=${CHANNEL_SERVER_KEY}`,
+        cloudflareAccess: ACCESS_TOKEN,
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls), forwarded.layer),
+        ),
+      );
+      expect(forwarded.requests[0]?.cloudflareAccess).toEqual(ACCESS_TOKEN);
+      expect(connectionTransportHeaders("https://hidden.example.test/")).toBeUndefined();
+      expect(
+        calls.every((call) => new Headers(call.init.headers).get("CF-Access-Client-Id") === null),
+      ).toBe(true);
+      expect(registration.profile.transport).toBe("cloudflare-access");
+    }),
+  );
+
+  it.effect("refuses an encrypted pairing where the app can't open channels", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const error = yield* preparePairingRegistration({
+        pairingUrl: `https://quiet.example.test/pair#token=pairing-token&sk=${CHANNEL_SERVER_KEY}`,
+      }).pipe(
+        Effect.provide(Layer.mergeAll(layerClientPresentation, layerPairingHttp(calls))),
+        Effect.flip,
+      );
+      expect(error.message).toContain("desktop and mobile apps");
+      expect(calls).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps a route encrypted when edited", () =>
+    Effect.gen(function* () {
+      const environmentId = EnvironmentId.make("environment-encrypted");
+      const entry = Option.some({
+        target: new BearerConnectionTarget({
+          environmentId,
+          label: "Desk",
+          connectionId: "bearer:encrypted",
+        }),
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: "bearer:encrypted",
+            environmentId,
+            label: "Desk",
+            httpBaseUrl: "https://quiet.example.test/",
+            wsBaseUrl: "wss://quiet.example.test/",
+            channel: { serverKey: CHANNEL_SERVER_KEY },
+          }),
+        ),
+        enabled: true,
+      });
+      const credential = Option.some(
+        new BearerConnectionCredential({
+          token: "bearer-token",
+          channelClientKey: { secretKey: "client-secret-key" },
+        }),
+      );
+      const updated = yield* prepareBearerConnectionUpdate({
+        input: {
+          environmentId,
+          label: "Renamed",
+          httpBaseUrl: "https://quiet.example.test/",
+          cloudflareAccess: ACCESS_TOKEN,
+        },
+        entry,
+        credential,
+      });
+      expect(updated.profile.channel).toEqual({ serverKey: CHANNEL_SERVER_KEY });
+      expect(updated.credential).toMatchObject({
+        channelClientKey: { secretKey: "client-secret-key" },
+      });
     }),
   );
 

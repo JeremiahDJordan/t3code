@@ -51,6 +51,10 @@
       "types": "./src/connection/index.ts",
       "default": "./src/connection/index.ts"
     },
+    "./connection/secureChannel": {
+      "types": "./src/connection/secureChannel.ts",
+      "default": "./src/connection/secureChannel.ts"
+    },
     "./authorization": {
       "types": "./src/authorization/index.ts",
       "default": "./src/authorization/index.ts"

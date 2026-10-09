@@ -1,3 +1,4 @@
+import { channelKeyFingerprint, decodeChannelKey } from "@t3tools/shared/secureChannel/handshake";
 import {
   resolveEnvironmentMachineKind,
   type EnvironmentMachineKind,
@@ -88,6 +89,8 @@ export interface EnvironmentConnectionSummary {
   readonly isRelayManaged: boolean;
   /** Whether the direct route an edit changes sits behind Cloudflare Access. */
   readonly usesCloudflareAccess: boolean;
+  /** The pinned server key's fingerprint when that route is end-to-end encrypted. */
+  readonly secureChannelFingerprint: string | null;
   readonly isEnabled: boolean;
   readonly connectionState: EnvironmentConnectionPhase;
   readonly connectionError: string | null;
@@ -103,6 +106,12 @@ function editedBearerProfile(entry: ConnectionCatalogEntry): BearerConnectionPro
   return profile?._tag === "BearerConnectionProfile" ? profile : undefined;
 }
 
+function secureChannelFingerprint(profile: BearerConnectionProfile | undefined): string | null {
+  const key =
+    profile?.channel === undefined ? undefined : decodeChannelKey(profile.channel.serverKey);
+  return key === undefined ? null : channelKeyFingerprint(key);
+}
+
 export function projectEnvironmentConnectionSummary(
   environmentId: EnvironmentId,
   environment: EnvironmentPresentation,
@@ -113,6 +122,7 @@ export function projectEnvironmentConnectionSummary(
     displayUrl: connectionCatalogDisplayUrl(environment.entry) ?? "",
     isRelayManaged: hasRelayRoute(environment.entry),
     usesCloudflareAccess: editedBearerProfile(environment.entry)?.transport === "cloudflare-access",
+    secureChannelFingerprint: secureChannelFingerprint(editedBearerProfile(environment.entry)),
     isEnabled: environment.entry.enabled,
     connectionState: environment.connection.phase,
     connectionError: environment.connection.error,
@@ -168,6 +178,7 @@ export function createEnvironmentSummaryAtoms(input: {
         previous.displayUrl === next.displayUrl &&
         previous.isRelayManaged === next.isRelayManaged &&
         previous.usesCloudflareAccess === next.usesCloudflareAccess &&
+        previous.secureChannelFingerprint === next.secureChannelFingerprint &&
         previous.isEnabled === next.isEnabled &&
         previous.connectionState === next.connectionState &&
         previous.connectionError === next.connectionError &&

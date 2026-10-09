@@ -30,7 +30,12 @@ import * as RpcSession from "../rpc/session.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { NETWORK_BLOCKING_HINT } from "../errors/network.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
-import { connectionRouteId, connectionRoutes, entryWithRoutes } from "./routes.ts";
+import {
+  connectionRouteId,
+  connectionRoutes,
+  entryWithRoutes,
+  isSecureChannelRoute,
+} from "./routes.ts";
 
 const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 300_000;
@@ -322,7 +327,9 @@ export const make = Effect.fn("EnvironmentSupervisor.make")(function* (
     const activeRoute = (yield* currentRoutes).find(
       (route) => connectionRouteId(route.target) === activeId,
     );
-    if (activeRoute === undefined) return;
+    // Learning the server's LAN or Tailscale addresses would quietly move traffic off the
+    // encrypted path; a user who wants that fast path adds it.
+    if (activeRoute === undefined || isSecureChannelRoute(activeRoute)) return;
     const updated = yield* learn({ activeRoute, reported });
     if (Option.isSome(updated)) {
       yield* Ref.set(currentEntry, updated.value);

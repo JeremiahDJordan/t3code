@@ -110,6 +110,38 @@ describe("connection presentation", () => {
     expect(environmentMcpUrl({ entry })).toBe("http://192.168.4.53:3773/mcp");
   });
 
+  it("never offers an encrypted route's public address, which answers no plain request", () => {
+    const encrypted: ConnectionRoute = {
+      target: new BearerConnectionTarget({ ...TARGET, connectionId: "tunnel" }),
+      profile: Option.some(
+        new BearerConnectionProfile({
+          connectionId: "tunnel",
+          environmentId: TARGET.environmentId,
+          label: TARGET.label,
+          httpBaseUrl: "https://quiet.example.test/",
+          wsBaseUrl: "wss://quiet.example.test/",
+          channel: { serverKey: "server-key" },
+        }),
+      ),
+    };
+    const entry: ConnectionCatalogEntry = {
+      ...ENTRY,
+      target: encrypted.target,
+      profile: encrypted.profile,
+      alternateRoutes: [{ target: ENTRY.target, profile: ENTRY.profile }],
+    };
+
+    expect(environmentMcpUrl({ entry, connectedTarget: encrypted.target })).toBe(
+      "https://environment.example.test/mcp",
+    );
+    expect(
+      environmentMcpUrl({
+        entry: { ...entry, alternateRoutes: [] },
+        connectedTarget: encrypted.target,
+      }),
+    ).toBeNull();
+  });
+
   it("passes over routes without an address of their own", () => {
     const relay = new RelayConnectionTarget({
       environmentId: TARGET.environmentId,

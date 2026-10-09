@@ -13,6 +13,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Scheduler from "effect/Scheduler";
@@ -55,6 +56,7 @@ import {
 import * as Persistence from "../platform/persistence.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import * as EnvironmentRegistry from "./registry.ts";
+import * as SecureChannel from "./secureChannel.ts";
 import {
   GitHubRoutingPermissions,
   type StoredGitHubRoutingPermission,
@@ -1074,6 +1076,39 @@ describe("EnvironmentRegistry", () => {
           false,
         );
       }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("stops an encrypted route's forwarder once the route is switched off", () =>
+    Effect.gen(function* () {
+      const encrypted = new BearerConnectionProfile({
+        ...BEARER_PROFILE,
+        channel: { serverKey: "server-key" },
+      });
+      const harness = yield* makeHarness(
+        [BEARER_TARGET],
+        [encrypted],
+        [[BEARER_TARGET.connectionId, BEARER_CREDENTIAL]],
+      );
+      const retained = yield* Queue.unbounded<ReadonlyArray<SecureChannel.SecureChannelRoute>>();
+      const forwarder = Layer.succeed(
+        SecureChannel.SecureChannelForwarder,
+        SecureChannel.SecureChannelForwarder.of({
+          createClientKey: Effect.die("unused"),
+          forward: () => Effect.die("unused"),
+          release: () => Effect.void,
+          retain: (routes) => Queue.offer(retained, routes).pipe(Effect.asVoid),
+        }),
+      );
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        expect(yield* Queue.take(retained)).toEqual([
+          { httpBaseUrl: "https://bearer.example.test", serverKey: "server-key" },
+        ]);
+        yield* registry.setEnabled(BEARER_TARGET.environmentId, false);
+        expect(yield* Queue.take(retained)).toEqual([]);
+      }).pipe(Effect.provide(harness.layer.pipe(Layer.provide(forwarder))));
     }),
   );
 

@@ -2048,4 +2048,48 @@ describe("EnvironmentSupervisor routes", () => {
       ]);
     }),
   );
+  it.effect("learns no plain address while connected over an encrypted route", () =>
+    Effect.gen(function* () {
+      const encryptedTarget = new BearerConnectionTarget({
+        environmentId: TARGET.environmentId,
+        label: TARGET.label,
+        connectionId: "bearer:encrypted",
+      });
+      const encryptedEntry: ConnectionCatalogEntry = {
+        target: encryptedTarget,
+        profile: Option.some(
+          new BearerConnectionProfile({
+            connectionId: encryptedTarget.connectionId,
+            environmentId: TARGET.environmentId,
+            label: TARGET.label,
+            httpBaseUrl: "https://quiet.example.test/",
+            wsBaseUrl: "wss://quiet.example.test/",
+            channel: { serverKey: "server-key" },
+          }),
+        ),
+        enabled: true,
+      };
+      const configRead = yield* Deferred.make<void>();
+      const learnCalls = yield* Ref.make(0);
+      const harness = yield* makeHarness({
+        checkRoute: () => Effect.succeed("unchecked"),
+        prepare: (_attempt, target) => Effect.succeed(preparedFor(target)),
+        initialConfig: () =>
+          Deferred.succeed(configRead, undefined).pipe(
+            Effect.as({
+              directEndpoints: [{ kind: "lan", httpBaseUrl: "http://192.168.1.10:3773/" }],
+            } as unknown as ServerConfig),
+          ),
+      });
+      yield* EnvironmentSupervisor.make(encryptedEntry, {
+        initiallyDesired: true,
+        learnRoutes: () =>
+          Ref.update(learnCalls, (count) => count + 1).pipe(Effect.as(Option.none())),
+      }).pipe(Effect.provide(harness.dependencies));
+      // Learning runs straight on from reading the reported addresses, so one turn settles it.
+      yield* Deferred.await(configRead);
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(learnCalls)).toBe(0);
+    }),
+  );
 });

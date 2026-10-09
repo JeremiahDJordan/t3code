@@ -1,5 +1,6 @@
 import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
+import { channelKeyFingerprint, decodeChannelKey } from "@t3tools/shared/secureChannel/handshake";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -33,8 +34,11 @@ import * as Persistence from "../platform/persistence.ts";
 import * as EnvironmentRegistry from "./registry.ts";
 import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 import { connectionRoutes, routeEntry, sshTargetKey } from "./routes.ts";
+import * as SecureChannel from "./secureChannel.ts";
 import {
   cloudflareAccessHeaders,
+  holdSecureChannelHost,
+  markSecureChannelHost,
   setConnectionTransportHeaders,
   type CloudflareAccessServiceToken,
 } from "./transportHeaders.ts";
@@ -50,6 +54,8 @@ export interface PairingConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
   /** The service token of an address behind Cloudflare Access, sent with every request to it. */
   readonly cloudflareAccess?: CloudflareAccessServiceToken;
+  /** A server key typed in by hand, making the route end-to-end encrypted; a link carries it as `sk`. */
+  readonly channelKey?: string;
 }
 
 export interface SshConnectionInput {
@@ -117,22 +123,29 @@ function differentMachineError(label: string) {
   });
 }
 
+/** What pairing needs to know about the environments already saved. */
+export interface SavedPins {
+  /** The server key an environment's encrypted route pins, if it has one. */
+  readonly pinnedServerKeyOf?: (environmentId: EnvironmentId) => string | undefined;
+}
+
 export const preparePairingRegistration = Effect.fn(
   "clientRuntime.connection.onboarding.preparePairingRegistration",
-)(function* (input: PairingConnectionInput) {
+)(function* (input: PairingConnectionInput, saved: SavedPins = {}) {
   const target = yield* resolvePairingTarget(input);
   const access = input.cloudflareAccess;
+  if (access !== undefined && !target.httpBaseUrl.startsWith("https://")) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: "An address behind Cloudflare Access must use https.",
+    });
+  }
+  if (target.channelKey !== undefined) return yield* pairThroughChannel(target, input, saved);
   if (access !== undefined) {
-    if (!target.httpBaseUrl.startsWith("https://")) {
-      return yield* new ConnectionBlockedError({
-        reason: "configuration",
-        detail: "An address behind Cloudflare Access must use https.",
-      });
-    }
     // Access turns away every request without the token, the first descriptor fetch included.
     setConnectionTransportHeaders(target.httpBaseUrl, cloudflareAccessHeaders(access));
   }
-  return yield* pairWith(target, input).pipe(
+  return yield* pairWith(target, input, saved).pipe(
     Effect.tapError(() =>
       Effect.sync(() => {
         if (access !== undefined) setConnectionTransportHeaders(target.httpBaseUrl, undefined);
@@ -141,13 +154,66 @@ export const preparePairingRegistration = Effect.fn(
   );
 });
 
+/**
+ * Pairs a link carrying the server's channel key: this device gets its own key for the route, and
+ * pairing runs through the route's forwarder with the code in message 1, so neither the code nor
+ * the token crosses the tunnel in plain. The route is saved channel-only.
+ */
+const pairThroughChannel = Effect.fn("clientRuntime.connection.onboarding.pairThroughChannel")(
+  function* (
+    target: ReturnType<typeof resolveRemotePairingTarget>,
+    input: PairingConnectionInput,
+    saved: SavedPins,
+  ) {
+    const serverKey = target.channelKey;
+    if (serverKey === undefined || decodeChannelKey(serverKey) === undefined) {
+      return yield* new ConnectionBlockedError({
+        reason: "configuration",
+        detail: "The pairing link's server key is malformed.",
+      });
+    }
+    const forwarder = yield* Effect.serviceOption(SecureChannel.SecureChannelForwarder);
+    if (Option.isNone(forwarder)) return yield* SecureChannel.unsupportedError();
+    // Held for the pairing's sake, and marked for good only once it pairs.
+    const release = holdSecureChannelHost(target.httpBaseUrl);
+    return yield* Effect.gen(function* () {
+      const clientKey = yield* forwarder.value.createClientKey;
+      const request = {
+        httpBaseUrl: target.httpBaseUrl,
+        serverKey,
+        clientKey,
+        pairingCode: target.credential,
+        ...(input.cloudflareAccess === undefined
+          ? {}
+          : { cloudflareAccess: input.cloudflareAccess }),
+      } satisfies SecureChannel.SecureChannelRouteRequest;
+      return yield* forwarder.value.forward(request).pipe(
+        Effect.flatMap((local) =>
+          pairWith(target, input, saved, { via: local, channel: { serverKey, clientKey } }),
+        ),
+        Effect.ensuring(forwarder.value.release(request)),
+      );
+    }).pipe(
+      Effect.tap(() => Effect.sync(() => markSecureChannelHost(target.httpBaseUrl))),
+      Effect.ensuring(Effect.sync(release)),
+    );
+  },
+);
+
 const pairWith = Effect.fn("clientRuntime.connection.onboarding.pairWith")(function* (
   target: ReturnType<typeof resolveRemotePairingTarget>,
   input: PairingConnectionInput,
+  saved: SavedPins,
+  /** For an encrypted route: where to send its requests, and the keys to save with it. */
+  channelRoute?: {
+    readonly via: SecureChannel.SecureChannelLocalOrigins;
+    readonly channel: { readonly serverKey: string; readonly clientKey: string };
+  },
 ) {
   const presentation = yield* ClientCapabilities.ClientPresentation;
+  const requestBaseUrl = channelRoute?.via.httpBaseUrl ?? target.httpBaseUrl;
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
-    httpBaseUrl: target.httpBaseUrl,
+    httpBaseUrl: requestBaseUrl,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   // Checked before redeeming the one-time code, so a wrong link is not spent.
   if (
@@ -156,13 +222,23 @@ const pairWith = Effect.fn("clientRuntime.connection.onboarding.pairWith")(funct
   ) {
     return yield* differentMachineError(descriptor.label);
   }
+  // A pinned environment takes a link only with its key, from any flow, adding a route included.
+  // Otherwise a phished link for any address that echoes its id, which isn't secret, would add a
+  // plain route to it, and a LAN one would be tried first.
+  const pinned = saved.pinnedServerKeyOf?.(descriptor.environmentId);
+  if (pinned !== undefined && channelRoute?.channel.serverKey !== pinned) {
+    return yield* new ConnectionBlockedError({
+      reason: "configuration",
+      detail: `${descriptor.label} is saved as end-to-end encrypted, and this link ${channelRoute === undefined ? "has no server key" : "has a different server key"}. It takes only encrypted links with its key; if its key changed, remove the environment, then pair again.`,
+    });
+  }
   const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
   // An outdated server is still saved so it can be updated from this client.
   if (compatibilityError !== null && compatibilityError.serverUpdateRequired !== true) {
     return yield* compatibilityError;
   }
   const access = yield* bootstrapRemoteBearerSession({
-    httpBaseUrl: target.httpBaseUrl,
+    httpBaseUrl: requestBaseUrl,
     credential: target.credential,
     clientMetadata: presentation.metadata,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
@@ -181,21 +257,86 @@ const pairWith = Effect.fn("clientRuntime.connection.onboarding.pairWith")(funct
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
       ...(input.cloudflareAccess === undefined ? {} : { transport: "cloudflare-access" as const }),
+      ...(channelRoute === undefined
+        ? {}
+        : { channel: { serverKey: channelRoute.channel.serverKey } }),
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
       ...(input.cloudflareAccess === undefined
         ? {}
         : { cloudflareAccess: { ...input.cloudflareAccess } }),
+      ...(channelRoute === undefined
+        ? {}
+        : { channelClientKey: { secretKey: channelRoute.channel.clientKey } }),
     }),
   });
 });
 
+/** The server key a saved encrypted route pins, among the routes of `entries` that `matches`. */
+function pinnedServerKey(
+  entries: Iterable<ConnectionCatalogEntry>,
+  matches: (profile: BearerConnectionProfile) => boolean,
+): string | undefined {
+  for (const entry of entries) {
+    for (const route of connectionRoutes(entry)) {
+      const profile = Option.getOrNull(route.profile);
+      if (
+        profile !== null &&
+        isBearerProfile(profile) &&
+        profile.channel !== undefined &&
+        matches(profile)
+      ) {
+        return profile.channel.serverKey;
+      }
+    }
+  }
+  return undefined;
+}
+
+const fingerprint = (key: string) => {
+  const decoded = decodeChannelKey(key);
+  return decoded === undefined ? "unreadable" : channelKeyFingerprint(decoded);
+};
+
+/**
+ * Keeps an encrypted route's pinned key: a link for its address must carry the same key, so a
+ * second link can neither swap it, as a taken-over hostname would want, nor drop it for plain
+ * requests. Checked before any request. A rotated key means removing the environment first.
+ */
+export function refusePinChange(
+  entries: Iterable<ConnectionCatalogEntry>,
+  target: { readonly httpBaseUrl: string; readonly channelKey?: string | undefined },
+): ConnectionBlockedError | undefined {
+  const origin = new URL(target.httpBaseUrl).origin;
+  const pinned = pinnedServerKey(
+    entries,
+    (profile) => new URL(profile.httpBaseUrl).origin === origin,
+  );
+  if (pinned === undefined || target.channelKey === pinned) return undefined;
+  const host = new URL(target.httpBaseUrl).host;
+  return new ConnectionBlockedError({
+    reason: "configuration",
+    detail:
+      target.channelKey === undefined
+        ? `${host} is saved as end-to-end encrypted, and this link has no server key. Pair with an encrypted link.`
+        : `This link's server key (${fingerprint(target.channelKey)}) isn't the one saved for ${host} (${fingerprint(pinned)}). If the server's key changed, remove the environment, then pair again.`,
+  });
+}
+
 const registerPairingConnection = Effect.fn(
   "clientRuntime.connection.onboarding.registerPairingConnection",
 )(function* (input: PairingConnectionInput) {
-  const registration = yield* preparePairingRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const entries = yield* SubscriptionRef.get(registry.entries);
+  const pinChange = refusePinChange(entries.values(), yield* resolvePairingTarget(input));
+  if (pinChange !== undefined) return yield* pinChange;
+  const registration = yield* preparePairingRegistration(input, {
+    pinnedServerKeyOf: (environmentId) => {
+      const entry = entries.get(environmentId);
+      return entry === undefined ? undefined : pinnedServerKey([entry], () => true);
+    },
+  });
   yield* registry.register(registration);
   return registration.target.environmentId;
 });
@@ -296,6 +437,10 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
       ...(cloudflareAccess === undefined ? {} : { transport: "cloudflare-access" as const }),
+      // An encrypted route stays encrypted, with the server key it was paired with.
+      ...(entry.profile.value.channel === undefined
+        ? {}
+        : { channel: entry.profile.value.channel }),
     }),
     credential:
       options.input.cloudflareAccess === undefined
@@ -303,6 +448,9 @@ export const prepareBearerConnectionUpdate = Effect.fn(
         : new BearerConnectionCredential({
             token: credential.value.token,
             cloudflareAccess: { ...options.input.cloudflareAccess },
+            ...(credential.value.channelClientKey === undefined
+              ? {}
+              : { channelClientKey: credential.value.channelClientKey }),
           }),
   });
 });
