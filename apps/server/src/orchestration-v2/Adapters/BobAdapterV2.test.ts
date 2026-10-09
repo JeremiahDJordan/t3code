@@ -1299,6 +1299,66 @@ describe("BobAdapterV2 turns", () => {
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
+  it.effect("asks when a restriction lands where the work started while the reviewer judges", () =>
+    Effect.gen(function* () {
+      const startedIn = ThreadId.make("thread-written-in-while-judging");
+      const messages = [{ id: "message-first", text: "You may search the web for this task." }];
+      let judged = 0;
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: () =>
+          Effect.sync(() => {
+            judged += 1;
+            // The user forbids the search while the model allows it by the earlier permission.
+            messages.push({ id: "message-later", text: "Never search the web for this task." });
+            return { decision: "allow" as const, reason: "test" };
+          }),
+        extract: (text) => Effect.succeed(quotesOf(text)),
+      };
+      const bob = yield* openBob({
+        runtimeMode: "auto",
+        platform: "linux",
+        autoJudge: judge,
+        userMessages: () => messages,
+      });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(session, providerThread, "ask about search", {
+        delegatedFrom: startedIn,
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            for (;;) {
+              const event = yield* nextEvent;
+              if (event.type === "turn.terminal") return;
+              if (
+                event.type === "runtime_request.updated" &&
+                event.runtimeRequest.status === "pending"
+              ) {
+                return yield* session.respondToRuntimeRequest({
+                  requestId: event.runtimeRequest.id,
+                  decision: "decline",
+                });
+              }
+            }
+          }),
+      });
+      // The allow the model gave by the permission alone does not count: the user decides.
+      assert.equal(judged, 1);
+      assert.deepEqual(
+        bob
+          .requests()
+          .filter((request) => request.method === "_mock/permission")
+          .map((request) => `${String(request.params.tool)}=${String(request.params.outcome)}`),
+        ["search=reject"],
+      );
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
   it.effect(
     "quotes every message where the work started, however much came after a restriction",
     () =>
