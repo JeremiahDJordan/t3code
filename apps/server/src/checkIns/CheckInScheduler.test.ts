@@ -60,6 +60,8 @@ function thread(
     readonly completedAt?: number;
     readonly running?: boolean;
     readonly pendingApproval?: boolean;
+    /** The thread is a task delegated from this one. */
+    readonly delegatedFrom?: ThreadId;
   } = {},
 ): OrchestrationV2ThreadShell {
   const completedAt = options.completedAt ?? START - MINUTE;
@@ -77,7 +79,14 @@ function thread(
     creationSource: "web",
     branch: null,
     worktreePath: null,
-    lineage: { rootThreadId: id, parentThreadId: null, relationshipToParent: null },
+    lineage:
+      options.delegatedFrom === undefined
+        ? { rootThreadId: id, parentThreadId: null, relationshipToParent: null }
+        : {
+            rootThreadId: options.delegatedFrom,
+            parentThreadId: options.delegatedFrom,
+            relationshipToParent: "subagent",
+          },
     forkedFrom: null,
     activeProviderThreadId: null,
     latestRunId: runId,
@@ -902,6 +911,36 @@ describe("CheckInScheduler waits", () => {
         expect(yield* scheduler.list(THREAD_ID)).toEqual([wait]);
       }),
     ),
+  );
+
+  it.effect(
+    "refuses check-ins and waits from a delegated task, whose answer its turn's end takes",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          yield* TestClock.setTime(START);
+          const { scheduler, setThread } = yield* makeHarness();
+          yield* setThread(thread({ id: OTHER_THREAD_ID, delegatedFrom: THREAD_ID }));
+          const checkIn = yield* Effect.flip(
+            scheduler.schedule({
+              threadId: OTHER_THREAD_ID,
+              note: "Check the tests.",
+              inMinutes: 5,
+              repeatEveryMinutes: null,
+            }),
+          );
+          expect(checkIn.detail).toContain("delegated task");
+          const wait = yield* Effect.flip(
+            scheduler.scheduleWait({
+              threadId: OTHER_THREAD_ID,
+              targetThreadId: THREAD_ID,
+              note: "",
+            }),
+          );
+          expect(wait.detail).toContain("t3_thread_wait");
+          expect(yield* scheduler.list(OTHER_THREAD_ID)).toEqual([]);
+        }),
+      ),
   );
 
   it.effect("refuses a wait on itself or on another project's thread", () =>

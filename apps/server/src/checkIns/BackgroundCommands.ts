@@ -263,6 +263,14 @@ const make = Effect.gen(function* () {
           if (shell === null || shell.archivedAt !== null || shell.deletedAt !== null) {
             return yield* refuse("This thread is archived or no longer exists.");
           }
+          // A delegated task's answer is taken when its turn ends, and a workflow then removes
+          // its worktree, so a command it left running would report to no one, from a deleted
+          // folder.
+          if (shell.lineage.relationshipToParent === "subagent") {
+            return yield* refuse(
+              "This is a delegated task, whose answer is taken when its turn ends, so it cannot leave a command running. Run the command in the foreground and wait for it.",
+            );
+          }
           if (shell.runtimeMode !== "full-access") {
             return yield* refuse(
               "Background commands run outside your sandbox, so they need this thread in Full access. Ask the user to switch the thread to Full access, or run the command with your own shell tool.",

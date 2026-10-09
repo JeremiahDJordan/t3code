@@ -469,6 +469,39 @@ describe.skipIf(!tmuxInstalled)("BackgroundCommands (real tmux)", () => {
     ),
   );
 
+  it.live("refuses a delegated task, whose answer its turn's end takes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const dirs = freshDirs();
+        const persistence = yield* buildPersistence;
+        const { commands } = yield* makeHarness({
+          ...dirs,
+          persistence,
+          adjustThread: (shell) => ({
+            ...shell,
+            lineage: {
+              rootThreadId: ThreadId.make("thread-parent"),
+              parentThreadId: ThreadId.make("thread-parent"),
+              relationshipToParent: "subagent",
+            },
+          }),
+        });
+        const refused = yield* Effect.flip(
+          commands.start({
+            threadId: THREAD_ID,
+            command: "echo hi",
+            statusEveryMinutes: null,
+            note: "",
+            tailLines: 0,
+            notifyOn: null,
+          }),
+        );
+        expect(refused.detail).toContain("delegated task");
+        expect(yield* commands.list(THREAD_ID)).toEqual([]);
+      }),
+    ),
+  );
+
   it.live("never signals or waits on a pid recorded before the last boot", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -332,6 +332,14 @@ const make = Effect.gen(function* () {
     if (shell === null || shell.archivedAt !== null || shell.deletedAt !== null) {
       return yield* new CheckInError({ detail: "This thread is archived or no longer exists." });
     }
+    // A delegated task's answer is taken when its turn ends, so a check-in or a wait it set
+    // would wake it after nobody reads what it says.
+    if (shell.lineage.relationshipToParent === "subagent") {
+      return yield* new CheckInError({
+        detail:
+          "This is a delegated task, whose answer is taken when its turn ends, so it cannot wait for a check-in or another thread. Finish the work in this turn; to wait on a thread, use t3_thread_wait.",
+      });
+    }
     const settings = yield* settingsService.getSettings.pipe(
       Effect.catch(failure("Could not read T3 Code's settings.")),
     );
