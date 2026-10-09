@@ -1734,6 +1734,7 @@ function openBobSandbox(
       shell: options.environment.SHELL,
       cacheDir: options.host.paths.providerStatusCacheDir,
       stateDir: options.host.paths.stateDir,
+      attachmentsDir: options.host.paths.attachmentsDir,
       key: `${options.instanceId}\0${rules.threadId ?? ""}\0${cwd}`,
       temporaryFolders: [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp"],
       searchPath: options.environment.PATH,

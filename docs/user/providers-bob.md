@@ -139,7 +139,11 @@ Rules change what Bob may do without asking, outside **Full access**:
   outside the sandbox without asking.
 - **Always ask**: commands starting with these words always ask, even in the sandbox.
 - **Commands may read** and **Commands may write in**: folders the sandbox opens, such as a
-  tool's settings in `~/.vercel` or a cache in `~/Library/Caches/go-build`.
+  tool's settings in `~/.vercel` or a cache in `~/Library/Caches/go-build`. A folder that
+  holds your home folder, or the home folder itself, only opens for reading: writing there
+  would let commands replace tools that run outside the sandbox. A rule for a path that
+  passes through a symlink, below your home folder, the project's folder or anywhere else,
+  opens nothing, since a command could have made the link; name the folder it points to.
 - **Keep private**: paths commands never read or write, and Bob's own edits of them ask. Bob's
   own reads still go through, since Bob does not ask before them.
 
