@@ -36,11 +36,16 @@ one instance's environment variables give Bob a different `HOME`.
 ## Projects and approvals
 
 T3 Code tells Bob to trust each project folder you open, and Bob remembers it, so
-you do not need to trust the folder in Bob first. After Bob has run in a project,
-its skills and MCP prompts appear in the composer's `/` menu. When a thread moves
-to another folder, such as picking a branch that lives in another worktree, Bob
-moves the conversation with it (Bob 2.0.5 or later). A Bob thread from before T3 Code's
-[thread migration](./thread-migration.md) continues its Bob task.
+you do not need to trust the folder in Bob first. A trusted folder's own Bob setup runs
+when a Bob thread opens there: the MCP servers in its `.bob/mcp.json` and `.bob/plugins`,
+and the hooks in its `.bob/settings.json`. Bob starts them on your computer, in every mode
+and outside T3 Code's sandbox, so use Bob only in projects you trust, as you would before
+running their build.
+
+After Bob has run in a project, its skills and MCP prompts appear in the composer's `/`
+menu. When a thread moves to another folder, such as picking a branch that lives in another
+worktree, Bob moves the conversation with it (Bob 2.0.5 or later). A Bob thread from before
+T3 Code's [thread migration](./thread-migration.md) continues its Bob task.
 
 Reverting a thread, or editing and resubmitting an earlier turn, rewinds Bob's
 conversation as well, as rolling back a task in Bob's IDE does: Bob continues from
