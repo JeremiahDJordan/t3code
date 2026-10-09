@@ -869,8 +869,8 @@ export const make = Effect.gen(function* () {
     });
 
     // Bob keeps its history in one task database per home. Every account
-    // counts, disabled ones too, and an explicit default slot replaces the
-    // legacy settings, as for the transcript providers above.
+    // counts, disabled ones too, and without a default slot the default home
+    // is read, as for the transcript providers above.
     const bob = Effect.gen(function* () {
       const environments = Object.values(settings.providerInstances).flatMap((instance) =>
         instance.driver === "bob" ? [instance.environment] : [],

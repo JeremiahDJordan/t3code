@@ -440,7 +440,7 @@ const HISTORY_RESTORED_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set(
  * wins. Blobs that match a fresh install (empty, or only an `enabled` flag
  * equal to the driver default) carry nothing and are dropped.
  *
- * A cursor/grok/opencode slot without an `enabled` flag is enabled when
+ * A cursor/grok/bob/opencode slot without an `enabled` flag is enabled when
  * provider history shows the driver was used, which is how those drivers
  * were opted into before they had an explicit flag. Callers run this only
  * while the settings file still has the retired map, so it happens once.
@@ -473,7 +473,7 @@ function migrateLegacyProviderSettings(
         : instance;
   }
 
-  // History restores a never-configured cursor/grok/opencode slot too.
+  // History restores a never-configured cursor/grok/bob/opencode slot too.
   const legacyEntries = new Map(Object.entries(legacyProviders));
   for (const driver of HISTORY_RESTORED_DRIVERS) {
     if (!legacyEntries.has(driver)) legacyEntries.set(driver, {});
@@ -514,6 +514,7 @@ const TEXT_GENERATION_FALLBACK_DRIVERS = [
   "claudeAgent",
   "cursor",
   "grok",
+  "bob",
   "muse",
   "pi",
   "opencode",
