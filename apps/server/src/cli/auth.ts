@@ -26,10 +26,14 @@ import {
   DurationFromString,
   resolveCliAuthConfig,
 } from "./config.ts";
+import { layerChannelKey, readChannelPublicKey } from "./channel.ts";
+import type * as SecureChannelKey from "../secureChannel/SecureChannelKey.ts";
 
 const runWithEnvironmentAuth = <A, E>(
   flags: CliAuthLocationFlags,
-  run: (environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  run: (
+    environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
+  ) => Effect.Effect<A, E, SecureChannelKey.SecureChannelKey>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -43,7 +47,7 @@ const runWithEnvironmentAuth = <A, E>(
       return yield* run(environmentAuth);
     }).pipe(
       Effect.provide(
-        Layer.mergeAll(EnvironmentAuth.layerRuntime).pipe(
+        Layer.mergeAll(EnvironmentAuth.layerRuntime, layerChannelKey(config)).pipe(
           Layer.provide(ServerConfig.layer(config)),
           Layer.provide(Layer.succeed(References.MinimumLogLevel, minimumLogLevel)),
         ),
@@ -77,6 +81,13 @@ const baseUrlFlag = Flag.String("base-url").pipe(
   Flag.optional,
 );
 
+const secureChannelFlag = Flag.Boolean("secure-channel").pipe(
+  Flag.withDescription(
+    "Add the server's channel key to the --base-url link, to pair end-to-end encrypted through the secure channel gateway.",
+  ),
+  Flag.withDefault(false),
+);
+
 const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDescription("Print only the issued bearer token."),
   Flag.withDefault(false),
@@ -88,6 +99,7 @@ const pairingCreateCommand = Command.make("create", {
   ttl: ttlFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
+  secureChannel: secureChannelFlag,
   json: jsonFlag,
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
@@ -102,9 +114,11 @@ const pairingCreateCommand = Command.make("create", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
+          const channelKey = flags.secureChannel ? yield* readChannelPublicKey : undefined;
           const output = formatIssuedPairingCredential(issued, {
             json: flags.json,
             ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+            ...(channelKey === undefined ? {} : { channelKey }),
           });
           yield* Console.log(output);
         }),

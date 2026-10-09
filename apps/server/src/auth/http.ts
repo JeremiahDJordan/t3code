@@ -24,6 +24,7 @@ import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { identity } from "effect/Function";
 import * as Layer from "effect/Layer";
@@ -37,6 +38,7 @@ import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
+import * as SecureChannelConnections from "../secureChannel/SecureChannelConnections.ts";
 
 const CREDENTIAL_RESPONSE_HEADERS = {
   "cache-control": "no-store",
@@ -313,6 +315,9 @@ export const layer = HttpApiBuilder.group(
                 previousCredential?.source === "legacy-cookie"
                 ? previousCredential.token
                 : undefined,
+              Option.getOrUndefined(
+                yield* Effect.serviceOption(SecureChannelConnections.SecureChannelConnections),
+              )?.clientKeyOf(request),
             );
             const cookieName = result.cookieName ?? sessions.cookieName;
             const selectedCookie = yield* Effect.fromResult(
@@ -381,6 +386,9 @@ export const layer = HttpApiBuilder.group(
                 )
               : undefined;
             yield* appendCredentialResponseHeaders;
+            const channelClientKey = Option.getOrUndefined(
+              yield* Effect.serviceOption(SecureChannelConnections.SecureChannelConnections),
+            )?.clientKeyOf(request);
             return yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
               args.payload.subject_token,
               requestedScopes,
@@ -394,7 +402,10 @@ export const layer = HttpApiBuilder.group(
                   ...(args.payload.client_os ? { os: args.payload.client_os } : {}),
                 },
               }),
-              proofKeyThumbprint ? { proofKeyThumbprint } : undefined,
+              {
+                ...(proofKeyThumbprint ? { proofKeyThumbprint } : {}),
+                ...(channelClientKey ? { channelClientKey } : {}),
+              },
             );
           },
           traceRelayRequest,

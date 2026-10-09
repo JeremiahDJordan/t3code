@@ -134,6 +134,27 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
+  it.effect("saves the encrypted tunnel setting, which keeps only what differs from defaults", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+
+      yield* service.updateSettings({ secureChannel: { enabled: true } });
+      yield* service.updateSettings({
+        secureChannel: { publicOrigin: "https://quiet.example.com" },
+      });
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.secureChannel, {
+        enabled: true,
+        port: 3774,
+        publicOrigin: "https://quiet.example.com",
+      });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
   it.effect("saves through a symlinked settings file without replacing the link", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

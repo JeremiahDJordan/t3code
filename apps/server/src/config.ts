@@ -104,6 +104,10 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    /** The loopback port of the end-to-end encrypted channel gateway; off when unset. */
+    readonly secureChannelPort?: number | undefined;
+    /** The public origin clients reach the gateway at, such as a Cloudflare Tunnel hostname. */
+    readonly secureChannelOrigin?: string | undefined;
   }
 >()("t3/config/ServerConfig") {
   /** @deprecated Import and use `layerTest` from this module. */

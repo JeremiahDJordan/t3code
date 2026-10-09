@@ -25,6 +25,23 @@ it("formats issued pairing credentials with the secret and optional pair URL", (
   expect(output).toContain("https://example.com/pair#token=secret-pairing-token");
 });
 
+it("adds the channel key to the pair URL for an encrypted channel route", () => {
+  const output = formatIssuedPairingCredential(
+    {
+      id: "pairing-2",
+      credential: "secret-pairing-token",
+      scopes: ["orchestration:read"],
+      subject: "one-time-token",
+      createdAt: DateTime.makeUnsafe("2026-04-08T09:00:00.000Z"),
+      expiresAt: DateTime.makeUnsafe("2026-04-08T10:00:00.000Z"),
+    },
+    { baseUrl: "https://quiet.example.com", channelKey: "SERVERKEY", json: false },
+  );
+  expect(output).toContain(
+    "https://quiet.example.com/pair#token=secret-pairing-token&sk=SERVERKEY",
+  );
+});
+
 it("formats pairing listings without exposing the secret token", () => {
   const output = formatPairingCredentialList(
     [

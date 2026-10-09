@@ -43,6 +43,8 @@ import * as SessionStore from "./SessionStore.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as SecureChannelClients from "../secureChannel/SecureChannelClients.ts";
+import * as SecureChannelConnections from "../secureChannel/SecureChannelConnections.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
@@ -92,12 +94,24 @@ export interface McpClientSession {
   readonly access: AuthMcpClientAccess;
 }
 
+/** A pairing arrived through the secure channel, but this server can't record which client. */
+class ChannelBindingUnavailable extends Schema.TaggedError<ChannelBindingUnavailable>()(
+  "ChannelBindingUnavailable",
+  {},
+) {
+  override get message(): string {
+    return "This server can't bind sessions to secure channel clients.";
+  }
+}
+
 export interface AuthenticatedSession {
   readonly sessionId: AuthSessionId;
   readonly subject: string;
   readonly method: ServerAuthSessionMethod;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
+  /** The secure channel client key the session only works through. */
+  readonly channelClientKey?: string;
   readonly expiresAt?: DateTime.DateTime;
 }
 
@@ -468,6 +482,8 @@ export class EnvironmentAuth extends Context.Service<
       credential: string,
       requestMetadata: AuthClientMetadata,
       previousSessionToken?: string,
+      /** The client key of the secure channel the request arrived through, which the session binds. */
+      channelClientKey?: string,
     ) => Effect.Effect<
       {
         readonly response: AuthBrowserSessionResult;
@@ -483,6 +499,8 @@ export class EnvironmentAuth extends Context.Service<
       requestMetadata: AuthClientMetadata,
       input?: {
         readonly proofKeyThumbprint?: string;
+        /** The client key of the secure channel the exchange arrived through, which the session binds. */
+        readonly channelClientKey?: string;
       },
     ) => Effect.Effect<
       AuthAccessTokenResult,
@@ -540,7 +558,7 @@ export class EnvironmentAuth extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
     readonly issueWebSocketTicket: (
-      session: Pick<AuthenticatedSession, "sessionId">,
+      session: Pick<AuthenticatedSession, "sessionId" | "channelClientKey">,
     ) => Effect.Effect<AuthWebSocketTicketResult, ServerAuthInternalError>;
     readonly issueStartupPairingUrl: (
       baseUrl: string,
@@ -553,6 +571,8 @@ export class EnvironmentAuth extends Context.Service<
       readonly label: string;
       readonly access: AuthMcpClientAccess;
       readonly client: AuthClientMetadata;
+      /** The client key of the secure channel the exchange arrived through, which the session binds. */
+      readonly channelClientKey?: string;
     }) => Effect.Effect<
       { readonly token: string; readonly expiresAt: DateTime.DateTime },
       ServerAuthInternalError
@@ -682,6 +702,11 @@ export const make = Effect.gen(function* () {
   const sessions = yield* SessionStore.SessionStore;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
+  // Present only where the secure channel gateway can run; a bound token fails closed without them.
+  const channelConnections = yield* Effect.serviceOption(
+    SecureChannelConnections.SecureChannelConnections,
+  );
+  const channelClients = yield* Effect.serviceOption(SecureChannelClients.SecureChannelClients);
   const descriptor = yield* policy.getDescriptor();
   const config = yield* ServerConfig.ServerConfig;
   const devAuth = resolveReusableDevAuth(config);
@@ -710,9 +735,26 @@ export const make = Effect.gen(function* () {
         method: session.method,
         scopes: session.scopes,
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
+        ...(session.channelClientKey ? { channelClientKey: session.channelClientKey } : {}),
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       })),
     );
+
+  /** A session bound to a secure channel client key works only through that client's channel. */
+  const requireBoundChannel = <Session extends { readonly channelClientKey?: string }>(
+    request: HttpServerRequest.HttpServerRequest,
+    session: Session,
+  ): Effect.Effect<Session, ServerAuthInvalidCredentialError> => {
+    if (session.channelClientKey === undefined) return Effect.succeed(session);
+    const arrivedThrough = Option.getOrUndefined(channelConnections)?.clientKeyOf(request);
+    return arrivedThrough === session.channelClientKey
+      ? Effect.succeed(session)
+      : Effect.fail(
+          new ServerAuthInvalidCredentialError({
+            diagnostic: "A channel-bound access token arrived outside its channel.",
+          }),
+        );
+  };
 
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
@@ -734,6 +776,7 @@ export const make = Effect.gen(function* () {
       return Effect.fail(new ServerAuthMissingCredentialError({}));
     }
     return authenticateToken(credential.token).pipe(
+      Effect.flatMap((session) => requireBoundChannel(request, session)),
       Effect.flatMap((session) => {
         if (session.proofKeyThumbprint) {
           if (!dpopToken || dpopToken !== credential.token) {
@@ -790,7 +833,7 @@ export const make = Effect.gen(function* () {
 
   const createBrowserSession: EnvironmentAuth["Service"]["createBrowserSession"] = Effect.fn(
     "EnvironmentAuth.createBrowserSession",
-  )(function* (credential, requestMetadata, previousSessionToken) {
+  )(function* (credential, requestMetadata, previousSessionToken, channelClientKey) {
     if (devAuth?.matches(credential)) {
       return yield* sessions.verify(credential).pipe(
         mapSessionVerificationErrors,
@@ -833,12 +876,16 @@ export const make = Effect.gen(function* () {
         ...(previousSession?.method === "browser-session-cookie"
           ? { replaceSessionId: previousSession.sessionId }
           : {}),
+        ...(channelClientKey ? { channelClientKey } : {}),
         client: {
           ...requestMetadata,
           ...(grant.label ? { label: grant.label } : {}),
         },
       })
-      .pipe(Effect.mapError((cause) => new ServerAuthAuthenticatedSessionIssueError({ cause })));
+      .pipe(
+        Effect.tap((issued) => bindChannelClient(issued, channelClientKey)),
+        Effect.mapError((cause) => new ServerAuthAuthenticatedSessionIssueError({ cause })),
+      );
     return {
       response: {
         authenticated: true,
@@ -890,6 +937,19 @@ export const make = Effect.gen(function* () {
     );
   };
 
+  /** Records which channel client a session was paired through, so the gateway admits it later. */
+  const bindChannelClient = (
+    session: SessionStore.IssuedSession,
+    clientKey: string | undefined,
+  ): Effect.Effect<
+    void,
+    SecureChannelClients.SecureChannelClientsError | ChannelBindingUnavailable
+  > => {
+    if (clientKey === undefined) return Effect.void;
+    if (Option.isNone(channelClients)) return Effect.fail(new ChannelBindingUnavailable());
+    return channelClients.value.bind({ sessionId: session.sessionId, clientKey });
+  };
+
   const exchangeBootstrapCredentialForAccessToken: EnvironmentAuth["Service"]["exchangeBootstrapCredentialForAccessToken"] =
     (credential, requestedScopes, requestMetadata, input) => {
       return resolveBootstrapGrant(credential, {
@@ -916,6 +976,7 @@ export const make = Effect.gen(function* () {
                       ttl: Duration.hours(1),
                     }
                   : {}),
+                ...(input?.channelClientKey ? { channelClientKey: input.channelClientKey } : {}),
                 // Desktop restarts forget the previous bearer token. Replace
                 // its session, including stale entries left by older versions.
                 replaceActiveForSubjectAndMethod: grant.method === "desktop-bootstrap",
@@ -925,6 +986,7 @@ export const make = Effect.gen(function* () {
                 },
               })
               .pipe(
+                Effect.tap((session) => bindChannelClient(session, input?.channelClientKey)),
                 Effect.mapError(
                   (cause) => new ServerAuthAuthenticatedAccessTokenIssueError({ cause }),
                 ),
@@ -1153,17 +1215,22 @@ export const make = Effect.gen(function* () {
     );
 
   const issueWebSocketTicket: EnvironmentAuth["Service"]["issueWebSocketTicket"] = (session) =>
-    sessions.issueWebSocketToken(session.sessionId).pipe(
-      Effect.mapError((cause) => new ServerAuthWebSocketTokenIssueError({ cause })),
-      Effect.map(
-        (issued) =>
-          ({
-            ticket: issued.token,
-            expiresAt: DateTime.toUtc(issued.expiresAt),
-          }) satisfies AuthWebSocketTicketResult,
-      ),
-      Effect.withSpan("EnvironmentAuth.issueWebSocketTicket"),
-    );
+    sessions
+      .issueWebSocketToken(
+        session.sessionId,
+        session.channelClientKey ? { channelClientKey: session.channelClientKey } : undefined,
+      )
+      .pipe(
+        Effect.mapError((cause) => new ServerAuthWebSocketTokenIssueError({ cause })),
+        Effect.map(
+          (issued) =>
+            ({
+              ticket: issued.token,
+              expiresAt: DateTime.toUtc(issued.expiresAt),
+            }) satisfies AuthWebSocketTicketResult,
+        ),
+        Effect.withSpan("EnvironmentAuth.issueWebSocketTicket"),
+      );
 
   const authenticateHttpRequest: EnvironmentAuth["Service"]["authenticateHttpRequest"] = (
     request,
@@ -1179,6 +1246,7 @@ export const make = Effect.gen(function* () {
           return yield* sessions.verifyWebSocketToken(websocketTicket).pipe(
             mapSessionVerificationErrors,
             Effect.flatMap(rejectMcpClientAudience),
+            Effect.flatMap((session) => requireBoundChannel(request, session)),
             Effect.map((session) => ({
               sessionId: session.sessionId,
               subject: session.subject,
@@ -1198,6 +1266,7 @@ export const make = Effect.gen(function* () {
     if (token === null) return Effect.fail(new ServerAuthMissingCredentialError({}));
     return sessions.verify(token).pipe(
       mapSessionVerificationErrors,
+      Effect.flatMap((session) => requireBoundChannel(request, session)),
       Effect.flatMap((session) =>
         session.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token"
           ? Effect.succeed({
@@ -1225,9 +1294,11 @@ export const make = Effect.gen(function* () {
         scopes: mcpClientScopes(input.access),
         ttl: MCP_CLIENT_SESSION_TTL,
         ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
+        ...(input.channelClientKey ? { channelClientKey: input.channelClientKey } : {}),
         client: { ...input.client, label: input.label, deviceType: "bot" },
       })
       .pipe(
+        Effect.tap((issued) => bindChannelClient(issued, input.channelClientKey)),
         Effect.map((issued) => ({ token: issued.token, expiresAt: issued.expiresAt })),
         Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
         Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),

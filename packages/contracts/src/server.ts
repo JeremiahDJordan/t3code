@@ -665,6 +665,11 @@ export const ServerConfig = Schema.Struct({
    * servers that predate the feature; empty when bound to loopback only.
    */
   directEndpoints: Schema.optionalKey(ForwardCompatibleArray(ServerDirectEndpoint)),
+  /**
+   * The secure channel's public server key (base64url), for pairing links that carry it. Only
+   * this authenticated config has it; the public descriptor never does.
+   */
+  secureChannelServerKey: Schema.optionalKey(Schema.String),
   observability: ServerObservability,
   settings: ServerSettings,
   /** Whether shell subscriptions can emit an opt-in catch-up completion marker. */

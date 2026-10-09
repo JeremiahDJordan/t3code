@@ -53,6 +53,7 @@ import {
   resolveHeadlessConnectionString,
 } from "../startupAccess.ts";
 import { authScopesFlag } from "./authScopes.ts";
+import { layerChannelKey, readChannelPublicKey } from "./channel.ts";
 import { baseDirFlag, DurationFromString } from "./config.ts";
 
 const WELL_KNOWN_ENVIRONMENT_PATH = "/.well-known/t3/environment";
@@ -144,6 +145,15 @@ export class DevServerNotProxiableError extends Schema.TaggedError<DevServerNotP
 }
 
 const isDevServerNotProxiableError = Schema.is(DevServerNotProxiableError);
+
+export class SecureChannelBaseUrlMissingError extends Schema.TaggedError<SecureChannelBaseUrlMissingError>()(
+  "SecureChannelBaseUrlMissingError",
+  {},
+) {
+  override get message(): string {
+    return "Pass --base-url with the tunnel's public URL, such as https://quiet.example.com, to pair through the secure channel.";
+  }
+}
 
 /**
  * The local endpoint Tailscale Serve should proxy to. Dev servers are
@@ -476,6 +486,18 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.withDefault(DEFAULT_TAILSCALE_SERVE_PORT),
 );
 
+const baseUrlFlag = Flag.String("base-url").pipe(
+  Flag.withDescription("Public URL to pair through, such as a Cloudflare Tunnel hostname."),
+  Flag.optional,
+);
+
+const secureChannelFlag = Flag.Boolean("secure-channel").pipe(
+  Flag.withDescription(
+    "Pair end-to-end encrypted through the server's secure channel gateway at --base-url.",
+  ),
+  Flag.withDefault(false),
+);
+
 export const pairCommand = Command.make("pair", {
   baseDir: baseDirFlag,
   scopes: authScopesFlag(AuthStandardClientScopes),
@@ -483,6 +505,8 @@ export const pairCommand = Command.make("pair", {
   label: labelFlag,
   tailscale: tailscaleFlag,
   tailscaleServePort: tailscaleServePortFlag,
+  baseUrl: baseUrlFlag,
+  secureChannel: secureChannelFlag,
 }).pipe(
   Command.withDescription(
     "Mint a pairing token for a running T3 Code server and print it as a QR code.",
@@ -498,7 +522,17 @@ export const pairCommand = Command.make("pair", {
 
       const notes: Array<string> = [];
       let pairingBaseUrl: string;
-      if (flags.tailscale) {
+      if (flags.secureChannel && Option.isNone(flags.baseUrl)) {
+        return yield* new SecureChannelBaseUrlMissingError();
+      }
+      if (Option.isSome(flags.baseUrl)) {
+        pairingBaseUrl = flags.baseUrl.value;
+        if (flags.secureChannel) {
+          notes.push(
+            "Scan this with the T3 Code app. The hostname answers only the app's encrypted channel, so a browser there shows nothing.",
+          );
+        }
+      } else if (flags.tailscale) {
         const resolved = yield* resolveTailscalePairingBase({
           target,
           servePort: flags.tailscaleServePort,
@@ -526,7 +560,10 @@ export const pairCommand = Command.make("pair", {
         ttl: flags.ttl,
         label: flags.label,
       });
-      const pairingUrl = buildPairingUrl(pairingBaseUrl, issued.credential);
+      const channelKey = flags.secureChannel
+        ? yield* readChannelPublicKey.pipe(Effect.provide(layerChannelKey(config)))
+        : undefined;
+      const pairingUrl = buildPairingUrl(pairingBaseUrl, issued.credential, channelKey);
 
       yield* Console.log(
         formatPairOutput({

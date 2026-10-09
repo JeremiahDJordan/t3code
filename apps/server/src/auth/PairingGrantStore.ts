@@ -233,6 +233,14 @@ export class PairingGrantStore extends Context.Service<
         readonly requestedScopes?: ReadonlyArray<AuthEnvironmentScope>;
       },
     ) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
+    /**
+     * Until when `consume` could still accept the credential without a proof key, checked without
+     * consuming it; none when it can't. The secure channel gateway admits a client that isn't
+     * paired yet only with a live code, and only until then.
+     */
+    readonly liveUntil: (
+      credential: string,
+    ) => Effect.Effect<Option.Option<DateTime.Utc>, BootstrapCredentialError>;
   }
 >()("t3/auth/PairingGrantStore") {}
 
@@ -622,6 +630,28 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const liveUntil: PairingGrantStore["Service"]["liveUntil"] = Effect.fn(
+    "PairingGrantStore.liveUntil",
+  )(function* (credential) {
+    const now = yield* DateTime.now;
+    const seeded = (yield* Ref.get(seededGrantsRef)).get(credential);
+    if (seeded !== undefined) {
+      return DateTime.isLessThan(now, seeded.expiresAt) && !seeded.proofKeyThumbprint
+        ? Option.some(DateTime.toUtc(seeded.expiresAt))
+        : Option.none();
+    }
+    const stored = yield* pairingLinks
+      .getByCredential({ credential })
+      .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
+    return Option.isSome(stored) &&
+      stored.value.revokedAt === null &&
+      stored.value.consumedAt === null &&
+      stored.value.proofKeyThumbprint === null &&
+      DateTime.isLessThan(now, stored.value.expiresAt)
+      ? Option.some(DateTime.toUtc(stored.value.expiresAt))
+      : Option.none();
+  });
+
   return PairingGrantStore.of({
     issueOneTimeToken,
     listActive,
@@ -630,6 +660,7 @@ export const make = Effect.gen(function* () {
     },
     revoke,
     consume,
+    liveUntil,
   });
 });
 

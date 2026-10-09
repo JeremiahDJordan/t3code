@@ -1,5 +1,6 @@
 import { SshDeviceHostConfigs } from "./device.ts";
 import {
+  AuthEnvironmentMaintainScope,
   AuthSettingsWriteScope,
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
@@ -12,6 +13,7 @@ import {
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
+  PortSchema,
   ProjectId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -1024,6 +1026,20 @@ export const WorktreeCleanup = Schema.NullOr(
 );
 export type WorktreeCleanup = typeof WorktreeCleanup.Type;
 
+export const DEFAULT_SECURE_CHANNEL_PORT = 3774;
+
+/**
+ * The end-to-end encrypted channel gateway: a loopback listener a Cloudflare Tunnel points at, so
+ * Cloudflare carries only ciphertext. `--secure-channel-port` overrides it for one run.
+ */
+export const SecureChannelSettings = Schema.Struct({
+  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  port: PortSchema.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_SECURE_CHANNEL_PORT))),
+  /** The tunnel's public URL, such as `https://quiet.example.com`, for pairing links. */
+  publicOrigin: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+});
+export type SecureChannelSettings = typeof SecureChannelSettings.Type;
+
 export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "worktreeCleanup",
   "defaultModelSelection",
@@ -1126,6 +1142,9 @@ export const WorkflowAgentsCap = Schema.Int.check(
 
 export const ServerSettings = Schema.Struct({
   worktreeCleanup: WorktreeCleanup.pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  secureChannel: SecureChannelSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(SecureChannelSettings)({}))),
+  ),
   storageCleanup: StorageCleanupSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(StorageCleanupSettings)({}))),
   ),
@@ -1477,6 +1496,13 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  secureChannel: Schema.optionalKey(
+    Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      port: Schema.optionalKey(PortSchema),
+      publicOrigin: Schema.optionalKey(TrimmedString),
+    }),
+  ),
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(
       Schema.Union([
@@ -1626,6 +1652,8 @@ export function requiredScopesForServerSettingsPatch(
 ): ReadonlyArray<AuthEnvironmentScope> {
   let changesProviders = false;
   let changesSettings = false;
+  // Opening a network listener is environment maintenance, as Tailscale Serve is.
+  const changesSecureChannel = patch.secureChannel !== undefined;
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
     if (key === "providers" || key === "providerInstances" || key === "usageLimitSources") {
@@ -1637,6 +1665,7 @@ export function requiredScopesForServerSettingsPatch(
   return [
     ...(changesSettings || !changesProviders ? [AuthSettingsWriteScope] : []),
     ...(changesProviders ? [AuthProvidersManageScope] : []),
+    ...(changesSecureChannel ? [AuthEnvironmentMaintainScope] : []),
   ];
 }
 

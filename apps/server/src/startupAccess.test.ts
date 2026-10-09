@@ -58,6 +58,12 @@ it("builds a pairing URL that embeds the token in the hash", () => {
   );
 });
 
+it("adds the server's channel key beside the token for an encrypted channel link", () => {
+  expect(buildPairingUrl("https://quiet.example.com", "PAIRCODE", "SERVERKEY")).toBe(
+    "https://quiet.example.com/pair#token=PAIRCODE&sk=SERVERKEY",
+  );
+});
+
 it("renders terminal QR codes as a multi-line unicode block grid", () => {
   const qrCode = renderTerminalQrCode("http://192.168.1.42:3773/pair#token=PAIRCODE");
 

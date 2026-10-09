@@ -83,6 +83,19 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
   Flag.withDescription("HTTPS port for Tailscale Serve when --tailscale-serve is enabled."),
   Flag.optional,
 );
+const secureChannelPortFlag = Flag.Int("secure-channel-port").pipe(
+  Flag.withSchema(PortSchema),
+  Flag.withDescription(
+    "Loopback port for the end-to-end encrypted channel gateway; point a Cloudflare Tunnel at it.",
+  ),
+  Flag.optional,
+);
+const secureChannelOriginFlag = Flag.String("secure-channel-origin").pipe(
+  Flag.withDescription(
+    "Public origin of the encrypted channel, such as https://quiet.example.com, for pairing links.",
+  ),
+  Flag.optional,
+);
 
 // Trace file location, shared by the server and `t3 trace summary`.
 export const traceFileConfig = Config.String("T3CODE_TRACE_FILE").pipe(
@@ -164,6 +177,14 @@ const EnvServerConfig = Config.all({
     Config.option,
     Config.map(Option.getOrUndefined),
   ),
+  secureChannelPort: Config.Port("T3CODE_SECURE_CHANNEL_PORT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  secureChannelOrigin: Config.String("T3CODE_SECURE_CHANNEL_ORIGIN").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
 });
 
 const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
@@ -199,6 +220,8 @@ export interface CliServerFlags {
   readonly logWebSocketEvents: Option.Option<boolean>;
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
+  readonly secureChannelPort: Option.Option<number>;
+  readonly secureChannelOrigin: Option.Option<string>;
 }
 
 export interface CliAuthLocationFlags {
@@ -233,6 +256,8 @@ export const sharedServerCommandFlags = {
   logWebSocketEvents: logWebSocketEventsFlag,
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
+  secureChannelPort: secureChannelPortFlag,
+  secureChannelOrigin: secureChannelOriginFlag,
 } as const;
 
 const resolveOptionPrecedence = <Value>(
@@ -277,6 +302,8 @@ export const resolveServerConfig = (
       logWebSocketEvents: flags.logWebSocketEvents ?? Option.none(),
       tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
       tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
+      secureChannelPort: flags.secureChannelPort ?? Option.none(),
+      secureChannelOrigin: flags.secureChannelOrigin ?? Option.none(),
     } satisfies CliServerFlags;
     const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
     const bootstrapEnvelope =
@@ -397,6 +424,20 @@ export const resolveServerConfig = (
       ),
       () => 443,
     );
+    const secureChannelPort = Option.getOrUndefined(
+      resolveOptionPrecedence(
+        normalizedFlags.secureChannelPort,
+        Option.fromUndefinedOr(env.secureChannelPort),
+        Option.fromUndefinedOr(bootstrap?.secureChannelPort),
+      ),
+    );
+    const secureChannelOrigin = Option.getOrUndefined(
+      resolveOptionPrecedence(
+        normalizedFlags.secureChannelOrigin,
+        Option.fromUndefinedOr(env.secureChannelOrigin),
+        Option.fromUndefinedOr(bootstrap?.secureChannelOrigin),
+      ),
+    );
     const staticDir = devUrl ? undefined : yield* ServerConfig.resolveStaticDir();
     const host = Option.getOrElse(
       resolveOptionPrecedence(
@@ -477,6 +518,8 @@ export const resolveServerConfig = (
       logWebSocketEvents,
       tailscaleServeEnabled,
       tailscaleServePort,
+      ...(secureChannelPort === undefined ? {} : { secureChannelPort }),
+      ...(secureChannelOrigin === undefined ? {} : { secureChannelOrigin }),
     };
 
     return config;
@@ -500,6 +543,8 @@ export const resolveCliAuthConfig = (
       logWebSocketEvents: Option.none(),
       tailscaleServeEnabled: Option.none(),
       tailscaleServePort: Option.none(),
+      secureChannelPort: Option.none(),
+      secureChannelOrigin: Option.none(),
     },
     cliLogLevel,
   );

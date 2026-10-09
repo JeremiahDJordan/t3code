@@ -89,11 +89,18 @@ export const resolveListeningPort = (address: unknown, fallbackPort: number): nu
   return fallbackPort;
 };
 
-export const buildPairingUrl = (connectionString: string, token: string): string => {
+/** A `/pair#token=…` link; with `channelKey`, it pairs through the end-to-end encrypted channel. */
+export const buildPairingUrl = (
+  connectionString: string,
+  token: string,
+  channelKey?: string,
+): string => {
   const url = new URL(connectionString);
   url.pathname = "/pair";
   url.searchParams.delete("token");
-  url.hash = new URLSearchParams([["token", token]]).toString();
+  const hash = new URLSearchParams([["token", token]]);
+  if (channelKey) hash.set("sk", channelKey);
+  url.hash = hash.toString();
   return url.toString();
 };
 

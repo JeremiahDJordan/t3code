@@ -129,6 +129,7 @@ import {
   RELAY_URL_SECRET,
 } from "./cloud/config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as SecureChannel from "./secureChannel/SecureChannel.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
 import { pendingServiceUpdateExists } from "./cloud/updateHandoff.ts";
@@ -428,6 +429,8 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
 const layerAuth = EnvironmentAuth.layer.pipe(
+  // Auth reads the gateway's connection marks, so one instance serves both.
+  Layer.provideMerge(SecureChannel.layerServices),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
   Layer.provide(ServerSecretStore.layer),
@@ -1068,6 +1071,7 @@ const layerMakeServer = Layer.unwrap(
       layerHttpListening,
       layerRuntimeState.pipe(Layer.provide(layerLauncher)),
       layerTailscaleServe,
+      SecureChannel.layerGateway,
       layerCloudDesiredLinkReconcile,
       HeapSnapshot.layer,
     );

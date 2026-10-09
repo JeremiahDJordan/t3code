@@ -176,6 +176,8 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import { secureChannelServerKeyForConfig } from "./secureChannel/SecureChannelGateway.ts";
+import * as SecureChannelKey from "./secureChannel/SecureChannelKey.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
@@ -1265,6 +1267,7 @@ const layerWsRpc = (
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const directEndpoints = yield* DirectEndpoints.DirectEndpoints;
+      const secureChannelKey = yield* Effect.serviceOption(SecureChannelKey.SecureChannelKey);
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
@@ -1713,6 +1716,7 @@ const layerWsRpc = (
               remoteOpenTargets.resolveTargets(),
             ),
             directEndpoints: yield* resolveAvailableEditorsForConfig(directEndpoints.resolve()),
+            ...(yield* secureChannelServerKeyForConfig(secureChannelKey)),
             observability: {
               logsDirectoryPath: config.logsDir,
               localTracingEnabled: true,
