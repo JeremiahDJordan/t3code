@@ -94,6 +94,9 @@ so.
   does not answer within a few seconds, you are asked. To have Auto ask before every web
   search, fetch, GitHub read and skill in one thread, pick **Always ask** in the **Auto
   network** option beside the model.
+  When Bob works on a task another agent gave it, as a subagent or in a workflow, the reviewer
+  judges its calls by that task, but only what you wrote in the thread where you started the
+  work limits or allows anything, so "don't push" there holds for every agent under it.
 - **Full access** lets Bob approve every tool call itself, without a sandbox.
 
 A command that needs the network or writes outside the project fails in the sandbox: a test

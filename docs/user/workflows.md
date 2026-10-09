@@ -45,6 +45,10 @@ Give the file to an agent on the other environment, as an attachment or as a fil
 and ask it to run it. The workflow's roles are matched against that environment's providers, and
 that agent owns the run. Workflows name roles, not machines, so the same file runs anywhere.
 
+Give Bob Shell a workflow as an attachment or a file path, not pasted text: Bob's Auto mode treats
+text you paste as your own words, so permissions written in the script's prompts would count as
+yours. The workflow's agents still answer only to what you wrote in the thread you started it from.
+
 ## Roles
 
 A workflow names its agents by role, such as `reviewer` or `judge`. A role either asks for a

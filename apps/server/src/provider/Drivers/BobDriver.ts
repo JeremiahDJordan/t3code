@@ -27,12 +27,14 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import { readBobStartingThread } from "../bobUserMessages.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { makeBobAdapterV2 } from "../../orchestration-v2/Adapters/BobAdapterV2.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -68,11 +70,7 @@ import {
   readBobUsageLimits,
   readBobUsageProfile,
 } from "../bobUsageLimits.ts";
-import {
-  bobContextWindow,
-  readBobTaskCosts,
-  resolveBobTaskDatabasePath,
-} from "../bobTaskUsage.ts";
+import { bobContextWindow, readBobTaskCosts, resolveBobTaskDatabasePath } from "../bobTaskUsage.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import {
   type ProviderContinuationIdentity,
@@ -150,6 +148,9 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettingsService;
       const host = yield* ProviderHost.ProviderHost;
+      // The server's database, for the user's messages a delegated Bob task works under; without
+      // it every call such a task leaves to the reviewer asks.
+      const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const loggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
@@ -402,6 +403,14 @@ export const BobDriver: ProviderDriver<BobSettings, BobDriverEnv> = {
           }),
           () => releaseJudge,
         ).pipe(Effect.asVoid),
+        readStartingThread: (threadId) =>
+          Option.match(sql, {
+            onNone: () => Effect.succeed(undefined),
+            onSome: (client) =>
+              readBobStartingThread(threadId).pipe(
+                Effect.provideService(SqlClient.SqlClient, client),
+              ),
+          }),
         rules: {
           get: serverSettings.getSettings.pipe(
             Effect.map(savedRules),

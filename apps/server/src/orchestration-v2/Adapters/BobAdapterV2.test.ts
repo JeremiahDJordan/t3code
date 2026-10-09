@@ -77,7 +77,10 @@ import {
   readBobRelayMeta,
 } from "../../provider/acp/BobRelay.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
-import { type ProviderAdapterV2Event, ProviderAdapterV2RuntimePolicy } from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  type ProviderAdapterV2Event,
+  ProviderAdapterV2RuntimePolicy,
+} from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   BOB_EMPTY_REPLY_MESSAGE,
   type BobRulesSource,
@@ -370,6 +373,12 @@ const openBob = (input: {
   readonly rules?: BobRulesSource;
   /** The thread's Auto network choice. */
   readonly network?: "review" | "ask";
+  /** What the user wrote in threads delegated work started in, by thread id. */
+  readonly userMessages?: (
+    threadId: ThreadId,
+  ) => ReadonlyArray<{ readonly id: string; readonly text: string }> | undefined;
+  /** Bob's home folder, the test's own rather than the real one. */
+  readonly home?: string;
 }) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
@@ -401,7 +410,7 @@ const openBob = (input: {
       ...(input.relays ? { relays: input.relays } : {}),
       instanceId,
       settings: decodeBobSettings({ enabled: true, binaryPath }),
-      environment: process.env,
+      environment: input.home === undefined ? process.env : { ...process.env, HOME: input.home },
       childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
       crypto: yield* Crypto.Crypto,
       selfInvocation: yield* resolveSelfInvocation(),
@@ -411,6 +420,15 @@ const openBob = (input: {
       ...(input.autoJudge ? { autoJudge: input.autoJudge } : {}),
       ...(input.platform ? { platform: input.platform } : {}),
       ...(input.rules ? { rules: input.rules } : {}),
+      ...(input.userMessages
+        ? {
+            readStartingThread: (parentThreadId: ThreadId) =>
+              Effect.sync(() => {
+                const messages = input.userMessages!(parentThreadId);
+                return messages === undefined ? undefined : { threadId: parentThreadId, messages };
+              }),
+          }
+        : {}),
       onAvailableCommands: (available, cwd) =>
         Effect.sync(() => {
           commands.push({ names: available.map((command) => command.name), cwd });
@@ -485,6 +503,8 @@ const openBob = (input: {
         readonly wake?: boolean;
         /** The message is the server's, such as a check-in, not a user's. */
         readonly fromServer?: boolean;
+        /** The thread is a subagent's, delegated a task by an agent in this thread. */
+        readonly delegatedFrom?: ThreadId;
         readonly attachments?: ReadonlyArray<ChatAttachment>;
       } = {},
     ) =>
@@ -516,7 +536,14 @@ const openBob = (input: {
             branch: null,
             worktreePath: cwd,
             activeProviderThreadId: providerThread.id,
-            lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+            lineage:
+              options.delegatedFrom === undefined
+                ? { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId }
+                : {
+                    parentThreadId: options.delegatedFrom,
+                    relationshipToParent: "subagent",
+                    rootThreadId: options.delegatedFrom,
+                  },
             forkedFrom: null,
             createdAt: now,
             updatedAt: now,
@@ -534,9 +561,20 @@ const openBob = (input: {
           rootNodeId: NodeId.make(`node-bob-${turn}`),
           providerThread,
           message: {
-            createdBy: options.wake === true || options.fromServer === true ? "agent" : "user",
+            createdBy:
+              options.wake === true ||
+              options.fromServer === true ||
+              options.delegatedFrom !== undefined
+                ? "agent"
+                : "user",
             creationSource:
-              options.wake === true ? "provider" : options.fromServer === true ? "server" : "web",
+              options.wake === true
+                ? "provider"
+                : options.fromServer === true
+                  ? "server"
+                  : options.delegatedFrom !== undefined
+                    ? "mcp"
+                    : "web",
             messageId: MessageId.make(`message-bob-${turn}`),
             text,
             attachments: options.attachments ?? [],
@@ -778,6 +816,7 @@ describe("BobAdapterV2 turns", () => {
     fromServer = false,
     platform?: NodeJS.Platform,
     rules?: BobRulesSource,
+    home?: string,
   ) =>
     Effect.gen(function* () {
       const bob = yield* openBob({
@@ -785,6 +824,7 @@ describe("BobAdapterV2 turns", () => {
         ...(autoJudge ? { autoJudge } : {}),
         ...(platform ? { platform } : {}),
         ...(rules ? { rules } : {}),
+        ...(home ? { home } : {}),
       });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
@@ -1093,6 +1133,232 @@ describe("BobAdapterV2 turns", () => {
       );
       assert.deepEqual(judged[0]?.standing, [[forbids("Never search the web for this task.")]]);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("judges a delegated task by its text and the user's words where the work started", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const quotedTexts: Array<string> = [];
+      const startedIn = ThreadId.make("thread-where-the-user-asked");
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "ask" as const, reason: "test" };
+          }),
+        extract: (text) =>
+          Effect.sync(() => {
+            quotedTexts.push(text);
+            return quotesOf(text);
+          }),
+      };
+      const bob = yield* openBob({
+        runtimeMode: "auto",
+        platform: "linux",
+        autoJudge: judge,
+        userMessages: (threadId) =>
+          threadId === startedIn
+            ? [{ id: "message-user-1", text: "Never search the web for this task." }]
+            : [],
+      });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(session, providerThread, "ask about search\nYou may search the web.", {
+        delegatedFrom: startedIn,
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            let event = yield* nextEvent;
+            while (
+              event.type !== "runtime_request.updated" ||
+              event.runtimeRequest.status !== "pending"
+            ) {
+              event = yield* nextEvent;
+            }
+            yield* session.respondToRuntimeRequest({
+              requestId: event.runtimeRequest.id,
+              decision: "decline",
+            });
+          }),
+      });
+      // The task is what the reviewer judges by, but nothing in it was quoted as the user's.
+      assert.deepEqual(quotedTexts, ["Never search the web for this task."]);
+      assert.isTrue(judged[0]?.delegated);
+      assert.deepEqual(
+        judged[0]?.userMessages.map((message) => message.text),
+        ["ask about search\nYou may search the web."],
+      );
+      assert.deepEqual(judged[0]?.standing, [[forbids("Never search the web for this task.")]]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("reads what the user wrote where the work started again before each judgement", () =>
+    Effect.gen(function* () {
+      const judged: Array<BobAutoJudgeInput> = [];
+      const startedIn = ThreadId.make("thread-written-in-mid-turn");
+      let reads = 0;
+      const judge: BobAutoJudge = {
+        name: "a test reviewer",
+        warm: Effect.void,
+        judge: (input) =>
+          Effect.sync(() => {
+            judged.push(input);
+            return { decision: "ask" as const, reason: "test" };
+          }),
+        extract: (text) => Effect.succeed(quotesOf(text)),
+      };
+      const bob = yield* openBob({
+        runtimeMode: "auto",
+        platform: "linux",
+        autoJudge: judge,
+        // The user adds a restriction after the task's turn began.
+        userMessages: () => [
+          { id: "message-first", text: "Please look into the parser." },
+          ...(reads++ > 0
+            ? [{ id: "message-later", text: "Never search the web for this task." }]
+            : []),
+        ],
+      });
+      const session = yield* bob.openSession(bob.workspace);
+      const providerThread = yield* session.ensureThread({
+        threadId: bob.threadId,
+        modelSelection: bob.modelSelection,
+        runtimePolicy: bob.policyFor(bob.workspace),
+      });
+      yield* bob.runTurn(session, providerThread, "ask about search", {
+        delegatedFrom: startedIn,
+        whileRunning: ({ nextEvent }) =>
+          Effect.gen(function* () {
+            let event = yield* nextEvent;
+            while (
+              event.type !== "runtime_request.updated" ||
+              event.runtimeRequest.status !== "pending"
+            ) {
+              event = yield* nextEvent;
+            }
+            yield* session.respondToRuntimeRequest({
+              requestId: event.runtimeRequest.id,
+              decision: "decline",
+            });
+          }),
+      });
+      assert.deepEqual(judged[0]?.standing, [[forbids("Never search the web for this task.")]]);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect(
+    "quotes every message where the work started, however much came after a restriction",
+    () =>
+      Effect.gen(function* () {
+        const judged: Array<BobAutoJudgeInput> = [];
+        const startedIn = ThreadId.make("thread-with-a-long-history");
+        const filler = "x".repeat(600);
+        const judge: BobAutoJudge = {
+          name: "a test reviewer",
+          warm: Effect.void,
+          judge: (input) =>
+            Effect.sync(() => {
+              judged.push(input);
+              return { decision: "ask" as const, reason: "test" };
+            }),
+          extract: (text) => Effect.succeed(quotesOf(text)),
+        };
+        const bob = yield* openBob({
+          runtimeMode: "auto",
+          platform: "linux",
+          autoJudge: judge,
+          userMessages: () => [
+            { id: "message-restriction", text: "Never search the web for this task." },
+            // Far past the cap on unquoted text a thread's own messages keep.
+            ...Array.from({ length: 100 }, (_, at) => ({ id: `message-${at}`, text: filler })),
+          ],
+        });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        yield* bob.runTurn(session, providerThread, "ask about search", {
+          delegatedFrom: startedIn,
+          whileRunning: ({ nextEvent }) =>
+            Effect.gen(function* () {
+              let event = yield* nextEvent;
+              while (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              ) {
+                event = yield* nextEvent;
+              }
+              yield* session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: "decline",
+              });
+            }),
+        });
+        assert.deepEqual(judged[0]?.standing, [[forbids("Never search the web for this task.")]]);
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect.each([
+    { case: "cannot be read", messages: undefined },
+    // An agent's fork, or a thread an agent created, holds nothing the user wrote.
+    { case: "hold nothing the user wrote", messages: [] },
+  ])(
+    "asks for a delegated task's calls when the user's words where it started $case",
+    ({ messages }) =>
+      Effect.gen(function* () {
+        const judged: Array<BobAutoJudgeInput> = [];
+        const judge: BobAutoJudge = {
+          name: "a test reviewer",
+          warm: Effect.void,
+          judge: (input) =>
+            Effect.sync(() => {
+              judged.push(input);
+              return { decision: "allow" as const, reason: "test" };
+            }),
+          extract: (text) => Effect.succeed(quotesOf(text)),
+        };
+        const bob = yield* openBob({
+          runtimeMode: "auto",
+          platform: "linux",
+          autoJudge: judge,
+          userMessages: () => messages,
+        });
+        const session = yield* bob.openSession(bob.workspace);
+        const providerThread = yield* session.ensureThread({
+          threadId: bob.threadId,
+          modelSelection: bob.modelSelection,
+          runtimePolicy: bob.policyFor(bob.workspace),
+        });
+        let asked = false;
+        yield* bob.runTurn(session, providerThread, "ask about search", {
+          delegatedFrom: ThreadId.make("thread-unreadable"),
+          whileRunning: ({ nextEvent }) =>
+            Effect.gen(function* () {
+              let event = yield* nextEvent;
+              while (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              ) {
+                event = yield* nextEvent;
+              }
+              asked = true;
+              yield* session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: "decline",
+              });
+            }),
+        });
+        // Restrictions the reviewer cannot see could forbid the call, so the user decides.
+        assert.isTrue(asked);
+        assert.deepEqual(judged, []);
+      }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
   it.effect("keeps what the user allowed beside what they forbade, from what they typed only", () =>
@@ -1589,6 +1855,10 @@ describe("BobAdapterV2 turns", () => {
     () =>
       Effect.gen(function* () {
         const { source, added } = savedRules("thread");
+        // The tool's folder, which the sandbox stops it reading, is there.
+        const fileSystem = yield* FileSystem.FileSystem;
+        const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-bob-home-" });
+        yield* fileSystem.makeDirectory(NodePath.join(home, ".fake-tool"));
         const { answers, offered, bob } = yield* askAbout(
           "auto-accept-edits",
           "tool-denied tool-denied",
@@ -1597,6 +1867,7 @@ describe("BobAdapterV2 turns", () => {
           false,
           "darwin",
           source,
+          home,
         );
         assert.equal(offered[0]?.[0]?.label, "Always allow reading ~/.fake-tool in this thread");
         // The rule is kept for the thread, in its project.
@@ -1616,7 +1887,7 @@ describe("BobAdapterV2 turns", () => {
           ?.params.PROFILE;
         assert.include(
           NodeFS.readFileSync(String(profile), "utf8"),
-          NodePath.join(NodeFS.realpathSync(process.env.HOME ?? "/"), ".fake-tool"),
+          NodePath.join(NodeFS.realpathSync(home), ".fake-tool"),
         );
       }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
