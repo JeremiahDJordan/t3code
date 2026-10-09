@@ -10,6 +10,12 @@ import {
   setConnectionCatalog,
 } from "./methods/connectionCatalog.ts";
 import {
+  createSecureChannelClientKey,
+  forwardSecureChannel,
+  releaseSecureChannel,
+  retainSecureChannels,
+} from "./methods/secureChannel.ts";
+import {
   getLocalEnvironmentEnabled,
   setLocalEnvironmentEnabled,
 } from "./methods/localEnvironment.ts";
@@ -102,6 +108,10 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(getClientSettings);
   yield* ipc.handle(setClientSettings);
   yield* ipc.handle(getConnectionCatalog);
+  yield* ipc.handle(createSecureChannelClientKey);
+  yield* ipc.handle(forwardSecureChannel);
+  yield* ipc.handle(releaseSecureChannel);
+  yield* ipc.handle(retainSecureChannels);
   yield* ipc.handle(getSnapShotState);
   yield* ipc.handle(setupSnapShot);
   yield* ipc.handle(previewSnapShotConfig);

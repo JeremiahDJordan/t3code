@@ -1115,6 +1115,44 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+/** An end-to-end encrypted route the desktop's main process forwards through its secure channel. */
+export const DesktopSecureChannelRequest = Schema.Struct({
+  httpBaseUrl: Schema.String,
+  serverKey: Schema.String,
+  /** The main process's id for this device's key on the route; the key never leaves main. */
+  clientKey: Schema.String,
+  pairingCode: Schema.optionalKey(Schema.String),
+  cloudflareAccess: Schema.optionalKey(
+    Schema.Struct({ clientId: Schema.String, clientSecret: Schema.String }),
+  ),
+});
+export type DesktopSecureChannelRequest = typeof DesktopSecureChannelRequest.Type;
+
+/** An encrypted route whose forwarder stays running. */
+export const DesktopSecureChannelRoute = Schema.Struct({
+  httpBaseUrl: Schema.String,
+  serverKey: Schema.String,
+});
+export type DesktopSecureChannelRoute = typeof DesktopSecureChannelRoute.Type;
+
+/** The forwarder's local origins, or why the channel didn't open; failures cross IPC as data. */
+export const DesktopSecureChannelForwardResult = Schema.Union([
+  Schema.Struct({ ok: Schema.Literal(true), httpBaseUrl: Schema.String, wsBaseUrl: Schema.String }),
+  Schema.Struct({
+    ok: Schema.Literal(false),
+    kind: Schema.Literals([
+      "unreachable",
+      "unanswered",
+      "handshake",
+      "timeout",
+      "access-denied",
+      "unsupported",
+    ]),
+    message: Schema.String,
+  }),
+]);
+export type DesktopSecureChannelForwardResult = typeof DesktopSecureChannelForwardResult.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** Absolute path of a dropped or picked file; absent on desktop builds predating it. */
@@ -1143,6 +1181,14 @@ export interface DesktopBridge {
   getConnectionCatalog?: () => Promise<string | null>;
   setConnectionCatalog?: (catalog: string) => Promise<boolean>;
   clearConnectionCatalog?: () => Promise<void>;
+  /** End-to-end encrypted routes, which the main process reaches through a loopback forwarder. */
+  secureChannelCreateClientKey?: () => Promise<string>;
+  secureChannelForward?: (
+    request: DesktopSecureChannelRequest,
+  ) => Promise<DesktopSecureChannelForwardResult>;
+  secureChannelRelease?: (request: DesktopSecureChannelRequest) => Promise<void>;
+  /** Stops the forwarders of every route but these. */
+  secureChannelRetain?: (routes: ReadonlyArray<DesktopSecureChannelRoute>) => Promise<void>;
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
   /** Resolves a suggested SSH alias before populating the connection form. */
   resolveSshHost: (alias: string) => Promise<DesktopSshEnvironmentTarget>;
