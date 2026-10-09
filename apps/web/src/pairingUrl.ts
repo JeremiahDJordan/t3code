@@ -1,4 +1,5 @@
 export {
+  getChannelKeyFromUrl,
   getPairingTokenFromUrl,
   setPairingTokenOnUrl,
   stripPairingTokenFromUrl,

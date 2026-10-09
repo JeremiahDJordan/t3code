@@ -140,6 +140,14 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   setConnectionCatalog: (catalog) =>
     ipcRenderer.invoke(IpcChannels.SET_CONNECTION_CATALOG_CHANNEL, catalog),
   clearConnectionCatalog: () => ipcRenderer.invoke(IpcChannels.CLEAR_CONNECTION_CATALOG_CHANNEL),
+  secureChannelCreateClientKey: () =>
+    ipcRenderer.invoke(IpcChannels.SECURE_CHANNEL_CREATE_CLIENT_KEY_CHANNEL),
+  secureChannelForward: (request) =>
+    ipcRenderer.invoke(IpcChannels.SECURE_CHANNEL_FORWARD_CHANNEL, request),
+  secureChannelRelease: (request) =>
+    ipcRenderer.invoke(IpcChannels.SECURE_CHANNEL_RELEASE_CHANNEL, request),
+  secureChannelRetain: (routes) =>
+    ipcRenderer.invoke(IpcChannels.SECURE_CHANNEL_RETAIN_CHANNEL, routes),
   discoverSshHosts: () => ipcRenderer.invoke(IpcChannels.DISCOVER_SSH_HOSTS_CHANNEL),
   resolveSshHost: (alias) => ipcRenderer.invoke(IpcChannels.RESOLVE_SSH_HOST_CHANNEL, alias),
   ensureSshEnvironment: async (target, options) =>
