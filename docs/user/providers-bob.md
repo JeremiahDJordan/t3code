@@ -80,6 +80,9 @@ so.
   settings, and other secrets. It asks before `rm` and other delete commands, git commits and
   pushes, installing packages, network tools such as `curl`, commands that run in the
   background, and commands T3 Code cannot read with certainty, such as one using `$VARIABLES`.
+  T3 Code's own tools that only read threads, projects and schedules, or return a delegated
+  task's result, run without asking; the ones that start threads or workflows, schedule or send
+  ask.
 - **Auto** works as Auto-accept edits, and a reviewer model checks web searches and fetches of
   public pages, skills and GitHub reads with `gh` against the last six messages you wrote. It
   also keeps each sentence you type that limits what Bob may do, such as "don't search the web
@@ -96,13 +99,20 @@ so.
   network** option beside the model.
   When Bob works on a task another agent gave it, as a subagent or in a workflow, the reviewer
   judges its calls by that task, but only what you wrote in the thread where you started the
-  work limits or allows anything, so "don't push" there holds for every agent under it.
+  work limits or allows anything, so "don't push" there holds for every agent under it. When
+  that thread holds nothing you wrote, such as one an agent started, or one imported from an
+  older T3 Code or from an agent's own session history, the calls the reviewer would judge ask
+  you instead. A fork starts fresh: what
+  you wrote in the thread it was forked from does not carry over.
 - **Full access** lets Bob approve every tool call itself, without a sandbox.
 
 A command that needs the network or writes outside the project fails in the sandbox: a test
 that starts a server, a tool that keeps a cache outside the project, such as Go's, or one that
 reads its settings in a hidden folder of your home folder. When the sandbox stops a command,
 the next time Bob runs it you are asked, so you can let it run outside; ask Bob to try again.
+A project whose folder Bob reaches through a symlink gets no sandbox, so its commands and
+Bob's edits ask, unless the link sits straight in your home folder, such as `~/code`. Commands
+cannot read `.env` files in the temporary folders either, even ones they wrote there.
 Bob's own todo list and subagents run in every mode; a subagent's tool calls are checked the
 same way. For commands and edits a card offers a rule instead of **Always allow this session**,
 which Bob would apply to every later call of that tool; for Bob's other tools it stops Bob
@@ -118,7 +128,9 @@ Intelligence on macOS 26 or later and the Xcode command line tools, and T3 Code 
 small helper for it the first time Auto runs. **OpenAI-compatible endpoint** asks a model
 you run, such as one in Ollama at `http://localhost:11434/v1`; set **Reviewer endpoint**
 and **Reviewer model**, and put a key, if the endpoint needs one, in the instance's
-`BOB_AUTO_REVIEW_API_KEY` environment variable. Only Auto sends your messages to the reviewer.
+`BOB_AUTO_REVIEW_API_KEY` environment variable. Only Auto sends your messages to the reviewer;
+for a Bob agent on a delegated task, that includes your messages in the thread where the work
+started, even when that thread runs another provider.
 **Rules only** asks you about every call the rules leave to review.
 
 A message you send while Bob is working follows **Settings → General → Follow-up
@@ -142,8 +154,8 @@ Rules change what Bob may do without asking, outside **Full access**:
   tool's settings in `~/.vercel` or a cache in `~/Library/Caches/go-build`. A folder that
   holds your home folder, or the home folder itself, only opens for reading: writing there
   would let commands replace tools that run outside the sandbox. A rule for a path that
-  passes through a symlink, below your home folder, the project's folder or anywhere else,
-  opens nothing, since a command could have made the link; name the folder it points to.
+  passes through a symlink opens nothing, since a command could have made the link, unless
+  the link sits straight in your home folder, such as `~/code`; name the folder it points to.
 - **Keep private**: paths commands never read or write, and Bob's own edits of them ask. Bob's
   own reads still go through, since Bob does not ask before them.
 
@@ -160,9 +172,11 @@ the Bob instance's **Permission rules** under **Settings → Providers**. They a
 instance on that environment. A path starting with `./` is in the project's folder, so a
 project's rule follows each thread into its worktree. A rule that opens a folder never opens
 a credential store or app data in it, such as `~/.cargo/credentials.toml`, nor a `.env` file;
-name the file itself to open it. A rule to run commands without asking applies only to
-commands that run in the project's folder, on paths in it, with no variables set before them,
-and not in the background.
+name the file itself to open it. Bob's own edits in a folder commands may write stop at the
+same places. Other settings there stay writable, some of which run code: a rule to write in
+`~/.config` lets commands change fish's `config.fish` and git's `config`. A rule to run
+commands without asking applies only to commands that run in the project's folder, on paths in
+it, with no variables set before them, and not in the background.
 
 ## Keep Bob running when T3 Code restarts
 

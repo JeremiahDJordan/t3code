@@ -389,8 +389,39 @@ describe("reviewBobPermission", () => {
       toolVerdict(toolCall("fetch", "Fetching file:///etc/passwd", { url: "file:///etc/passwd" })),
     ).toBe("ask");
     expect(toolVerdict(toolCall("other", "Switching mode", { mode_id: "code" }))).toBe("ask");
-    expect(toolVerdict(toolCall("other", "Running List Scheduled (t3)", {}))).toBe("ask");
+    expect(toolVerdict(toolCall("other", "Running Delete Everything (docs)", {}))).toBe("ask");
     expect(toolVerdict(toolCall("read", "Reading src/a.ts", { path: "src/a.ts" }))).toBe("ask");
+  });
+
+  it("lets T3's own read and result tools through outside Supervised, and asks for the rest", () => {
+    for (const title of [
+      "Running T3 Task Return (t3-code)",
+      "Running Task Status (t3-code)",
+      "Running List Scheduled (t3-code)",
+      "Running T3 Thread Read (t3-code)",
+      "mcp__t3-code__task_status",
+      "t3-code: t3_task_return",
+    ]) {
+      expect(toolVerdict(toolCall("other", title, {})), title).toBe("allow");
+      expect(toolVerdict(toolCall("other", title, {}), "auto-accept-edits"), title).toBe("allow");
+      expect(toolVerdict(toolCall("other", title, {}), "approval-required"), title).toBe("ask");
+    }
+    // Starting threads or workflows, scheduling and sending change something: the user decides.
+    for (const title of [
+      "Running T3 Workflow Run (t3-code)",
+      "Running Create Threads (t3-code)",
+      "Running Update Scheduled Task (t3-code)",
+      "Running T3 Thread Fork (t3-code)",
+      "Running Schedule Check In (t3-code)",
+      "mcp__t3-code__delegate_task",
+      // The same name on another server is not T3's, nor are names T3 never uses.
+      "Running Task Status (other-server)",
+      "Running Task Status (t3)",
+      "Running Task Status (T3 Code)",
+      "mcp__t3_code__task_status",
+    ]) {
+      expect(toolVerdict(toolCall("other", title, {})), title).toBe("ask");
+    }
   });
 
   it("reviews a command by its command line and folder, not its title", () => {
@@ -932,6 +963,83 @@ describe("what the review found", () => {
     for (const command of ["Git status", "Gh pr view 1", "NPM run build", "KUBECTL apply -f x"]) {
       expect(suggestBobCommandRule(command), command).toBeUndefined();
     }
+  });
+
+  it("asks before Bob's edits once another sandbox swaps a nested project's folder", () => {
+    const app = NodePath.join(root, "main", "packages", "app");
+    NodeFS.mkdirSync(NodePath.join(app, "src"), { recursive: true });
+    NodeFS.mkdirSync(NodePath.join(home, "bin"), { recursive: true });
+    const edit = (path: string) =>
+      reviewBobPermission(toolCall("edit", `Writing file ${path}`, { path }), {
+        mode: "auto-accept-edits",
+        sandboxed: true,
+        context: { ...context, workspace: app },
+      }).verdict;
+    expect(edit(NodePath.join(app, "src", "a.ts"))).toBe("allow");
+    // Thread B, sandboxed in `main`, moves the folder aside and links `~/bin` in its place.
+    NodeFS.renameSync(app, `${app}.old`);
+    NodeFS.symlinkSync(NodePath.join(home, "bin"), app);
+    expect(edit(NodePath.join(app, "git"))).toBe("ask");
+  });
+
+  it("grants nothing through a link a command made at a rule's folder", () => {
+    // The workspace's `link-out` leads outside it, as one a command made would.
+    const edit = toolCall("edit", "Writing file link-out/x.txt", {
+      path: NodePath.join(workspace, "link-out", "x.txt"),
+    });
+    expect(
+      reviewBobPermission(edit, {
+        mode: "auto-accept-edits",
+        sandboxed: true,
+        context: {
+          ...context,
+          rules: { ...NO_BOB_USER_RULES, write: [NodePath.join(workspace, "link-out")] },
+        },
+      }).verdict,
+    ).toBe("ask");
+  });
+
+  it("lets Bob edit under a write rule no further than the sandbox lets commands write", () => {
+    const library = NodePath.join(home, "Library");
+    const gradle = NodePath.join(home, ".gradle");
+    const t3 = NodePath.join(root, "t3");
+    for (const folder of [
+      NodePath.join(library, "LaunchAgents"),
+      NodePath.join(library, "Preferences"),
+      NodePath.join(library, "Fonts"),
+      NodePath.join(gradle, "caches"),
+      NodePath.join(t3, "userdata"),
+      NodePath.join(t3, "caches"),
+    ]) {
+      NodeFS.mkdirSync(folder, { recursive: true });
+    }
+    const edit = (path: string, write: string, read: ReadonlyArray<string> = []) =>
+      reviewBobPermission(toolCall("edit", `Writing file ${path}`, { path }), {
+        mode: "auto-accept-edits",
+        sandboxed: true,
+        context: {
+          ...context,
+          rules: { ...NO_BOB_USER_RULES, write: [write], read },
+          folders: {
+            state: NodePath.join(t3, "userdata"),
+            cache: NodePath.join(t3, "caches"),
+            temporary: [],
+          },
+        },
+      }).verdict;
+    expect(edit(NodePath.join(library, "Fonts", "x.ttf"), library)).toBe("allow");
+    expect(edit(NodePath.join(library, "LaunchAgents", "evil.plist"), library)).toBe("ask");
+    expect(edit(NodePath.join(library, "Preferences", "com.app.plist"), library)).toBe("ask");
+    // A folder a card offers to write in, whose settings run code.
+    expect(edit(NodePath.join(gradle, "caches", "x"), gradle)).toBe("allow");
+    expect(edit(NodePath.join(gradle, "gradle.properties"), gradle)).toBe("ask");
+    // A rule to read the file opens it for reading only.
+    const properties = NodePath.join(gradle, "gradle.properties");
+    expect(edit(properties, gradle, [properties])).toBe("ask");
+    // A rule on the home folder writes nowhere, and one holding T3's state not there.
+    expect(edit(NodePath.join(home, "bin", "git"), home)).toBe("ask");
+    expect(edit(NodePath.join(t3, "userdata", "settings.json"), t3)).toBe("ask");
+    expect(edit(NodePath.join(t3, "caches", "bob-sandbox", "x"), t3)).toBe("ask");
   });
 
   it("lets Bob edit in an opened folder only where its paths really lead", () => {

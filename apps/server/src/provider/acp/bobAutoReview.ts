@@ -19,6 +19,8 @@ import * as NodePath from "node:path";
 
 import type * as EffectAcpSchema from "effect-acp/compat";
 
+import { bobRuleFolder, bobRuleWriter, bobWorkspace } from "./bobSandbox.ts";
+
 /** `allow` runs the call, `review` leaves it to review against the user's request, `ask` asks. */
 export type BobAutoVerdict = "allow" | "review" | "ask";
 
@@ -188,31 +190,54 @@ export interface BobAutoReviewContext {
   readonly workspace: string | null;
   readonly home?: string;
   readonly rules?: BobUserRules;
+  /**
+   * T3's state and caches, which no rule opens to Bob's edits, and the temporary folders, as
+   * Bob's sandbox takes them.
+   */
+  readonly folders?: {
+    readonly state: string;
+    readonly cache: string;
+    readonly temporary: ReadonlyArray<string>;
+  };
 }
 
 class Places {
   private readonly home: string;
   private readonly realHome: string;
   readonly workspace: string | undefined;
+  /** The workspace as written and as resolved, below which rule folders are resolved too. */
+  private readonly workspaceRoot: readonly [string, string] | undefined;
   readonly rules: BobUserRules;
+  /** Where a write rule lets Bob edit, as the sandbox lets commands write; made on first use. */
+  private writer: ((path: string) => string | undefined) | undefined;
+  private readonly context: BobAutoReviewContext;
   constructor(context: BobAutoReviewContext) {
+    this.context = context;
     this.home = context.home ?? NodeOS.homedir();
     this.realHome = canonicalPath(this.home) ?? this.home;
+    // Resolved as the sandbox pins it, on each review: a workspace another sandbox swapped for a
+    // link since gets none, so Bob's edits ask rather than land where the link points.
     this.workspace =
       context.workspace && NodePath.isAbsolute(context.workspace)
-        ? canonicalPath(context.workspace)
+        ? bobWorkspace(context.workspace, this.home)
+        : undefined;
+    this.workspaceRoot =
+      context.workspace && this.workspace !== undefined
+        ? [context.workspace, this.workspace]
         : undefined;
     this.rules = context.rules ?? NO_BOB_USER_RULES;
   }
   /**
    * Where `path` lies below one of `roots`: as written or resolved for a denial, so neither
    * spelling slips past it, but only as resolved for a grant, so a symlink inside an opened
-   * folder cannot lead out of it. None outside them all.
+   * folder cannot lead out of it, and a granting folder only as the sandbox applies it, so a
+   * link a command made where it did not exist yet grants nothing. None outside them all.
    */
   private below(roots: ReadonlyArray<string>, path: string, grant: boolean): string | undefined {
     const resolved = canonicalPath(path);
     for (const root of roots) {
-      const real = canonicalPath(root) ?? root;
+      const real = grant ? this.ruleFolder(root) : (canonicalPath(root) ?? root);
+      if (real === undefined) continue;
       const found = grant
         ? resolved && within(real, resolved)
         : (within(root, path) ?? within(real, resolved ?? path));
@@ -220,17 +245,40 @@ class Places {
     }
     return undefined;
   }
+  /** A granting rule's folder as the sandbox applies it, resolved once per review. */
+  private readonly ruleFolders = new Map<string, string | undefined>();
+  private ruleFolder(root: string): string | undefined {
+    if (!this.ruleFolders.has(root)) {
+      this.ruleFolders.set(
+        root,
+        bobRuleFolder(root, { home: this.home, workspace: this.workspaceRoot }),
+      );
+    }
+    return this.ruleFolders.get(root);
+  }
   /** Whether the user's rules keep `path` private. */
   isPrivate(path: string): boolean {
     return this.below(this.rules.private, path, false) !== undefined;
   }
-  /** Where `path` lies in a folder the user's rules let commands write, or read. */
+  /**
+   * Where `path` lies in a folder the user's rules let commands write, past every write denial
+   * of the sandbox's, or read.
+   */
   inRuleFolder(path: string, access: "read" | "write"): string | undefined {
-    return this.below(
-      access === "write" ? this.rules.write : [...this.rules.read, ...this.rules.write],
-      path,
-      true,
-    );
+    if (access === "read") return this.below([...this.rules.read, ...this.rules.write], path, true);
+    // Where the edit really lands: a link in the rule's folder may lead out of it, and one that
+    // leads nowhere yet would create its file wherever it points.
+    const resolved = canonicalPath(path);
+    if (resolved === undefined) return undefined;
+    this.writer ??= bobRuleWriter({
+      home: this.home,
+      workspace: this.workspaceRoot?.[0],
+      rules: this.rules,
+      privateFolders: this.context.folders === undefined ? [] : [this.context.folders.state],
+      sandboxFolders: this.context.folders === undefined ? [] : [this.context.folders.cache],
+      temporaryFolders: this.context.folders?.temporary ?? [],
+    });
+    return this.writer(resolved);
   }
   /** A path as written, from `base`, with `~` as the home folder; none for `~user`. */
   absolute(path: string, base: string): string | undefined {
@@ -1501,6 +1549,46 @@ const BOB_WEB_SEARCH_TITLE = "Searching the web";
 const BOB_WEB_FETCH_TITLE = "Fetching ";
 const BOB_SKILL_TITLE = "Using skill ";
 
+/**
+ * T3's own MCP tools Auto lets Bob call without asking: reading T3's threads, projects, queues
+ * and schedules, and a delegated task's status and result. Each runs as the thread's own caller,
+ * within its modes. Tools that start threads or workflows, schedule, send or change anything
+ * still ask. Names are without their `t3_` prefix, which Bob may drop from the title.
+ */
+const T3_MCP_ROUTINE_TOOLS = new Set([
+  "task_return",
+  "task_status",
+  "orchestrator_capabilities",
+  "thread_list",
+  "thread_read",
+  "thread_configuration",
+  "thread_transfers",
+  "project_list",
+  "project_read",
+  "queue_list",
+  "queue_read",
+  "pending_request_list",
+  "pending_request_read",
+  "environment_read",
+  "list_scheduled_tasks",
+  "list_scheduled",
+]);
+
+/**
+ * The T3 tool a Bob tool call runs, when its title names T3's MCP server, which T3 always injects
+ * as `t3-code`: Bob titles an MCP call "Running <Tool Name> (<server>)", and other agents
+ * `mcp__t3-code__<tool>` or `t3-code: <tool>`. Undefined for any other tool. The title is all
+ * Bob gives, so a server a project configures under the same name would match too.
+ */
+function t3McpToolOf(title: string): string | undefined {
+  const running = /^Running (?<name>[A-Za-z0-9 _-]+) \(t3-code\)$/.exec(title);
+  const named = /^(?:mcp__)?t3-code(?:__|: )(?<name>[A-Za-z0-9_]+)$/.exec(title);
+  const name = (running ?? named)?.groups?.name;
+  return name === undefined
+    ? undefined
+    : name.trim().toLowerCase().replace(/[ -]+/g, "_").replace(/^t3_/, "");
+}
+
 /** The files an edit writes: the diffs Bob previews and the paths in its input. */
 function editPaths(toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"]): Array<string> {
   const paths: Array<string> = [];
@@ -1702,6 +1790,14 @@ export function reviewBobPermission(
         /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(raw.skill_name)
       ) {
         return reviewed(review(`loads the skill ${JSON.stringify(raw.skill_name)}`));
+      }
+      {
+        const t3Tool = t3McpToolOf(title);
+        if (t3Tool !== undefined && mode !== "approval-required") {
+          return T3_MCP_ROUTINE_TOOLS.has(t3Tool)
+            ? allow(`reads T3 or returns a result with T3's own tool ${t3Tool}`)
+            : ask(`T3's tool ${t3Tool}, which changes or starts something`);
+        }
       }
       return ask("a tool the rules do not know");
     default:
