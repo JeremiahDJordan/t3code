@@ -400,7 +400,12 @@ interface Word {
   readonly globbed: boolean;
 }
 type Token =
-  | { readonly type: "word"; readonly word: Word }
+  | {
+      readonly type: "word";
+      readonly word: Word;
+      /** Input from a file, as `< file`, which the shell opens itself rather than passing on. */
+      readonly redirected: boolean;
+    }
   | { readonly type: "op"; readonly op: "&&" | "||" | ";" | "|" };
 
 const WORD_CHARACTER = /[A-Za-z0-9_./:=@%+,~^-]/;
@@ -435,9 +440,11 @@ function tokenize(command: string): ReadonlyArray<Token> | undefined {
       index += redirection[0].length;
       continue;
     }
-    // Input from a file reads it as an argument would, so it is reviewed as one; here documents,
-    // fd duplication and process substitution fail below.
+    // Input from a file reads it as an argument would, so its path is reviewed as one, but it is
+    // not among the command's words; here documents, fd duplication and process substitution
+    // fail below.
     const input = /^<(?![<&>(])[ \t]*/.exec(rest);
+    const redirected = input !== null;
     if (input) {
       index += input[0].length;
       if (index >= command.length || /[;|&\s]/.test(command[index]!)) return undefined;
@@ -470,13 +477,18 @@ function tokenize(command: string): ReadonlyArray<Token> | undefined {
       index += 1;
     }
     if (text.length === 0 && !quoted) return undefined;
-    tokens.push({ type: "word", word: { text, globbed } });
+    // zsh opens every file a glob matches as input, which no rule reads with certainty.
+    if (redirected && globbed) return undefined;
+    tokens.push({ type: "word", word: { text, globbed }, redirected });
   }
   return tokens;
 }
 
 interface SimpleCommand {
+  /** The words the shell runs, as `argv`: never a redirection's file, wherever it stands. */
   readonly words: ReadonlyArray<Word>;
+  /** The files the shell opens as its input, as `< file`, read as an argument would be. */
+  readonly inputs: ReadonlyArray<string>;
   /** Whether a pipe joins it to the command before or after. */
   readonly piped: boolean;
 }
@@ -484,19 +496,22 @@ interface SimpleCommand {
 function simpleCommands(tokens: ReadonlyArray<Token>): ReadonlyArray<SimpleCommand> | undefined {
   const commands: Array<SimpleCommand> = [];
   let words: Array<Word> = [];
+  let inputs: Array<string> = [];
   let pipedIn = false;
   for (const token of tokens) {
     if (token.type === "word") {
-      words.push(token.word);
+      if (token.redirected) inputs.push(token.word.text);
+      else words.push(token.word);
       continue;
     }
     if (words.length === 0) return undefined;
-    commands.push({ words, piped: pipedIn || token.op === "|" });
+    commands.push({ words, inputs, piped: pipedIn || token.op === "|" });
     pipedIn = token.op === "|";
     words = [];
+    inputs = [];
   }
   if (words.length === 0) return undefined;
-  commands.push({ words, piped: pipedIn });
+  commands.push({ words, inputs, piped: pipedIn });
   return commands;
 }
 
@@ -508,7 +523,7 @@ function ruleWords(rule: string): ReadonlyArray<string> | undefined {
   if (!tokens || tokens.length === 0) return undefined;
   const words: Array<string> = [];
   for (const token of tokens) {
-    if (token.type !== "word" || token.word.globbed) return undefined;
+    if (token.type !== "word" || token.word.globbed || token.redirected) return undefined;
     words.push(token.word.text);
   }
   return words;
@@ -566,10 +581,13 @@ function allowedByUserRule(
   const commands = tokens ? simpleCommands(tokens) : undefined;
   if (!commands) return undefined;
   const matched: Array<string> = [];
-  for (const { words } of commands) {
+  for (const simple of commands) {
+    const { words, inputs } = simple;
     if (words[0]!.text === "cd" || matchedRule(words, rules.askCommands, true) !== undefined) {
       return undefined;
     }
+    // A filter on what an allowed command prints runs with it, as `npm view x | head`.
+    if (matched.length > 0 && filtersOnly(simple)) continue;
     const rule = matchedRule(words, rules.allowCommands);
     if (rule === undefined) return undefined;
     // Any argument naming a path, as written or through a symlink, stays in the workspace. A glob
@@ -599,7 +617,8 @@ function allowedByUserRule(
       if (head === undefined || exists(head)) paths.push(word);
       else if (!word.includes("=") && places.namesSecret(word, base)) return undefined;
     }
-    for (const word of paths) {
+    // The shell opens an input file where the command runs, as an operand would name it.
+    for (const word of [...paths, ...inputs]) {
       if (places.namesSecret(word, base)) return undefined;
       if (segmentsOf(word).includes("..")) return undefined;
       const path = places.absolute(word, base);
@@ -872,7 +891,11 @@ function reviewSimpleCommand(places: Places, command: SimpleCommand, base: strin
   // Listing names, without descending, reads no secret held below a folder.
   const shallow =
     program === "ls" && !args.some((word) => /^(-[A-Za-z]*R|--recursive)/.test(word.text));
-  if (pathLikeWords(args).some((word) => places.namesSecret(word, base, shallow))) {
+  if (
+    [...pathLikeWords(args), ...command.inputs].some((word) =>
+      places.namesSecret(word, base, shallow),
+    )
+  ) {
     return ask("touches secrets or settings");
   }
   // `git show HEAD:.env` reads a file by its path in the repository, and a pathspec with magic
@@ -1040,6 +1063,7 @@ export function reviewBobCommand(
     const target = simple.words[1];
     const next: string | undefined =
       simple.piped ||
+      simple.inputs.length > 0 ||
       simple.words.length !== 2 ||
       !target ||
       target.globbed ||
@@ -1322,26 +1346,104 @@ function reviewSandboxedLine(
   if (!commands) return ask("a command the rules cannot read with certainty");
   let base = start;
   const reviews: Array<BobAutoReview> = [];
+  const run: Array<SimpleCommand> = [];
   for (const simple of commands) {
     if (simple.words[0]!.text !== "cd") {
-      reviews.push(reviewSandboxedCommand(places, simple.words, base, depth));
+      reviews.push(
+        simple.inputs.some((input) => places.namesSecret(input, base))
+          ? ask("touches secrets or settings")
+          : reviewSandboxedCommand(places, simple.words, base, depth),
+      );
+      run.push(simple);
       continue;
     }
     const target = simple.words[1];
     const next =
-      simple.words.length !== 2 || !target || target.globbed || target.text.startsWith("-")
+      simple.inputs.length > 0 ||
+      simple.words.length !== 2 ||
+      !target ||
+      target.globbed ||
+      target.text.startsWith("-")
         ? undefined
         : places.absolute(target.text, base);
     if (next === undefined) return ask("changes folder in a way the rules cannot follow");
     if (places.namesSecret(target!.text, base, true)) return ask("changes to a folder of secrets");
     base = next;
   }
-  // A read left to review runs outside the sandbox with the whole line, so it must stand alone:
-  // `gh pr view 1 | bash` would run what the pull request says as the user.
-  if (commands.length > 1 && reviews.some((entry) => entry.verdict === "review")) {
-    return ask("runs a read that needs the network with other commands");
+  // A read left to review runs outside the sandbox with the whole line, so the rest of the line
+  // may only filter what it prints: `gh pr view 1 | head` runs, but `gh pr view 1 | bash` would
+  // run what the pull request says as the user.
+  if (reviews.some((entry) => entry.verdict === "review") && !run.slice(1).every(filtersOnly)) {
+    return ask("runs a read that needs the network with commands other than filters");
   }
   return strictest(reviews);
+}
+
+/** How each filter's options take a value: in the same word, or the same word or the next. */
+const FILTERS: Record<
+  string,
+  {
+    /** Option letters that take no value, in any combination. */
+    readonly flags: string;
+    /** Option letters followed by a value, and the values they take. */
+    readonly values?: Readonly<Record<string, RegExp>>;
+    /** Operands it takes besides its input, as `grep` takes its pattern. */
+    readonly operands?: number;
+  }
+> = {
+  head: { flags: "q", values: { n: /^-?\d+$/, c: /^-?\d+$/ } },
+  tail: { flags: "qr", values: { n: /^[+-]?\d+$/, c: /^[+-]?\d+$/ } },
+  wc: { flags: "lwcmL" },
+  sort: { flags: "nrufhVbdM", values: { k: /^[\d.,a-zA-Z]+$/, t: /^.$/ } },
+  uniq: { flags: "cdui" },
+  cut: { flags: "s", values: { d: /^.$/, f: /^[\d,-]+$/, c: /^[\d,-]+$/, b: /^[\d,-]+$/ } },
+  grep: {
+    flags: "ivnocEFwxhsqHlLG",
+    values: { e: /^.+$/, A: /^\d+$/, B: /^\d+$/, C: /^\d+$/, m: /^\d+$/ },
+    operands: 1,
+  },
+  cat: { flags: "n" },
+};
+
+/**
+ * Whether a command only filters the text piped into it, reading and writing nothing else and
+ * running nothing: no file operands, no input redirection, which the shell opens wherever it
+ * stands, as in `grep -e < ~/.netrc`, no options that open, write or run something, and no
+ * globs. `grep` takes one pattern, or none after `-e`.
+ */
+function filtersOnly({ words, inputs, piped }: SimpleCommand): boolean {
+  const filter = Object.hasOwn(FILTERS, words[0]!.text) ? FILTERS[words[0]!.text] : undefined;
+  if (!piped || filter === undefined || inputs.length > 0 || words.some((word) => word.globbed)) {
+    return false;
+  }
+  const values = filter.values ?? {};
+  let operands = 0;
+  let patterns = 0;
+  for (let index = 1; index < words.length; index += 1) {
+    const text = words[index]!.text;
+    // `head -100` as `head -n 100`.
+    if ((words[0]!.text === "head" || words[0]!.text === "tail") && /^-\d+$/.test(text)) continue;
+    if (!text.startsWith("-") || text === "-") {
+      operands += 1;
+      continue;
+    }
+    for (let at = 1; at < text.length; at += 1) {
+      const letter = text[at]!;
+      if (filter.flags.includes(letter)) continue;
+      const pattern = Object.hasOwn(values, letter) ? values[letter] : undefined;
+      if (pattern === undefined) return false;
+      // The value is the rest of the word, or else the next word.
+      let value = text.slice(at + 1);
+      if (value.length === 0) {
+        index += 1;
+        value = words[index]?.text ?? "";
+      }
+      if (!pattern.test(value)) return false;
+      if (letter === "e") patterns += 1;
+      break;
+    }
+  }
+  return operands === (patterns > 0 ? 0 : (filter.operands ?? 0));
 }
 
 /**
@@ -1858,8 +1960,14 @@ export function reviewBobPermission(
       if (words.some((word) => word.trim() !== word)) {
         return ask("a path Bob reads in another spelling than the rules check");
       }
+      // Bob strips quotes from an `include` and splits it on commas, so one is checked only as
+      // written plainly.
+      if (typeof raw.include === "string" && /["\\,]/.test(raw.include)) {
+        return ask("searches with a file pattern the rules cannot read as Bob does");
+      }
+      // Bob descends on any `recursive` but false, not only `true`.
       const descends =
-        raw.recursive === true ||
+        (raw.recursive !== undefined && raw.recursive !== false) ||
         ["pattern", "include", "name_path_pattern"].some((key) => raw[key] !== undefined);
       const roots = ["path", "relative_path"].flatMap((key) => {
         const value = raw[key];
@@ -1947,6 +2055,27 @@ export function reviewBobPermission(
  * What a tool call the rules leave to review does, for the reviewer that judges it, on one line
  * with the call's own text quoted, so it reads as data.
  */
+/** A line that pipes one command into filters only: that command as written, and the filters. */
+function filteredOutput(
+  command: string,
+): { readonly command: string; readonly filters: ReadonlyArray<string> } | undefined {
+  const tokens = command.length > 2_000 ? undefined : tokenize(command);
+  const commands = tokens ? simpleCommands(tokens) : undefined;
+  if (commands === undefined || commands.length < 2 || commands[0]!.words[0]!.text === "cd") {
+    return undefined;
+  }
+  const filters = commands.slice(1);
+  if (!filters.every(filtersOnly)) return undefined;
+  const shown = (text: string) => (/^[A-Za-z0-9_./:=@%+,~^-]+$/.test(text) ? text : `'${text}'`);
+  return {
+    command: [
+      ...commands[0]!.words.map((word) => shown(word.text)),
+      ...commands[0]!.inputs.map((input) => `< ${shown(input)}`),
+    ].join(" "),
+    filters: [...new Set(filters.map((simple) => simple.words[0]!.text))],
+  };
+}
+
 export function describeBobToolCall(
   toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
   context: BobAutoReviewContext,
@@ -1960,7 +2089,13 @@ export function describeBobToolCall(
         cwd === undefined || cwd === context.workspace
           ? "in the project folder"
           : `in ${quoted(cwd)}`;
-      return `runs a command ${where}: ${quoted(input.command)}`;
+      const filtered =
+        typeof input.command === "string" ? filteredOutput(input.command) : undefined;
+      // The rules already proved the filters only cut down what the command prints, so the
+      // reviewer judges the command itself.
+      return filtered === undefined
+        ? `runs a command ${where}: ${quoted(input.command)}`
+        : `runs a command ${where}: ${quoted(filtered.command)}, keeping only part of its output with ${filtered.filters.join(" and ")}`;
     }
     case "search":
       return `searches the web for ${quoted(input.query)}`;
