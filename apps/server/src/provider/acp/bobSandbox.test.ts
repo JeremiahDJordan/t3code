@@ -9,6 +9,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { afterAll, describe, expect, it } from "vite-plus/test";
 
 import {
+  bobProcessSandboxSpawn,
   bobSandboxAvailable,
   bobSandboxFolderSuggestion,
   makeBobSandbox,
@@ -693,6 +694,188 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     expect(run("ls").status).toBe(0);
     expect(run("echo hi > made.txt").status).not.toBe(0);
     expect(run(`echo hi > ${NodePath.join(base, "tmp", "t.txt")}`).status).toBe(0);
+  });
+});
+
+/**
+ * What a sandboxed Bob process tries: writes in its own state and elsewhere, the project's own
+ * Bob folder, a command, and connections. Prints each outcome, `ok` or the error code, as JSON.
+ */
+const PROCESS_PROBE = `
+const fs = require("fs");
+const net = require("net");
+const path = require("path");
+const bob = path.join(process.env.HOME, ".bob");
+const [port, socketPath] = process.argv.slice(2);
+const outcomes = {};
+const attempt = (name, run) => {
+  try {
+    run();
+    outcomes[name] = "ok";
+  } catch (error) {
+    outcomes[name] = error.code ?? (error.status === undefined ? String(error) : "exit " + error.status);
+  }
+};
+attempt("database", () => fs.writeFileSync(path.join(bob, "db", "bob.db"), "x"));
+attempt("logs", () => fs.mkdirSync(path.join(bob, "logs", "shell"), { recursive: true }));
+attempt("settings folder", () => fs.mkdirSync(path.join(bob, "settings"), { recursive: true }));
+attempt("sign-in", () => fs.writeFileSync(path.join(bob, "settings", "auth-secrets.json"), "{}"));
+attempt("trust", () => fs.writeFileSync(path.join(bob, "trustedFolders.json"), "{}"));
+attempt("settings", () => fs.writeFileSync(path.join(bob, "settings", "settings.json"), "{}"));
+attempt("mcp servers", () => fs.writeFileSync(path.join(bob, "mcp.json"), "{}"));
+attempt("workspace", () => fs.writeFileSync("made.txt", "x"));
+attempt("temporary", () => fs.writeFileSync(path.join(process.env.TMPDIR, "t.txt"), "x"));
+attempt("read workspace", () => fs.readFileSync("README.md"));
+attempt("project bob", () => fs.readFileSync(path.join(".bob", "mcp.json")));
+attempt("command", () => require("child_process").execSync("echo x > by-command.txt", { stdio: "ignore" }));
+const connections = [
+  ["this machine", [Number(port), "127.0.0.1"]],
+  ["socket", [socketPath]],
+  ["another machine", [9, "192.0.2.1"]],
+];
+let open = connections.length;
+for (const [name, target] of connections) {
+  const socket = net.connect(...target);
+  const settle = (outcome) => {
+    outcomes[name] ??= outcome;
+    socket.destroy();
+    if (--open === 0) process.stdout.write(JSON.stringify(outcomes));
+  };
+  socket.setTimeout(300, () => settle("timeout"));
+  socket.on("connect", () => settle("ok"));
+  socket.on("error", (error) => settle(error.code));
+}
+`;
+
+describe.skipIf(!available)("bobProcessSandboxSpawn", () => {
+  it("runs all of Bob read-only but for its own state, reaching other machines only", async () => {
+    const base = NodeFS.mkdtempSync(NodePath.join(root, "process-"));
+    const home = NodePath.join(base, "home");
+    const workspace = NodePath.join(base, "workspace");
+    const temporary = NodePath.join(base, "tmp");
+    for (const folder of [
+      NodePath.join(home, ".bob", "db"),
+      NodePath.join(home, ".bob", "settings"),
+      NodePath.join(workspace, ".bob"),
+      temporary,
+    ]) {
+      NodeFS.mkdirSync(folder, { recursive: true });
+    }
+    NodeFS.writeFileSync(NodePath.join(workspace, "README.md"), "readme");
+    NodeFS.writeFileSync(NodePath.join(workspace, ".bob", "mcp.json"), "{}");
+    // A `bob` that is the probe itself, so the sandbox holds the process, not only its commands.
+    const bob = NodePath.join(base, "bin", "bob");
+    NodeFS.mkdirSync(NodePath.dirname(bob));
+    NodeFS.writeFileSync(bob, `#!${process.execPath}\n${PROCESS_PROBE}`, { mode: 0o755 });
+    const server = NodeNet.createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const socketPath = NodePath.join(temporary, "s.sock");
+    const socketServer = NodeNet.createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => socketServer.listen(socketPath, resolve));
+    const environment = { ...process.env, HOME: home, TMPDIR: temporary };
+    const spawn = bobProcessSandboxSpawn({
+      platform: HostProcess.Platform.defaultValue(),
+      command: bob,
+      workspace,
+      environment,
+      cacheDir: NodePath.join(base, "t3", "caches"),
+      stateDir: NodePath.join(base, "t3", "state"),
+    })!;
+    const probe = NodeChildProcess.spawnSync(
+      spawn.command,
+      [...spawn.args, String((server.address() as NodeNet.AddressInfo).port), socketPath],
+      { cwd: workspace, env: environment, encoding: "utf8" },
+    );
+    server.close();
+    socketServer.close();
+    expect(probe.status, probe.stderr).toBe(0);
+    const outcomes = JSON.parse(probe.stdout) as Record<string, string>;
+    expect(outcomes).toEqual({
+      database: "ok",
+      logs: "ok",
+      "settings folder": "ok",
+      "sign-in": "ok",
+      trust: "ok",
+      settings: "EPERM",
+      "mcp servers": "EPERM",
+      workspace: "EPERM",
+      temporary: "ok",
+      "read workspace": "ok",
+      "project bob": "EPERM",
+      command: "exit 1",
+      "this machine": "EPERM",
+      socket: "EPERM",
+      // Allowed, whether the address answers or the host has no network.
+      "another machine": expect.not.stringMatching(/^EPERM$/),
+    });
+    expect(NodeFS.existsSync(NodePath.join(workspace, "made.txt"))).toBe(false);
+    expect(NodeFS.existsSync(NodePath.join(workspace, "by-command.txt"))).toBe(false);
+  });
+
+  it("keeps a checkout inside a temporary folder read-only, as T3's worktrees are there", () => {
+    // T3's home in the temporary folder puts its worktrees, and so a review guide's checkout,
+    // inside a folder Bob may write.
+    const temporary = NodeFS.mkdtempSync(NodePath.join(root, "process-tmp-"));
+    const home = NodePath.join(temporary, "home");
+    const workspace = NodePath.join(temporary, "t3", "worktrees", "checkout");
+    NodeFS.mkdirSync(home);
+    NodeFS.mkdirSync(workspace, { recursive: true });
+    NodeFS.writeFileSync(NodePath.join(workspace, "README.md"), "readme");
+    const bob = NodePath.join(temporary, "bin", "bob");
+    NodeFS.mkdirSync(NodePath.dirname(bob));
+    NodeFS.writeFileSync(
+      bob,
+      `#!${process.execPath}
+const fs = require("fs");
+const outcomes = {};
+const attempt = (name, run) => {
+  try {
+    run();
+    outcomes[name] = "ok";
+  } catch (error) {
+    outcomes[name] = error.code ?? String(error);
+  }
+};
+attempt("edit", () => fs.writeFileSync("README.md", "changed"));
+attempt("create", () => fs.writeFileSync("made.txt", "x"));
+attempt("temporary", () => fs.writeFileSync(require("path").join(process.env.TMPDIR, "t.txt"), "x"));
+process.stdout.write(JSON.stringify(outcomes));
+`,
+      { mode: 0o755 },
+    );
+    const environment = { ...process.env, HOME: home, TMPDIR: temporary };
+    const spawn = bobProcessSandboxSpawn({
+      platform: HostProcess.Platform.defaultValue(),
+      command: bob,
+      workspace,
+      environment,
+      cacheDir: NodePath.join(temporary, "t3", "caches"),
+      stateDir: NodePath.join(temporary, "t3", "userdata"),
+    })!;
+    const probe = NodeChildProcess.spawnSync(spawn.command, spawn.args, {
+      cwd: workspace,
+      env: environment,
+      encoding: "utf8",
+    });
+    expect(probe.status, probe.stderr).toBe(0);
+    expect(JSON.parse(probe.stdout)).toEqual({ edit: "EPERM", create: "EPERM", temporary: "ok" });
+    expect(NodeFS.readFileSync(NodePath.join(workspace, "README.md"), "utf8")).toBe("readme");
+    expect(NodeFS.existsSync(NodePath.join(workspace, "made.txt"))).toBe(false);
+    expect(NodeFS.readFileSync(NodePath.join(temporary, "t.txt"), "utf8")).toBe("x");
+  });
+
+  it("starts no Bob where the host has no sandbox or Bob is not there", () => {
+    const options = {
+      command: "bob",
+      workspace: root,
+      environment: { HOME: root, PATH: "" },
+      cacheDir: root,
+      stateDir: root,
+    };
+    expect(bobProcessSandboxSpawn({ ...options, platform: "linux" })).toBeUndefined();
+    expect(
+      bobProcessSandboxSpawn({ ...options, platform: HostProcess.Platform.defaultValue() }),
+    ).toBeUndefined();
   });
 });
 

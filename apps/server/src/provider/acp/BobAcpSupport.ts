@@ -56,6 +56,11 @@ interface BobAcpRuntimeInput
   /** Variables T3 adds for the session, such as its MCP credentials, over `environment`. */
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly runtimeMode?: RuntimeMode;
+  /**
+   * Starts Bob through another program, such as `sandbox-exec`: its command, then its arguments,
+   * which end with Bob's executable, then Bob's own arguments.
+   */
+  readonly launcher?: { readonly command: string; readonly args: ReadonlyArray<string> };
 }
 
 /** `~/.bob` as Bob resolves it, from the home directory of the environment `bob` runs with. */
@@ -344,16 +349,24 @@ export const makeBobAcpRuntime = (
     ) {
       return yield* EffectAcpErrors.AcpRequestError.authRequired();
     }
+    const spawn = buildBobAcpSpawnInput(
+      input.bobSettings,
+      input.cwd,
+      { ...(input.environment ?? process.env), ...input.processEnvironment },
+      input.runtimeMode,
+      { disableMcpAndSubagents: input.disableMcpAndSubagents === true },
+    );
     const acpContext = yield* Layer.build(
       AcpSessionRuntime.layer({
         ...input,
-        spawn: buildBobAcpSpawnInput(
-          input.bobSettings,
-          input.cwd,
-          { ...(input.environment ?? process.env), ...input.processEnvironment },
-          input.runtimeMode,
-          { disableMcpAndSubagents: input.disableMcpAndSubagents === true },
-        ),
+        spawn:
+          input.launcher === undefined
+            ? spawn
+            : {
+                ...spawn,
+                command: input.launcher.command,
+                args: [...input.launcher.args, ...spawn.args],
+              },
         // Never `authenticate`: Bob's only method opens an IBM SSO browser on the server host
         // and blocks until the login finishes. Bob signs in from its stored login or API key.
         authenticateOnAuthRequired: false,

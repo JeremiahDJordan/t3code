@@ -43,6 +43,11 @@ every mode and outside T3 Code's sandbox, so use Bob only in projects you trust,
 before running their build. When Bob writes thread titles, branch names, commit messages or
 pull request text, it works in a folder of T3 Code's own, so that never trusts a project.
 
+On macOS, Bob can also write pull request [review guides](./source-control.md#review-guides). It
+reads the pull request's temporary checkout and runs Git's read commands there, with all of
+Bob in a read-only sandbox, so nothing changes and the checkout's own Bob setup never runs. On
+other systems, choose another review guide model.
+
 After Bob has run in a project, its skills and MCP prompts appear in the composer's `/`
 menu. When a thread moves to another folder, such as picking a branch that lives in another
 worktree, Bob moves the conversation with it (Bob 2.0.5 or later). A Bob thread from before
@@ -236,9 +241,9 @@ thread has spent. Bob does not report which model it runs, so the meter's limit
 assumes the context window of the model Bob is set to, or of its default model.
 
 **Usage → Cost** and **Usage → Tokens** show Bob's daily tokens and Bobcoins with
-your other providers. Thread titles, commit messages, pull request text, and branch
-names that Bob writes count toward the monthly allowance but are missing from
-these totals. T3 Code apps without Bob support, such as app.t3.codes, leave Bob
+your other providers. Thread titles, commit messages, pull request text, branch
+names and review guides that Bob writes count toward the monthly allowance but are
+missing from these totals. T3 Code apps without Bob support, such as app.t3.codes, leave Bob
 out of their Usage page. See [Usage and limits](./usage.md#track-subscription-limits).
 
 ## Limits
