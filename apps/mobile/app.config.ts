@@ -107,7 +107,20 @@ function resolveAppVariant(value: string | undefined): AppVariant {
   }
 }
 
-const variant = VARIANT_CONFIG[APP_VARIANT];
+// This fork's own iPhone builds, signed with the owner's team, are Z3 Code with an orange icon, so
+// they stand apart from T3's apps on the same phone.
+const variant = isIosPersonalTeamBuild
+  ? {
+      ...VARIANT_CONFIG[APP_VARIANT],
+      appName: "Z3 Code",
+      assets: {
+        ...VARIANT_CONFIG[APP_VARIANT].assets,
+        appIcon: fromRepoRoot("assets/fork/z3-ios-1024.png"),
+        iosIcon: fromRepoRoot("assets/fork/app-icon.icon"),
+        splashIcon: fromRepoRoot("assets/fork/z3-ios-1024.png"),
+      },
+    }
+  : VARIANT_CONFIG[APP_VARIANT];
 const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
   : variant.iosBundleIdentifier;
