@@ -14,6 +14,13 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+import {
+  deriveWorkflowGroups,
+  projectedSubagentsToRuntime,
+  type RuntimeSubagent,
+  type SubagentWorkflowGroup,
+} from "./subagentRuntime.ts";
+
 /** The hidden provider instance that drives a workflow's coordinator thread. */
 export { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/contracts";
 
@@ -220,6 +227,52 @@ export function deriveWorkflowCard(input: {
     startedAt: input.coordinator.startedAt,
     completedAt: state === "running" || state === "waiting" ? null : input.coordinator.completedAt,
   };
+}
+
+/**
+ * A workflow run as upstream's Lineage workflow group, so the starting thread's
+ * Lineage unfolds it the way it unfolds a Claude workflow: the card's phases in
+ * declared order, each with the latest attempt of its agents, every agent on
+ * its own provider and opening its own child thread.
+ */
+export function deriveWorkflowLineageGroup(input: {
+  /** The coordinator's row in the thread that started the workflow. */
+  readonly coordinator: OrchestrationV2Subagent;
+  readonly coordinatorRuns?: ReadonlyArray<Pick<OrchestrationV2Run, "status" | "ordinal">>;
+  /** The coordinator thread's subagent rows. */
+  readonly agents: ReadonlyArray<OrchestrationV2Subagent>;
+}): SubagentWorkflowGroup | null {
+  // Waiting for the user is the card's to show; Lineage has no badge for it.
+  const card = deriveWorkflowCard({ ...input, waitingThreadIds: new Set() });
+  if (card === null) return null;
+  const live = card.state === "running" || card.state === "waiting";
+  const workflow: RuntimeSubagent = {
+    ...projectedSubagentsToRuntime([input.coordinator])[0]!,
+    kind: "workflow",
+    workflowName: card.name,
+    phases: card.phases.map((phase, index) => ({ index, title: phase.title })),
+    // A Retry runs the coordinator thread again after its row settled.
+    status: live ? "running" : input.coordinator.status,
+    completedAt: card.completedAt === null ? null : DateTime.formatIso(card.completedAt),
+  };
+  const rows = new Map(input.agents.map((agent) => [agent.id, agent]));
+  let agentIndex = 0;
+  const members = card.phases.flatMap((phase, phaseIndex) =>
+    phase.agents.map((agent): RuntimeSubagent => ({
+      ...projectedSubagentsToRuntime([rows.get(agent.id)!])[0]!,
+      kind: "workflow_agent",
+      title: agent.title,
+      role: agent.role,
+      attempt: agent.attempt,
+      parentAgentId: workflow.id,
+      agentIndex: agentIndex++,
+      phaseIndex,
+      phaseTitle: phase.title,
+      providerInstanceId: agent.providerInstanceId,
+      driver: agent.driver,
+    })),
+  );
+  return deriveWorkflowGroups([workflow, ...members])[0] ?? null;
 }
 
 /**

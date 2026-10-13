@@ -64,6 +64,7 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
+import { WorkflowLineageRow } from "./WorkflowLineageRow";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -241,6 +242,18 @@ export function ThreadRelationshipsPanel(props: {
     () =>
       new Map(deriveWorkflowGroups(runtimeSubagents).map((group) => [group.workflow.id, group])),
     [runtimeSubagents],
+  );
+  // A T3 workflow run unfolds the same way, from its coordinator thread's agents.
+  const t3WorkflowRuns = useMemo(
+    () =>
+      new Map(
+        (projection?.subagents ?? []).flatMap((subagent) =>
+          subagent.t3Workflow?.kind === "run"
+            ? [[subagent.id, { row: subagent, name: subagent.t3Workflow.name }] as const]
+            : [],
+        ),
+      ),
+    [projection?.subagents],
   );
   const threadShells = useThreadShells();
   const projects = useProjects().filter((project) => project.environmentId === props.environmentId);
@@ -441,6 +454,9 @@ export function ThreadRelationshipsPanel(props: {
                 projectedAgent === undefined
                   ? undefined
                   : workflowGroupsById.get(projectedAgent.id);
+              const t3WorkflowRun =
+                projectedAgent === undefined ? undefined : t3WorkflowRuns.get(projectedAgent.id);
+              const isWorkflowRow = workflowGroup !== undefined || t3WorkflowRun !== undefined;
               const agent = workflowGroup
                 ? projectedAgent
                 : currentSubagent(projectedAgent, node?.thread);
@@ -459,6 +475,7 @@ export function ThreadRelationshipsPanel(props: {
               const threadTitle = relationshipThreadTitle({
                 title:
                   workflowGroup?.workflow.workflowName ??
+                  t3WorkflowRun?.name ??
                   node?.thread?.title ??
                   agent?.title ??
                   threadId,
@@ -475,7 +492,11 @@ export function ThreadRelationshipsPanel(props: {
                 workflowGroup?.workflow.status === "running" &&
                 agent?.origin === "provider_native" &&
                 providerDriver === "claudeAgent";
-              const trailingVisibilityClass = (workflowGroup ? canStopWorkflow : canStop)
+              // Stopping the run's coordinator thread stops every agent it started.
+              const canStopT3Workflow =
+                t3WorkflowRun !== undefined && canOperateWorkflow && Boolean(canStop);
+              const stopsWorkflow = canStopWorkflow || canStopT3Workflow;
+              const trailingVisibilityClass = (isWorkflowRow ? stopsWorkflow : canStop)
                 ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"
                 : "";
               const project = projects.find((project) => project.id === node?.thread?.projectId);
@@ -523,16 +544,16 @@ export function ThreadRelationshipsPanel(props: {
                   )}
                   {agent &&
                   !failed &&
-                  (deriveSubagentElapsedMs(agent, 0) !== null || canStopWorkflow) ? (
+                  (deriveSubagentElapsedMs(agent, 0) !== null || stopsWorkflow) ? (
                     <span
-                      className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${canStopWorkflow ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
+                      className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${stopsWorkflow ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
                     >
                       <AgentElapsed agent={agent} compact />
                     </span>
                   ) : !isMergeTarget ? (
                     <span
                       className={
-                        workflowGroup
+                        isWorkflowRow
                           ? "sr-only"
                           : `shrink-0 text-2xs ${failed ? "text-destructive" : "text-muted-foreground"} ${trailingVisibilityClass}`
                       }
@@ -550,7 +571,7 @@ export function ThreadRelationshipsPanel(props: {
                       <ThreadDetailsControl
                         size="sm"
                         variant="ghost"
-                        part={workflowGroup ? "primary" : "row"}
+                        part={isWorkflowRow ? "primary" : "row"}
                         disabled={node?.missing === true}
                         onClick={() => openThread(threadId)}
                       />
@@ -576,6 +597,29 @@ export function ThreadRelationshipsPanel(props: {
                     }
                     onStop={canStopWorkflow ? () => void stopWorkflow(agent.id) : undefined}
                     stopping={stoppingId === agent.id}
+                    stopDisabled={stoppingId !== null}
+                    header={relationshipLink}
+                  />
+                );
+              }
+              if (t3WorkflowRun && agent) {
+                return (
+                  <WorkflowLineageRow
+                    key={threadId}
+                    environmentId={props.environmentId}
+                    coordinator={t3WorkflowRun.row}
+                    providerInstanceId={agent.providerInstanceId}
+                    provider={provider}
+                    providers={providers}
+                    driver={providerDriver}
+                    onOpenThread={(memberThreadId) => openThread(memberThreadId as ThreadId)}
+                    isThreadAvailable={(memberThreadId) =>
+                      graph.nodes.get(memberThreadId as ThreadId)?.missing === false
+                    }
+                    onStop={
+                      canStopT3Workflow ? () => void stopSubagent(threadId, agent) : undefined
+                    }
+                    stopping={stoppingId === threadId}
                     stopDisabled={stoppingId !== null}
                     header={relationshipLink}
                   />
