@@ -95,7 +95,9 @@ so.
   task's result, run without asking; the ones that start threads or workflows, schedule or send
   ask.
 - **Auto** works as Auto-accept edits, and a reviewer model checks web searches and fetches of
-  public pages, skills and GitHub reads with `gh` against the last six messages you wrote. It
+  public pages, skills and GitHub reads with `gh` against the last six messages you wrote. A
+  GitHub read may pipe into filters that only cut down its output, such as
+  `gh pr diff 1 | grep -n TODO | head -50`; anything else on the line makes it ask. It
   also keeps each sentence you type that limits what Bob may do, such as "don't search the web
   for this", or allows it something, such as "you can search the web again", so it holds after
   its message is older than six, until T3 Code restarts; when there are many, the oldest go
@@ -174,7 +176,8 @@ again.
 Rules change what Bob may do without asking, outside **Full access**:
 
 - **Run without asking**: commands starting with these words, such as `git commit`, run
-  outside the sandbox without asking.
+  outside the sandbox without asking, and so do `head`, `tail`, `grep`, `wc`, `sort`, `uniq`,
+  `cut` and `cat` filtering what they print, as in `npm view zod | head -20`.
 - **Always ask**: commands starting with these words always ask, even in the sandbox.
 - **Commands may read** and **Commands may write in**: folders the sandbox opens, such as a
   tool's settings in `~/.vercel` or a cache in `~/Library/Caches/go-build`. A folder that
