@@ -12,6 +12,8 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   projection: null as unknown,
+  /** Other threads' projections, by thread id; the rest read `projection`. */
+  projections: new Map<string, unknown>(),
   navigate: vi.fn(),
   shells: [] as unknown[],
   projects: [] as unknown[],
@@ -24,7 +26,9 @@ const state = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../../state/entities", () => ({
-  useThreadProjection: () => ({ projection: state.projection }),
+  useThreadProjection: (ref: { threadId: string } | null) => ({
+    projection: state.projections.get(ref?.threadId ?? "") ?? state.projection,
+  }),
   useThreadShells: () => state.shells,
   useProjects: () => state.projects,
   useServerConfigs: () => state.configs,
@@ -58,6 +62,7 @@ vi.mock("../ui/tooltip", () => ({
   TooltipPopup: ({ children }: { children: ReactNode }) => (state.showTooltips ? children : null),
 }));
 
+import { ThreadRelationshipIcon } from "./ThreadRelationshipIcon";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
 let renderer: ReactTestRenderer;
@@ -74,6 +79,7 @@ afterEach(async () => {
   state.workflowCommand.mockReset().mockResolvedValue({ _tag: "Success" });
   state.toast.mockClear();
   state.projection = null;
+  state.projections.clear();
 });
 
 it("stops the entire native workflow through its parent without changing state before acknowledgement", async () => {
@@ -1272,3 +1278,113 @@ it.each(["source", "target"])(
     }
   },
 );
+
+it("unfolds a T3 workflow run into its phases and agents and stops it through its coordinator thread", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const startedAt = DateTime.makeUnsafe("2026-10-07T10:00:00Z");
+  const task = (input: {
+    id: string;
+    driver: string;
+    phase?: string;
+    status: string;
+    threadId?: string;
+  }) => ({
+    id: input.id,
+    threadId: input.threadId ?? "coordinator-chat",
+    origin: "app_owned",
+    driver: input.driver,
+    providerInstanceId: input.driver,
+    childThreadId: `${input.id}-chat`,
+    prompt: `do ${input.id}`,
+    title: input.id,
+    model: null,
+    status: input.status,
+    result: null,
+    ...(input.phase === undefined
+      ? {}
+      : { t3Workflow: { kind: "agent", phase: input.phase, role: null, attempt: 1 } }),
+    startedAt,
+    completedAt: null,
+    updatedAt: startedAt,
+  });
+  state.projection = {
+    thread: { id: "parent", lineage: { relationshipToParent: null } },
+    runs: [],
+    providerThreads: [],
+    providerSessions: [],
+    contextTransfers: [],
+    subagents: [
+      {
+        ...task({ id: "run", driver: "t3Workflow", status: "running", threadId: "parent" }),
+        childThreadId: "coordinator-chat",
+        title: "Workflow: judged-review",
+        t3Workflow: {
+          kind: "run",
+          name: "judged-review",
+          phases: [{ title: "Review" }, { title: "Judge" }],
+        },
+      },
+    ],
+  };
+  state.projections.set("coordinator-chat", {
+    runs: [],
+    subagents: [
+      task({ id: "reviewer", driver: "bob", phase: "Review", status: "running" }),
+      task({ id: "second", driver: "codex", phase: "Review", status: "completed" }),
+    ],
+  });
+  state.shells = [
+    {
+      id: "coordinator-chat",
+      title: "Workflow: judged-review",
+      lineage: { parentThreadId: "parent", relationshipToParent: "subagent" },
+      status: "running",
+      activityRunStatus: "running",
+      activityRunStartedAt: startedAt,
+    },
+    ...["reviewer", "second"].map((id) => ({
+      id: `${id}-chat`,
+      title: id,
+      lineage: { parentThreadId: "coordinator-chat", relationshipToParent: "subagent" },
+      status: "running",
+      activityRunStatus: null,
+    })),
+  ].map((source) => ({ environmentId: "remote", source }));
+  await act(async () => {
+    renderer = create(
+      <ThreadRelationshipsPanel
+        environmentId={EnvironmentId.make("remote")}
+        threadId={ThreadId.make("parent")}
+      />,
+    );
+  });
+  // The run replaces its plain subagent row.
+  expect(
+    renderer.root.findAllByProps({ "aria-label": "Stop subagent judged-review" }),
+  ).toHaveLength(0);
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Expand judged-review" }).props.onClick(),
+  );
+  expect(
+    renderer.root.findByProps({ "aria-label": "Collapse Review phase, running" }),
+  ).toBeDefined();
+  // Each agent draws its own provider's glyph and opens its own chat.
+  const memberDrivers = renderer.root
+    .findAllByType(ThreadRelationshipIcon)
+    .map((icon) => icon.props.driver);
+  expect(memberDrivers.slice(-2)).toEqual(["bob", "codex"]);
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Open reviewer chat" }).props.onClick(),
+  );
+  expect(state.navigate).toHaveBeenCalledWith(
+    expect.objectContaining({ params: expect.objectContaining({ threadId: "reviewer-chat" }) }),
+  );
+  await act(async () =>
+    renderer.root.findByProps({ "aria-label": "Stop workflow judged-review" }).props.onClick(),
+  );
+  expect(state.command).toHaveBeenCalledExactlyOnceWith({
+    environmentId: "remote",
+    input: { threadId: "coordinator-chat" },
+  });
+  expect(state.workflowCommand).not.toHaveBeenCalled();
+});

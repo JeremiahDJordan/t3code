@@ -9,7 +9,13 @@ import {
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveWorkflowCard, formatWorkflowCounts, latestWorkflowLogLine } from "./workflowCard.ts";
+import {
+  deriveWorkflowCard,
+  deriveWorkflowLineageGroup,
+  formatWorkflowCounts,
+  latestWorkflowLogLine,
+  workflowResultPreview,
+} from "./workflowCard.ts";
 
 const at = (seconds: number) =>
   DateTime.makeUnsafe(`2026-10-07T10:00:${String(seconds).padStart(2, "0")}Z`);
@@ -21,6 +27,7 @@ function agent(input: {
   readonly started: number;
   readonly call?: string;
   readonly attempt?: number;
+  readonly provider?: string;
 }): OrchestrationV2Subagent {
   return {
     id: NodeId.make(input.id),
@@ -29,8 +36,8 @@ function agent(input: {
     parentNodeId: NodeId.make("node:root"),
     origin: "app_owned",
     createdBy: "agent",
-    driver: ProviderDriverKind.make("codex"),
-    providerInstanceId: ProviderInstanceId.make("codex"),
+    driver: ProviderDriverKind.make(input.provider ?? "codex"),
+    providerInstanceId: ProviderInstanceId.make(input.provider ?? "codex"),
     providerThreadId: null,
     childThreadId: ThreadId.make(`thread:${input.id}`),
     nativeTaskRef: null,
@@ -189,5 +196,176 @@ describe("deriveWorkflowCard", () => {
         runs,
       ),
     ).toBeNull();
+  });
+});
+
+describe("deriveWorkflowLineageGroup", () => {
+  // The run's row in the starting thread: a delegated task on the hidden instance.
+  const run: OrchestrationV2Subagent = {
+    ...agent({ id: "run", phase: null, status: "running", started: 0, provider: "t3-workflow" }),
+    threadId: ThreadId.make("thread:start"),
+    childThreadId: ThreadId.make("thread:coordinator"),
+    title: "Workflow: judged-review",
+    t3Workflow: {
+      kind: "run",
+      name: "judged-review",
+      phases: [
+        { title: "Review" },
+        { title: "Challenge" },
+        { title: "Judge" },
+        { title: "Report" },
+      ],
+    },
+  };
+
+  it("unfolds the run into its declared phases, each agent on its own provider", () => {
+    const group = deriveWorkflowLineageGroup({
+      coordinator: run,
+      agents: [
+        agent({
+          id: "challenge-1",
+          phase: "Challenge",
+          status: "running",
+          started: 3,
+          provider: "claudeAgent",
+        }),
+        agent({
+          id: "review-api",
+          phase: "Review",
+          status: "completed",
+          started: 1,
+          provider: "bob",
+        }),
+        agent({ id: "review-ui", phase: "Review", status: "failed", started: 2 }),
+        agent({
+          id: "challenge-2",
+          phase: "Challenge",
+          status: "pending",
+          started: 4,
+          provider: "bob",
+        }),
+        agent({ id: "judge", phase: "Judge", status: "cancelled", started: 5 }),
+        agent({ id: "extra", phase: "Cleanup", status: "completed", started: 6 }),
+      ],
+    })!;
+
+    expect(group.workflow).toMatchObject({
+      id: "run",
+      kind: "workflow",
+      workflowName: "judged-review",
+      status: "running",
+      childThreadId: "thread:coordinator",
+    });
+    expect(
+      group.phases.map((phase) => [
+        phase.title,
+        phase.state,
+        `${phase.settledCount}/${phase.members.length}`,
+      ]),
+    ).toEqual([
+      ["Review", "done", "2/2"],
+      ["Challenge", "running", "0/2"],
+      ["Judge", "done", "1/1"],
+      ["Report", "pending", "0/0"],
+      ["Cleanup", "done", "1/1"],
+    ]);
+    expect(
+      group.phases.flatMap((phase) =>
+        phase.members.map((member) => [
+          phase.title,
+          member.title,
+          member.status,
+          member.driver,
+          member.providerInstanceId,
+          member.childThreadId,
+        ]),
+      ),
+    ).toEqual([
+      ["Review", "review-api", "completed", "bob", "bob", "thread:review-api"],
+      ["Review", "review-ui", "failed", "codex", "codex", "thread:review-ui"],
+      ["Challenge", "challenge-1", "running", "claudeAgent", "claudeAgent", "thread:challenge-1"],
+      ["Challenge", "challenge-2", "pending", "bob", "bob", "thread:challenge-2"],
+      ["Judge", "judge", "cancelled", "codex", "codex", "thread:judge"],
+      ["Cleanup", "extra", "completed", "codex", "codex", "thread:extra"],
+    ]);
+    expect(
+      group.phases.every((phase) =>
+        phase.members.every(
+          (member) => member.kind === "workflow_agent" && member.parentAgentId === "run",
+        ),
+      ),
+    ).toBe(true);
+    expect(group.unphasedMembers).toEqual([]);
+  });
+
+  it("lists the declared phases before any agent starts", () => {
+    const group = deriveWorkflowLineageGroup({ coordinator: run, agents: [] })!;
+    expect(group.phases.map((phase) => [phase.title, phase.state, phase.members.length])).toEqual([
+      ["Review", "pending", 0],
+      ["Challenge", "pending", 0],
+      ["Judge", "pending", 0],
+      ["Report", "pending", 0],
+    ]);
+    expect(group.unphasedMembers).toEqual([]);
+  });
+
+  it("follows the run's state, including a Retry after it stopped", () => {
+    const stopped = { ...run, status: "interrupted" as const, completedAt: at(9) };
+    expect(
+      deriveWorkflowLineageGroup({ coordinator: stopped, agents: [] })?.workflow,
+    ).toMatchObject({ status: "interrupted", completedAt: "2026-10-07T10:00:09.000Z" });
+    expect(
+      deriveWorkflowLineageGroup({
+        coordinator: stopped,
+        coordinatorRuns: [
+          { status: "interrupted", ordinal: 1 },
+          { status: "running", ordinal: 2 },
+        ],
+        agents: [],
+      })?.workflow,
+    ).toMatchObject({ status: "running", completedAt: null });
+    expect(
+      deriveWorkflowLineageGroup({ coordinator: { ...run, t3Workflow: undefined }, agents: [] }),
+    ).toBeNull();
+  });
+});
+
+describe("workflowResultPreview", () => {
+  it("reads a returned object as its top-level fields", () => {
+    const result = [
+      "```json",
+      JSON.stringify(
+        {
+          status: "unresolved-findings",
+          branch: "t3/wf/x",
+          implementation: { summary: "Built" },
+          notes: [1, 2],
+        },
+        null,
+        2,
+      ),
+      "```",
+      "",
+      "Spent 4 Bobcoins.",
+    ].join("\n");
+    expect(workflowResultPreview(result)).toBe(
+      "status: unresolved-findings · branch: t3/wf/x · implementation: {…} · notes: [2]",
+    );
+  });
+
+  it("keeps a text result, and a fence it cannot read, as written", () => {
+    expect(workflowResultPreview("All 3 reviews passed.")).toBe("All 3 reviews passed.");
+    expect(workflowResultPreview("```json\n{oops\n```")).toBe("```json\n{oops\n```");
+    expect(workflowResultPreview("```json\n[1, 2, 3]\n```")).toBe("[3]");
+    expect(workflowResultPreview(null)).toBeNull();
+    // A run that finished before results were fenced.
+    expect(workflowResultPreview('{"status":"done","n":2}\n\nNote: 1 agent failed.')).toBe(
+      "status: done · n: 2",
+    );
+    expect(workflowResultPreview("{not json")).toBe("{not json");
+    // A run whose value had a summary leads with it, the other fields below as JSON.
+    expect(
+      workflowResultPreview('All six agents finished.\n\n```json\n{\n  "branch": "b"\n}\n```'),
+    ).toBe("All six agents finished.");
   });
 });

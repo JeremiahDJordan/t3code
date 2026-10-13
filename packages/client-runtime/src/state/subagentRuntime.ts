@@ -8,6 +8,8 @@ import type {
   OrchestrationV2Subagent,
   OrchestrationV2SubagentWorkflow,
   OrchestrationV2TurnItem,
+  ProviderDriverKind,
+  ProviderInstanceId,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 
@@ -74,6 +76,9 @@ export interface RuntimeSubagent {
   readonly runHandles: SubagentRunHandles | null;
   /** The thread this agent owns, when it has one. */
   readonly childThreadId: string | null;
+  /** A workflow member's own provider, when it does not run on its coordinator's. */
+  readonly providerInstanceId?: ProviderInstanceId | undefined;
+  readonly driver?: ProviderDriverKind | undefined;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   /** First retained observation, used as the roster's stable display order. */
   readonly firstSeenAt: string;

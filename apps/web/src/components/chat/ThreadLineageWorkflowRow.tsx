@@ -53,13 +53,16 @@ function phaseStatusLabel(phase: SubagentWorkflowGroup["phases"][number]) {
   return phase.state === "done" ? "done" : "not started";
 }
 
-/** Members run under the coordinator's provider, so they share its glyph. */
+/**
+ * Members run under the coordinator's provider and share its glyph, unless a
+ * member names a provider of its own.
+ */
 function WorkflowMemberRow({
   member,
-  providerInstanceId,
-  provider,
+  providerInstanceId: coordinatorInstanceId,
+  provider: coordinatorProvider,
   providers,
-  driver,
+  driver: coordinatorDriver,
   onOpen,
   isThreadAvailable,
 }: {
@@ -71,6 +74,15 @@ function WorkflowMemberRow({
   onOpen: (threadId: string) => void;
   isThreadAvailable: (threadId: string) => boolean;
 }) {
+  const providerInstanceId = member.providerInstanceId ?? coordinatorInstanceId;
+  const provider =
+    member.providerInstanceId === undefined
+      ? coordinatorProvider
+      : providers?.find((entry) => entry.instanceId === member.providerInstanceId);
+  const driver =
+    member.providerInstanceId === undefined
+      ? coordinatorDriver
+      : (member.driver ?? provider?.driver);
   const threadId = member.childThreadId;
   const canOpen = threadId !== null && isThreadAvailable(threadId);
   return (

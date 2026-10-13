@@ -39,6 +39,10 @@ continues by itself instead. See [Updating T3 Code](updating.md#before-you-updat
 The card also heads the workflow's own thread, which keeps the workflow's log as a timeline. That
 thread takes no messages; Stop and Retry on its card are how you steer it.
 
+In the web and desktop apps, the starting thread's **Lineage** section in its details also lists the
+run: expand it for its phases and their agents, select an agent to open its thread, or stop the
+whole run.
+
 ## Moving a workflow to another environment
 
 Give the file to an agent on the other environment, as an attachment or as a file in its checkout,
