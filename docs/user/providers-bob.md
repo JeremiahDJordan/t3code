@@ -129,13 +129,19 @@ same way. For commands and edits a card offers a rule instead of **Always allow 
 which Bob would apply to every later call of that tool; for Bob's other tools it stops Bob
 asking about that tool for the rest of the thread's Bob task, even after T3 Code restarts.
 
-Bob's own approval settings apply in T3 Code, in every mode, **Supervised** included. Bob reads
-and searches files with its own tools without asking, and runs the commands it approves by
-default without a card: `cat`, `git diff`, `git log`, `git rev-parse`, `git show`,
-`git status`, `grep`, `head`, `tail`, `ls`, `sort`, `wc`, `which`, `du` and `df`. Outside
-**Full access** these commands still run in the sandbox. Anything you add to Bob's approvals,
-and approvals you saved on a task in Bob itself, also run without a card. No setting in T3 Code
-stops this. Bob also refuses to use its tools outside the project folder, in every mode, unless
+Bob's own approval settings apply in T3 Code, in every mode, **Supervised** included. By
+default Bob reads and searches files with its own tools without asking, and runs `cat`,
+`git diff`, `git log`, `git rev-parse`, `git show`, `git status`, `grep`, `head`, `tail`, `ls`,
+`sort`, `wc`, `which`, `du` and `df` without a card. Anything you add to Bob's approvals, and
+approvals you saved on a task in Bob itself, also run without a card, and a turn's first notice
+says so. Outside **Full access** those commands still run in the sandbox, where a command that
+needs the network or your credentials, such as `gh pr view`, fails.
+
+To have Bob ask T3 Code about everything, set `"autoApprovalEnabled": false` under `"approval"`
+in `~/.bob/settings/settings.json`. The permission mode then decides every call: Bob's file reads
+run without a card unless they reach a credential store or a folder your rules keep private, and
+`gh` reads in **Auto** go to its reviewer and run outside the sandbox. In Bob's own terminal UI,
+an **Always allow** you pick turns auto-approval back on for that task only. Bob also refuses to use its tools outside the project folder, in every mode, unless
 you turn on **Allow outside workspace tool requests** in Bob's settings; text files you attach
 reach Bob inside your message, so it can still read them.
 

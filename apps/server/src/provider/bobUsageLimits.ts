@@ -47,7 +47,7 @@ const decodeBobSettingsFile = Schema.decodeEffect(
  * A file Bob keeps in `~/.bob/settings`. Undefined when it is missing or not a JSON
  * object: these are Bob's private files, so T3 never fails on their contents.
  */
-const readBobSettingsFile = (environment: NodeJS.ProcessEnv, name: string) =>
+export const readBobSettingsFile = (environment: NodeJS.ProcessEnv, name: string) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;

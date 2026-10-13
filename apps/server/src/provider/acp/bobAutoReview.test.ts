@@ -414,7 +414,6 @@ describe("reviewBobPermission", () => {
     ).toBe("ask");
     expect(toolVerdict(toolCall("other", "Switching mode", { mode_id: "code" }))).toBe("ask");
     expect(toolVerdict(toolCall("other", "Running Delete Everything (docs)", {}))).toBe("ask");
-    expect(toolVerdict(toolCall("read", "Reading src/a.ts", { path: "src/a.ts" }))).toBe("ask");
   });
 
   it("lets T3's own read and result tools through outside Supervised, and asks for the rest", () => {
@@ -466,6 +465,86 @@ describe("reviewBobPermission", () => {
       }).verdict,
     ).toBe("ask");
     expect(reviewBobCommand("ls", undefined, { workspace: null, home }).verdict).toBe("ask");
+  });
+
+  it("lets Bob's file tools read in every mode, but not secrets or folders holding them", () => {
+    const read = (title: string, input: Record<string, unknown>) =>
+      (["approval-required", "auto-accept-edits", "auto"] as const).map((mode) =>
+        toolVerdict(toolCall("read", title, input), mode),
+      );
+    const allowed = ["allow", "allow", "allow"];
+    const asked = ["ask", "ask", "ask"];
+    expect(read("Listing files in .", { path: "." })).toEqual(allowed);
+    expect(read("Reading file src/a.ts", { path: "src/a.ts", range: "1-5" })).toEqual(allowed);
+    expect(read('Searching files in . for "x"', { pattern: "x", path: "." })).toEqual(allowed);
+    expect(read("Find Files", { pattern: "**/*.ts" })).toEqual(allowed);
+    expect(read("Reading file /etc/hosts", { path: "/etc/hosts" })).toEqual(allowed);
+    expect(read("Reading file ~/.ssh/id_rsa", { path: "~/.ssh/id_rsa" })).toEqual(asked);
+    expect(read("Reading file .env", { path: ".env" })).toEqual(asked);
+    expect(read("Searching files", { pattern: "x", include: "*.pem" })).toEqual(asked);
+    // Listing the home folder shows names; searching it reads every secret below.
+    expect(read("Listing files", { path: home })).toEqual(allowed);
+    expect(read("Listing files", { path: home, recursive: true })).toEqual(asked);
+    expect(read("Searching files", { pattern: "x", path: home })).toEqual(asked);
+    // A tool with inputs Bob's reads never send is not taken for one.
+    expect(read("Reading file", { path: "a.ts", content: "x" })).toEqual(asked);
+  });
+
+  it("keeps Bob's file tools out of private folders and closed credential stores", () => {
+    const readWith = (rules: Partial<BobUserRules>, input: Record<string, unknown>) =>
+      (["approval-required", "auto-accept-edits", "auto"] as const).map(
+        (mode) =>
+          reviewBobPermission(toolCall("read", "Searching files", input), {
+            mode,
+            sandboxed: true,
+            context: { ...context, rules: { ...NO_BOB_USER_RULES, ...rules } },
+          }).verdict,
+      );
+    const allowed = ["allow", "allow", "allow"];
+    const asked = ["ask", "ask", "ask"];
+
+    // A search or a recursive listing descends into a private folder below where it starts, the
+    // workspace included when Bob is given no path; listing names does not.
+    const kept = { private: [NodePath.join(workspace, "scripts")] };
+    expect(readWith(kept, { pattern: "x", path: "." })).toEqual(asked);
+    expect(readWith(kept, { pattern: "x" })).toEqual(asked);
+    expect(readWith(kept, { pattern: "x", include: "*.ts" })).toEqual(asked);
+    expect(readWith(kept, { path: ".", recursive: true })).toEqual(asked);
+    expect(readWith(kept, { path: "." })).toEqual(allowed);
+    expect(readWith(kept, { pattern: "x", path: "src" })).toEqual(allowed);
+    expect(readWith({}, { pattern: "x", path: "." })).toEqual(allowed);
+
+    // Bob trims a path before reading it, so a spelling the rules would check apart asks.
+    expect(readWith(kept, { pattern: "x", path: " scripts" })).toEqual(asked);
+    expect(readWith(kept, { path: "scripts " })).toEqual(asked);
+    expect(readWith({}, { path: " src/a.ts" })).toEqual(asked);
+
+    // A rule opening a folder that holds a credential store leaves the store closed, as the
+    // sandbox does, unless the rule names it.
+    const config = NodePath.join(home, ".config");
+    for (const [file, text] of [
+      ["gh/hosts.yml", "token"],
+      ["fake-tool/settings.json", "{}"],
+    ] as const) {
+      NodeFS.mkdirSync(NodePath.dirname(NodePath.join(config, file)), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(config, file), text);
+    }
+    const broad = { read: [config] };
+    expect(readWith(broad, { path: "~/.config/fake-tool/settings.json" })).toEqual(allowed);
+    expect(readWith(broad, { path: "~/.config/gh/hosts.yml" })).toEqual(asked);
+    expect(readWith(broad, { pattern: "x", path: "~/.config" })).toEqual(asked);
+    expect(readWith({ read: [home] }, { path: "~/.ssh/id_rsa" })).toEqual(asked);
+    const named = { read: [NodePath.join(config, "gh")] };
+    expect(readWith(named, { path: "~/.config/gh/hosts.yml" })).toEqual(allowed);
+    // A rule inside a store opens its own path alone, whatever broader rule sits beside it.
+    NodeFS.writeFileSync(NodePath.join(config, "gh", "config.yml"), "editor: vim");
+    const inner = { read: [config, NodePath.join(config, "gh", "config.yml")] };
+    expect(readWith(inner, { path: "~/.config/gh/config.yml" })).toEqual(allowed);
+    expect(readWith(inner, { path: "~/.config/gh/hosts.yml" })).toEqual(asked);
+    expect(readWith(inner, { pattern: "x", path: "~/.config/gh" })).toEqual(asked);
+    // Shell history, which the sandbox closes by name in any hidden folder of the home folder, may
+    // lie below any of them.
+    expect(readWith(broad, { pattern: "x", path: "~/.config/fake-tool" })).toEqual(asked);
   });
 });
 

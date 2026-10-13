@@ -575,6 +575,47 @@ export function bobRuleWriter(input: {
   };
 }
 
+/**
+ * The credential stores the sandbox keeps closed past the user's read and write rules, which open
+ * one only by naming it: a rule to read `~` or `~/.config` leaves `~/.ssh` and `~/.config/gh`
+ * closed. Bob's reviewer bounds Bob's own reads by it, which run outside the sandbox: `holds` a
+ * path in one, and a folder a read descends from that holds one, `below` it. Shell history, which
+ * the profile closes by name in any hidden folder of the home folder, counts below a folder outside
+ * the workspace. Built once per review.
+ */
+export function bobClosedCredentials(input: {
+  readonly home: string;
+  /** The workspace as written, or none. */
+  readonly workspace: string | undefined;
+  readonly rules: BobSandboxRules;
+}): { readonly holds: (path: string) => boolean; readonly below: (folder: string) => boolean } {
+  const home = realPath(input.home);
+  const pinned =
+    input.workspace === undefined ? undefined : bobWorkspace(input.workspace, input.home);
+  const workspace: BobRoot | undefined =
+    input.workspace === undefined || pinned === undefined ? undefined : [input.workspace, pinned];
+  const rules = rulesApplied(input.rules, { home: input.home, realHome: home, workspace });
+  const closed = credentialMatches(home, [...rules.read, ...rules.write]);
+  return {
+    holds: (path) => {
+      const real = realPath(path);
+      return closed.some((match) => matches(match, real) || matches(match, path));
+    },
+    below: (folder) => {
+      const real = folded(realPath(folder));
+      return closed.some((match) => {
+        if (match.kind !== "regex") return within(real, folded(match.path)) !== undefined;
+        if (pinned !== undefined && within(folded(pinned), real) !== undefined) return false;
+        const fromHome = within(folded(home), real);
+        return (
+          within(real, folded(home)) !== undefined ||
+          (fromHome !== undefined && fromHome.startsWith("."))
+        );
+      });
+    },
+  };
+}
+
 /** The Seatbelt profile for one workspace and mode. */
 export function bobSandboxProfile(input: {
   readonly mode: BobSandboxMode;
