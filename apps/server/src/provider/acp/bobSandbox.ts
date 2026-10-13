@@ -11,6 +11,9 @@
  * it once, by an approval T3 leaves for that exact command where commands in the sandbox cannot
  * write; no command sees where, nor T3's credentials.
  *
+ * Work that must change nothing, a review guide, runs the whole `bob acp` process under one
+ * read-only profile instead (`bobProcessSandboxSpawn`), Bob's own tools and its commands alike.
+ *
  * The base of the Seatbelt profile follows Codex's (openai/codex, Apache-2.0,
  * `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl`).
  *
@@ -18,6 +21,7 @@
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 /** What a sandboxed command may write: nothing but temporary files, or the workspace too. */
@@ -892,22 +896,17 @@ export function makeBobSandbox(input: {
 }): BobSandbox | undefined {
   if (!bobSandboxAvailable(input.platform)) return undefined;
   // A place holding a `"`, a control character or a lone surrogate gets no sandbox, so its
-  // commands ask. `quote` spells each exactly, but no folder T3 or Bob uses holds one, so such a
-  // place is refused rather than trusted to it.
-  const places = [
-    input.workspace,
-    input.home,
-    input.cacheDir,
-    input.stateDir,
-    ...(input.attachmentsDir === undefined ? [] : [input.attachmentsDir]),
-    ...input.temporaryFolders,
-    ...(input.searchPath?.split(":") ?? []),
-  ];
+  // commands ask.
   if (
-    places.some(
-      // eslint-disable-next-line no-control-regex -- a path holding a control character is refused.
-      (path) => path.includes('"') || !/^[^\0-\x1f\x7f]*$/u.test(path) || !path.isWellFormed(),
-    )
+    !nameable([
+      input.workspace,
+      input.home,
+      input.cacheDir,
+      input.stateDir,
+      ...(input.attachmentsDir === undefined ? [] : [input.attachmentsDir]),
+      ...input.temporaryFolders,
+      ...(input.searchPath?.split(":") ?? []),
+    ])
   )
     return undefined;
   // Pinned once: a rebuild never resolves the workspace again, so a link another sandbox puts in
@@ -979,6 +978,200 @@ export function makeBobSandbox(input: {
       }
     },
   };
+}
+
+/**
+ * Whether the profile can name every place: none holds a `"`, a control character or a lone
+ * surrogate. `quote` spells each exactly, but no folder T3 or Bob uses holds one, so such a place
+ * is refused rather than trusted to it.
+ */
+function nameable(places: ReadonlyArray<string>): boolean {
+  return places.every(
+    // eslint-disable-next-line no-control-regex -- a path holding a control character is refused.
+    (path) => !path.includes('"') && /^[^\0-\x1f\x7f]*$/u.test(path) && path.isWellFormed(),
+  );
+}
+
+/**
+ * What Bob itself writes in `~/.bob`, as Bob 2.0.6's bundle reads: its task database, its logs,
+ * the folders `--trust` trusts, and its sign-in, which a token refresh rewrites. Nothing there
+ * that runs code: not its settings, approvals, MCP servers, hooks, plugins or skills.
+ */
+const BOB_HOME_WRITABLE_FOLDERS = ["db", "logs"];
+const BOB_HOME_WRITABLE_FILES = ["trustedFolders.json", "settings/auth-secrets.json"];
+
+/**
+ * Services a process that reaches the network looks up, as Codex's network policy lets them
+ * (`codex-rs/sandboxing/src/seatbelt_network_policy.sbpl`): name resolution and TLS trust.
+ */
+const NETWORK_SERVICES = [
+  "com.apple.bsd.dirhelper",
+  "com.apple.system.opendirectoryd.membership",
+  "com.apple.SecurityServer",
+  "com.apple.networkd",
+  "com.apple.ocspd",
+  "com.apple.trustd.agent",
+  "com.apple.SystemConfiguration.DNSConfiguration",
+  "com.apple.SystemConfiguration.configd",
+];
+
+/**
+ * The Seatbelt profile for a whole `bob acp` process that must change nothing, such as one reading
+ * a pull request's checkout for its review guide. Seatbelt refuses a second, different profile
+ * inside a sandbox, so Bob's commands cannot have their own: they, Bob's own tools and every
+ * process Bob starts, MCP servers and hooks included, share this one. It is the read-only profile
+ * of Bob's commands, writing only in the temporary folders and never in the checkout, even one
+ * inside them, with three changes for Bob itself: it
+ * reads `~/.bob` and its own install and writes only its state there, it never sees the
+ * workspace's own `.bob` folder (the project's settings, MCP servers, hooks and plugins, which Bob
+ * runs in a folder `--trust` trusts), and it reaches other machines, for its model, but no port
+ * or socket on this one.
+ */
+function bobProcessSandboxProfile(input: {
+  /** The workspace as written, and as `bobWorkspace` pinned it. */
+  readonly workspace: BobRoot;
+  readonly home: string;
+  /** T3's own state, which holds the user's data and secrets. */
+  readonly privateFolders: ReadonlyArray<string>;
+  /** T3's caches, which hold the sandbox's own files. */
+  readonly sandboxFolders: ReadonlyArray<string>;
+  readonly temporaryFolders: ReadonlyArray<string>;
+  /** The `PATH` Bob and its commands search. */
+  readonly searchPath?: string | undefined;
+  /** The folder Bob runs from, which may be a hidden one no other rule opens. */
+  readonly install?: string | undefined;
+}): string {
+  const home = realPath(input.home);
+  const bobHome = realPath(NodePath.join(input.home, ".bob"));
+  // An install that holds the home folder would open every credential store below it.
+  const install =
+    input.install !== undefined && within(realPath(input.install), home) === undefined
+      ? [input.install]
+      : [];
+  const commands = bobSandboxProfile({
+    mode: "read-only",
+    workspace: input.workspace,
+    home: input.home,
+    privateFolders: input.privateFolders,
+    temporaryFolders: input.temporaryFolders,
+    searchPath: input.searchPath,
+    rules: { read: [NodePath.join(input.home, ".bob"), ...install], write: [], private: [] },
+    sandboxFolders: input.sandboxFolders,
+  });
+  const bobWrites = [
+    ...BOB_HOME_WRITABLE_FOLDERS.map(
+      (folder) => `(subpath ${quote(NodePath.join(bobHome, folder))})`,
+    ),
+    ...BOB_HOME_WRITABLE_FILES.map((file) => `(literal ${quote(NodePath.join(bobHome, file))})`),
+  ];
+  const projectBob = quote(NodePath.join(input.workspace[1], ".bob"));
+  return `${commands}
+; Bob's own process, and so every command and server it starts. Seatbelt applies the last rule
+; that matches, so these follow the rules above.
+; The checkout, even inside a temporary folder the rules above let commands write, as T3's
+; worktrees are when T3's home is there.
+(deny file-write* (subpath ${quote(input.workspace[1])}))
+(allow file-write*
+  ${bobWrites.join("\n  ")})
+; The project's own Bob folder: its settings, approvals, hooks, MCP servers and plugins, none of
+; which a pull request may give Bob.
+(deny file-read* file-read-data file-read-metadata file-write* (subpath ${projectBob}))
+; Other machines, for Bob's model: which commands run is T3's to answer, and none that reaches
+; the network is let through. Nothing on this machine but the name resolver, since a port or a
+; socket here, Docker's, tmux's or T3's own, would let a command change what the rules above keep.
+(allow network-outbound)
+(deny network-outbound (remote ip "localhost:*") (remote unix-socket))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(allow system-socket)
+(allow mach-lookup
+  ${NETWORK_SERVICES.map((name) => `(global-name ${quote(name)})`).join("\n  ")})
+`;
+}
+
+/** `command` as `PATH` finds it, or as given when it names a path. None when it is not there. */
+function bobExecutable(command: string, searchPath: string | undefined): string | undefined {
+  const candidates = command.includes("/")
+    ? [NodePath.resolve(command)]
+    : (searchPath ?? "")
+        .split(":")
+        .filter((folder) => NodePath.isAbsolute(folder))
+        .map((folder) => NodePath.join(folder, command));
+  return candidates.find((candidate) => {
+    try {
+      NodeFS.accessSync(candidate, NodeFS.constants.X_OK);
+      return NodeFS.statSync(candidate).isFile();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * The folder Bob runs from: its npm package when `executable` leads to its `dist/bob.js`, which
+ * also holds its native helpers, or else the executable's own folder.
+ */
+function bobInstallFolder(executable: string): string {
+  const script = realPath(executable);
+  const folder = NodePath.dirname(script);
+  return NodePath.basename(folder) === "dist" ? NodePath.dirname(folder) : folder;
+}
+
+/**
+ * How to start `bob` for work that must change nothing: under `sandbox-exec` with
+ * `bobProcessSandboxProfile`, given as text so no file of it outlives the run. Bob's home, its
+ * temporary folder and its `PATH` are those of the environment it runs with. None where the host
+ * has no sandbox, `bob` cannot be found, or a place cannot be named in a profile.
+ */
+export function bobProcessSandboxSpawn(input: {
+  readonly platform: NodeJS.Platform;
+  /** `bob`, or the path the instance's settings give. */
+  readonly command: string;
+  readonly workspace: string;
+  /** The environment Bob runs with. */
+  readonly environment: NodeJS.ProcessEnv;
+  /** T3's caches and state. */
+  readonly cacheDir: string;
+  readonly stateDir: string;
+}): { readonly command: string; readonly args: ReadonlyArray<string> } | undefined {
+  if (!bobSandboxAvailable(input.platform)) return undefined;
+  const home = input.environment.HOME || NodeOS.homedir();
+  const searchPath = input.environment.PATH;
+  const temporaryFolders = [
+    input.environment.TMPDIR || NodeOS.tmpdir(),
+    "/private/tmp",
+    "/private/var/tmp",
+  ];
+  const executable = bobExecutable(input.command, searchPath);
+  if (executable === undefined) return undefined;
+  const install = bobInstallFolder(executable);
+  if (
+    !nameable([
+      input.workspace,
+      home,
+      input.cacheDir,
+      input.stateDir,
+      executable,
+      install,
+      ...temporaryFolders,
+      ...(searchPath?.split(":") ?? []),
+    ])
+  ) {
+    return undefined;
+  }
+  // As Bob's commands pin it: a checkout reached through a link another sandbox could have made
+  // gets no sandbox.
+  const workspace = bobWorkspace(input.workspace, home);
+  if (workspace === undefined) return undefined;
+  const profile = bobProcessSandboxProfile({
+    workspace: [input.workspace, workspace],
+    home,
+    privateFolders: [input.stateDir],
+    sandboxFolders: [input.cacheDir],
+    temporaryFolders,
+    searchPath,
+    install,
+  });
+  return { command: SANDBOX_EXEC, args: ["-p", profile, executable] };
 }
 
 /** Whether a file holds exactly `content`. */

@@ -6,10 +6,11 @@ import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/process";
+import type * as EffectAcpSchema from "effect-acp/compat";
 
 import { type BobSettings } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 import { TextGenerationError } from "@t3tools/contracts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -25,26 +26,69 @@ import {
   sanitizePrTitle,
   sanitizeThreadTitle,
 } from "@t3tools/provider-core/server/textGenerationUtils";
-import { investigationUnsupported } from "@t3tools/provider-core/server/textGenerationOperations";
+import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 import {
   deleteBobSession,
   describeBobAcpSetupError,
   makeBobAcpRuntime,
 } from "../provider/acp/BobAcpSupport.ts";
+import { type BobAutoReviewContext, reviewBobCommand } from "../provider/acp/bobAutoReview.ts";
+import { bobProcessSandboxSpawn, bobSandboxAvailable } from "../provider/acp/bobSandbox.ts";
 
 const BOB_TIMEOUT_MS = 180_000;
+/** Bob's mode that runs commands, which reading a checkout needs. */
+const BOB_AGENT_MODE_ID = "agent";
+
+export const BOB_REVIEW_GUIDE_MACOS_ONLY =
+  "Bob Shell writes review guides only on macOS, where T3 can run it read-only. Choose another review guide model, or source control writer model when none is set.";
+export const BOB_REVIEW_GUIDE_NO_SANDBOX =
+  "T3 could not start Bob read-only in this checkout, so it wrote no review guide. Check the Bob provider's binary path, or choose another review guide model.";
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
 /**
+ * T3's answer to a permission request Bob makes while it reads a checkout, where no one is there
+ * to ask: allow once a command T3's rules find only reads, decline everything else, and never
+ * answer Always allow, which Bob would keep on its task. Bob's own approval settings run some
+ * calls without asking; the sandbox the whole Bob runs in holds those to reading too.
+ */
+function answerInvestigationPermission(
+  request: EffectAcpSchema.RequestPermissionRequest,
+  context: BobAutoReviewContext,
+): EffectAcpSchema.RequestPermissionResponse {
+  const input = request.toolCall.rawInput;
+  const raw =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+  const reads =
+    request.toolCall.kind === "execute" &&
+    typeof raw.command === "string" &&
+    (raw.cwd === undefined || typeof raw.cwd === "string") &&
+    (raw.background === undefined || raw.background === false || raw.background === "false") &&
+    reviewBobCommand(raw.command, raw.cwd, context).verdict === "allow";
+  const option =
+    (reads ? request.options.find((candidate) => candidate.kind === "allow_once") : undefined) ??
+    request.options.find((candidate) => candidate.kind === "reject_once") ??
+    request.options.find((candidate) => candidate.kind === "reject_always");
+  return option === undefined
+    ? { outcome: { outcome: "cancelled" } }
+    : { outcome: { outcome: "selected", optionId: option.optionId } };
+}
+
+/**
  * Bob uses its configured model, so `modelSelection` only routes requests to this instance.
  *
- * Every prompt runs in `bob-text-generation` in T3's provider cache, never the project's folder:
- * T3 starts Bob with `--trust`, and Bob trusts its folder for good and runs that folder's own
- * hooks and MCP servers. Text generation serves threads of every provider, so a project's folder
- * would be trusted and its setup run without the user ever opening a Bob thread there. Each
- * prompt carries all Bob needs, so the folder stays the same, which leaves one entry in Bob's
- * trusted folders.
+ * Every prompt that carries all Bob needs runs in `bob-text-generation` in T3's provider cache,
+ * never the project's folder: T3 starts Bob with `--trust`, and Bob trusts its folder for good and
+ * runs that folder's own hooks and MCP servers. Text generation serves threads of every provider,
+ * so a project's folder would be trusted and its setup run without the user ever opening a Bob
+ * thread there. The folder stays the same, which leaves one entry in Bob's trusted folders.
+ *
+ * A review guide has Bob read a pull request's disposable checkout instead, in Agent mode so it
+ * can run Git, with the whole `bob acp` process in a read-only sandbox (`bobProcessSandboxSpawn`):
+ * Bob's own tools, its commands and anything it starts change nothing, and the sandbox hides the
+ * checkout's own `.bob` setup. T3 answers Bob's permission requests itself. macOS only.
  */
 export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function* (
   bobSettings: BobSettings,
@@ -55,45 +99,75 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const host = yield* ProviderHost.ProviderHost;
+  const platform = yield* HostProcess.Platform;
+  const homeDirectory = yield* HostProcess.HomeDirectory;
   const workingFolder = path.join(host.paths.providerStatusCacheDir, "bob-text-generation");
 
-  /** Runs one prompt in a throwaway Bob session and decodes the JSON object Bob answers with. */
+  /**
+   * Runs one prompt in a throwaway Bob session and decodes the JSON object Bob answers with. With
+   * `investigate`, Bob reads `cwd` read-only, as the request's contract asks.
+   */
   const runBobJson = <S extends Schema.Top>({
     operation,
     prompt,
     outputSchemaJson,
+    investigate,
   }: {
-    operation:
-      | "generateCommitMessage"
-      | "generatePrContent"
-      | "generateBranchName"
-      | "generateThreadTitle";
+    operation: TextGenerationOperations.Operation;
     prompt: string;
     outputSchemaJson: S;
+    investigate?: { readonly cwd: string; readonly timeoutMs: number } | undefined;
   }): Effect.Effect<S["Type"], TextGenerationError, S["DecodingServices"]> =>
     Effect.gen(function* () {
       const outputRef = yield* Ref.make("");
-      yield* fileSystem.makeDirectory(workingFolder, { recursive: true }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new TextGenerationError({
-              operation,
-              detail: "Could not create Bob's working folder.",
-              cause,
-            }),
-        ),
-      );
-      // No runtime mode, so Bob asks before running tools and, with no handler, is refused.
+      let cwd = workingFolder;
+      let launcher: { readonly command: string; readonly args: ReadonlyArray<string> } | undefined;
+      if (investigate === undefined) {
+        yield* fileSystem.makeDirectory(workingFolder, { recursive: true }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new TextGenerationError({
+                operation,
+                detail: "Could not create Bob's working folder.",
+                cause,
+              }),
+          ),
+        );
+      } else {
+        if (!bobSandboxAvailable(platform)) {
+          return yield* new TextGenerationError({ operation, detail: BOB_REVIEW_GUIDE_MACOS_ONLY });
+        }
+        cwd = investigate.cwd;
+        launcher = bobProcessSandboxSpawn({
+          platform,
+          command: bobSettings.binaryPath || "bob",
+          workspace: cwd,
+          environment,
+          cacheDir: host.paths.providerStatusCacheDir,
+          stateDir: host.paths.stateDir,
+        });
+        if (launcher === undefined) {
+          return yield* new TextGenerationError({ operation, detail: BOB_REVIEW_GUIDE_NO_SANDBOX });
+        }
+      }
+      // No runtime mode, so Bob asks before running tools, and only an investigation answers.
       // A one-shot session needs no MCP tools or subagents.
       const runtime = yield* makeBobAcpRuntime({
         bobSettings,
         environment,
         childProcessSpawner: commandSpawner,
-        cwd: workingFolder,
+        cwd,
         clientInfo: { name: "t3-code-git-text", version: "0.0.0" },
         disableMcpAndSubagents: true,
+        ...(launcher === undefined ? {} : { launcher }),
       }).pipe(Effect.provideService(Crypto.Crypto, crypto));
 
+      if (investigate !== undefined) {
+        const context = { workspace: cwd, home: environment.HOME || homeDirectory };
+        yield* runtime.handleRequestPermission((request) =>
+          Effect.succeed(answerInvestigationPermission(request, context)),
+        );
+      }
       yield* runtime.handleSessionUpdate((notification) => {
         const update = notification.update;
         if (update.sessionUpdate !== "agent_message_chunk") {
@@ -106,22 +180,43 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
         return Ref.update(outputRef, (current) => current + content.text);
       });
 
+      const timeoutMs = investigate?.timeoutMs ?? BOB_TIMEOUT_MS;
       const promptResult = yield* Effect.gen(function* () {
         const started = yield* runtime.start();
         // Runs before Bob stops, whatever the outcome, so no task is left in the user's Bob history.
         yield* Effect.addFinalizer(() => deleteBobSession(runtime, started.sessionId));
-        // Bob's read-only Q&A mode; permission prompts are refused here in any mode.
-        yield* Effect.ignore(runtime.setMode("ask"));
+        if (investigate === undefined) {
+          // Bob's read-only Q&A mode; permission prompts are refused here in any mode.
+          yield* Effect.ignore(runtime.setMode("ask"));
+        } else {
+          // Ask mode runs no commands, and a guide needs Git; the sandbox keeps Agent read-only.
+          yield* runtime.setMode(BOB_AGENT_MODE_ID).pipe(
+            Effect.mapError(
+              (cause) =>
+                new TextGenerationError({
+                  operation,
+                  detail: "Bob could not switch to Agent mode to read the checkout.",
+                  cause,
+                }),
+            ),
+          );
+        }
         return yield* runtime.prompt({
           prompt: [{ type: "text", text: prompt }],
         });
       }).pipe(
-        Effect.timeoutOption(BOB_TIMEOUT_MS),
+        Effect.timeoutOption(timeoutMs),
         Effect.flatMap(
           Option.match({
             onNone: () =>
               Effect.fail(
-                new TextGenerationError({ operation, detail: "Bob ACP request timed out." }),
+                new TextGenerationError({
+                  operation,
+                  detail:
+                    investigate === undefined
+                      ? "Bob ACP request timed out."
+                      : `Bob did not finish reading the checkout within ${Math.round(timeoutMs / 60_000)} minutes, so T3 stopped it.`,
+                }),
               ),
             onSome: (value) => Effect.succeed(value),
           }),
@@ -150,18 +245,10 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
         });
       }
 
-      const decodeOutput = Schema.decodeEffect(Schema.fromJsonString(outputSchemaJson));
-      return yield* decodeOutput(extractJsonObject(trimmed)).pipe(
-        Effect.catchTags({
-          SchemaError: (cause) =>
-            Effect.fail(
-              new TextGenerationError({
-                operation,
-                detail: "Bob returned invalid structured output.",
-                cause,
-              }),
-            ),
-        }),
+      return yield* TextGenerationOperations.decodeJsonReply(
+        { operation, outputSchema: outputSchemaJson },
+        "Bob",
+        trimmed,
       );
     }).pipe(
       Effect.mapError((cause) =>
@@ -267,10 +354,18 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
       } satisfies TextGeneration.ThreadTitleGenerationResult;
     });
 
-  // A review guide has the model read the checkout, and Bob's text generation session has no
-  // read-only tool mode to do it in, so it refuses as Grok and Cursor do.
-  const generateReviewGuide: TextGeneration.TextGeneration["Service"]["generateReviewGuide"] = () =>
-    Effect.fail(investigationUnsupported("generateReviewGuide", "Bob Shell"));
+  // A review guide has Bob read the checkout: upstream's prompt and coverage rules, through Bob.
+  const generateReviewGuide = TextGenerationOperations.fromRunner("BobTextGeneration", (request) =>
+    runBobJson({
+      operation: request.operation,
+      prompt: request.prompt,
+      outputSchemaJson: request.outputSchema,
+      investigate:
+        request.investigate === undefined
+          ? undefined
+          : { cwd: request.cwd, timeoutMs: request.investigate.timeoutMs },
+    }),
+  ).generateReviewGuide;
 
   return {
     generateCommitMessage,

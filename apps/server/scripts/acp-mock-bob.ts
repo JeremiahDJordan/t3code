@@ -23,7 +23,9 @@
  * that fails outside the session's folder, and replies with the file's text or Bob's refusal, and
  * "ask about <tools>", which asks permission for each tool named (edit, edit-config, edit-outside, execute, ls,
  * test, test-denied, tool-denied, commit, search, fetch, todo, subagent, read, and an MCP tool for
- * any other name) as Bob asks, logs each answer as `_mock/permission` and replies with them.
+ * any other name) as Bob asks, logs each answer as `_mock/permission` and replies with them, and
+ * a review guide's prompt ("Investigate before you answer"), which reads the checkout as
+ * `investigate` describes.
  * Environment: `T3_ACP_REQUEST_LOG_PATH` logs every request;
  * `T3_ACP_PROMPT_RESPONSE_TEXT` sets the reply; `T3_ACP_FAIL_PROMPT` fails prompts;
  * `T3_ACP_BOB_SIGNED_OUT` and `T3_ACP_BOB_LICENSE_REQUIRED` refuse sessions as Bob does;
@@ -31,6 +33,7 @@
  * `T3_ACP_BOB_STATE_PATH` keeps the tasks in a file, so every mock Bob shares them as real Bobs
  * share their task database.
  */
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -290,6 +293,7 @@ function handle(method: string, params: Json): Json {
               PROFILE: process.env.T3_BOB_SANDBOX_PROFILE ?? "",
               // The folder Bob was started in, which `--trust` trusts.
               CWD: process.cwd(),
+              PID: process.pid,
             },
           })}\n`,
         );
@@ -606,6 +610,68 @@ async function askAbout(id: number | string, sessionId: string, tools: ReadonlyA
   send({ id, result: { stopReason: "end_turn" } });
 }
 
+/**
+ * Reads the checkout as Bob does for a review guide: asks to run each `git` command the prompt
+ * starts from and runs those allowed with `$SHELL -c` in the session's folder, asks to edit a file
+ * and to run a command that deletes, then writes a file itself, as its own edit tool would when
+ * Bob's own approvals let it without asking. Replies with a guide of one stop whose summary
+ * reports, as JSON, the commands' output, T3's answers and what the write did.
+ */
+async function investigate(id: number | string, sessionId: string, text: string) {
+  const cwd = tasks.get(sessionId)?.cwd ?? process.cwd();
+  const asks: Array<{ readonly name: string; readonly asked: Json }> = [
+    ...[...text.matchAll(/^- (git (?:diff --stat|log --oneline) \S+)$/gm)].map(([, command]) => ({
+      name: command!,
+      asked: { kind: "execute", title: command, rawInput: { command } },
+    })),
+    { name: "edit", asked: askedTool("edit", cwd) },
+    { name: "execute", asked: askedTool("execute", cwd) },
+  ];
+  const answers: Record<string, string> = {};
+  const ran: Record<string, string> = {};
+  for (const [index, { name, asked }] of asks.entries()) {
+    const { content, ...call } = asked;
+    const answer = await request("session/request_permission", {
+      sessionId,
+      options: permissionOptions,
+      toolCall: { toolCallId: `investigate-${index}`, status: "pending", ...call, content },
+    });
+    const outcome = (answer.result as Json | undefined)?.outcome as Json | undefined;
+    answers[name] = outcome?.outcome === "selected" ? String(outcome.optionId) : "cancelled";
+    if (call.kind !== "execute" || !answers[name].startsWith("allow")) continue;
+    const command = (call.rawInput as { readonly command: string }).command;
+    try {
+      ran[name] = NodeChildProcess.execFileSync(process.env.SHELL || "/bin/sh", ["-c", command], {
+        cwd,
+        encoding: "utf8",
+      });
+    } catch (cause) {
+      ran[name] = `failed: ${(cause as { stderr?: string }).stderr ?? String(cause)}`;
+    }
+  }
+  let wrote: string;
+  try {
+    NodeFS.writeFileSync(NodePath.join(cwd, "notes.md"), "Notes");
+    wrote = "written";
+  } catch (cause) {
+    wrote = (cause as { code?: string }).code ?? String(cause);
+  }
+  const stop = {
+    title: "What Bob read",
+    summary: JSON.stringify({ ran, answers, wrote }),
+    attention: null,
+    excerpts: [],
+    files: [],
+    notes: [],
+    questions: [],
+  };
+  notify(sessionId, {
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: JSON.stringify({ stops: [stop] }) },
+  });
+  send({ id, result: { stopReason: "end_turn" } });
+}
+
 const lines = NodeReadline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   if (!line.trim()) return;
@@ -651,6 +717,19 @@ lines.on("line", (line) => {
     promptText(message.params?.prompt).includes("exit now")
   ) {
     process.exit(1);
+  }
+  if (
+    message.method === "session/prompt" &&
+    message.id !== undefined &&
+    promptText(message.params?.prompt).includes("Investigate before you answer")
+  ) {
+    loadState();
+    void investigate(
+      message.id,
+      String(message.params?.sessionId),
+      promptText(message.params?.prompt),
+    );
+    return;
   }
   const asked = /ask about ([a-z ,-]+)/.exec(promptText(message.params?.prompt));
   if (message.method === "session/prompt" && message.id !== undefined && asked) {
