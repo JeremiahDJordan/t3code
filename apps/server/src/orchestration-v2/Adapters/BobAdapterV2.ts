@@ -40,6 +40,7 @@ import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -72,6 +73,7 @@ import {
   moveBobTask,
   rewindBobTask,
 } from "../../provider/acp/BobAcpSupport.ts";
+import { bobOwnApprovalsNotice } from "../../provider/acp/bobOwnApprovals.ts";
 import {
   BOB_NETWORK_ASK,
   BOB_NETWORK_OPTION_ID,
@@ -93,7 +95,7 @@ import {
   bobSandboxFolderSuggestion,
   makeBobSandbox,
 } from "../../provider/acp/bobSandbox.ts";
-import { bobBudgetResetsAt } from "../../provider/bobUsageLimits.ts";
+import { bobBudgetResetsAt, readBobSettingsFile } from "../../provider/bobUsageLimits.ts";
 import { isUserWritten, type BobStartingThread } from "../../provider/bobUserMessages.ts";
 import { aliasActiveMcpCredential } from "../../mcp/McpSessionRegistry.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -2159,6 +2161,10 @@ function wrapBobSession(
   modes: {
     /** The mode a turn picked that Bob does not offer in its folder, which runs Agent instead. */
     readonly missing: (input: ProviderAdapter.ProviderAdapterV2TurnInput) => string | undefined;
+    /** The notice for Bob's own approval settings, which a turn outside Full access shows. */
+    readonly ownApprovals: (
+      input: ProviderAdapter.ProviderAdapterV2TurnInput,
+    ) => Effect.Effect<string | undefined>;
     readonly noticeItemId: (nativeItemId: string) => TurnItemId;
   },
   sessions: ReadonlyMap<string, BobSessionControl>,
@@ -2175,24 +2181,29 @@ function wrapBobSession(
     if (policy?.cwd) cwd = policy.cwd;
   };
   // A turn whose picked mode Bob lacks says so once the turn exists, as the generic adapter
-  // runs it in Agent mode without a word. Keyed by run attempt until its provider turn appears.
-  const missingModes = new Map<
+  // runs it in Agent mode without a word, and so does the session's first turn whose calls Bob's
+  // own approval settings may answer. Keyed by run attempt until its provider turn appears.
+  const turnNotices = new Map<
     RunAttemptId,
-    { readonly input: ProviderAdapter.ProviderAdapterV2TurnInput; readonly mode: string }
+    {
+      readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+      readonly messages: ReadonlyArray<string>;
+    }
   >();
-  const withMissingModeNotice = (
+  let ownApprovalsShown = false;
+  const withTurnNotice = (
     event: ProviderAdapter.ProviderAdapterV2Event,
   ): Arr.NonEmptyReadonlyArray<ProviderAdapter.ProviderAdapterV2Event> => {
     if (event.type !== "provider_turn.updated" || event.providerTurn.runAttemptId === null) {
       return [event];
     }
-    const pending = missingModes.get(event.providerTurn.runAttemptId);
+    const pending = turnNotices.get(event.providerTurn.runAttemptId);
     if (pending === undefined) return [event];
-    missingModes.delete(event.providerTurn.runAttemptId);
+    turnNotices.delete(event.providerTurn.runAttemptId);
     const { providerTurn } = event;
-    const nativeItemId = `${providerTurn.id}:bob-missing-mode`;
+    const nativeItemId = `${providerTurn.id}:bob-notice`;
     const at = providerTurn.startedAt ?? DateTime.nowUnsafe();
-    const message = `Bob has no "${pending.mode}" mode in this project, so this turn runs in Agent mode.`;
+    const message = pending.messages.join(" ");
     return [
       event,
       {
@@ -2226,7 +2237,7 @@ function wrapBobSession(
   return {
     ...session,
     events: session.events.pipe(
-      Stream.mapArray((events) => Arr.flatMap(events, withMissingModeNotice)),
+      Stream.mapArray((events) => Arr.flatMap(events, withTurnNotice)),
       Stream.tap((event) => {
         // Once Bob's task exists, its relay learns whose it is.
         const nativeId =
@@ -2300,7 +2311,18 @@ function wrapBobSession(
           ? input.message.text.trim()
           : undefined;
       const mode = modes.missing(input);
-      if (mode !== undefined) missingModes.set(input.attemptId, { input, mode });
+      const notices = modes.ownApprovals(input).pipe(
+        Effect.map((ownApprovals) => {
+          const messages = [
+            ...(mode === undefined
+              ? []
+              : [`Bob has no "${mode}" mode in this project, so this turn runs in Agent mode.`]),
+            ...(ownApprovals === undefined || ownApprovalsShown ? [] : [ownApprovals]),
+          ];
+          if (ownApprovals !== undefined) ownApprovalsShown = true;
+          if (messages.length > 0) turnNotices.set(input.attemptId, { input, messages });
+        }),
+      );
       // A wake T3 starts for a prompt Bob kept going while T3 restarted carries no request of its
       // own, and upstream's restart continuation only asks Bob to go on.
       const isWake =
@@ -2325,13 +2347,14 @@ function wrapBobSession(
           });
           turns.projects.set(input.threadId, input.appThread.projectId);
         });
-      return attachments.resources(input.message.attachments).pipe(
+      return notices.pipe(
+        Effect.andThen(attachments.resources(input.message.attachments)),
         Effect.flatMap(announce),
         Effect.andThen(session.startTurn(input)),
         Effect.mapError(explainSetup),
         Effect.tapError(() =>
           Effect.sync(() => {
-            missingModes.delete(input.attemptId);
+            turnNotices.delete(input.attemptId);
             turns.next.delete(input.threadId);
           }),
         ),
@@ -2443,6 +2466,7 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
     idAllocator: yield* IdAllocator.IdAllocatorV2,
     host: yield* ProviderHost.ProviderHost,
   };
+  const path = yield* Path.Path;
   // The modes Bob offered in each folder, custom modes included.
   const offeredModes = new Map<string, ReadonlySet<string>>();
   // Each Bob session's runtime, by Bob's task id.
@@ -2504,6 +2528,14 @@ export const makeBobAdapterV2 = Effect.fn("makeBobAdapterV2")(function* (
         : undefined;
       return offered === undefined || offered.has(picked) ? undefined : picked;
     },
+    ownApprovals: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+      bobApprovesItsOwnTools(input.runtimePolicy.runtimeMode)
+        ? Effect.succeed(undefined)
+        : readBobSettingsFile(options.environment, "settings.json").pipe(
+            Effect.map(bobOwnApprovalsNotice),
+            Effect.provideService(FileSystem.FileSystem, options.fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
     noticeItemId: (nativeItemId: string) =>
       options.idAllocator.derive.turnItemFromProviderItem({ driver: BOB_PROVIDER, nativeItemId }),
   };

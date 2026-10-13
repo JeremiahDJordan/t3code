@@ -19,7 +19,7 @@ import * as NodePath from "node:path";
 
 import type * as EffectAcpSchema from "effect-acp/compat";
 
-import { bobRuleFolder, bobRuleWriter, bobWorkspace } from "./bobSandbox.ts";
+import { bobClosedCredentials, bobRuleFolder, bobRuleWriter, bobWorkspace } from "./bobSandbox.ts";
 
 /** `allow` runs the call, `review` leaves it to review against the user's request, `ask` asks. */
 export type BobAutoVerdict = "allow" | "review" | "ask";
@@ -210,6 +210,16 @@ class Places {
   readonly rules: BobUserRules;
   /** Where a write rule lets Bob edit, as the sandbox lets commands write; made on first use. */
   private writer: ((path: string) => string | undefined) | undefined;
+  /** The credential stores the sandbox keeps closed past the user's rules; made on first use. */
+  private closed: ReturnType<typeof bobClosedCredentials> | undefined;
+  private get credentials(): ReturnType<typeof bobClosedCredentials> {
+    this.closed ??= bobClosedCredentials({
+      home: this.home,
+      workspace: this.workspaceRoot?.[0],
+      rules: this.rules,
+    });
+    return this.closed;
+  }
   private readonly context: BobAutoReviewContext;
   constructor(context: BobAutoReviewContext) {
     this.context = context;
@@ -313,8 +323,9 @@ class Places {
     const relative = this.inWorkspace(absolute);
     if (relative !== undefined) return namesSecret(relative);
     const resolved = canonicalPath(absolute) ?? absolute;
-    // A folder the user let commands read holds nothing they count as secret.
-    if (this.inRuleFolder(absolute, "read") !== undefined) return false;
+    // A folder the user let commands read holds nothing they count as secret, but the credential
+    // stores in it that the rule does not name, which the sandbox keeps closed.
+    if (this.inRuleFolder(absolute, "read") !== undefined) return this.credentials.holds(absolute);
     if (namesSecret(word) || namesSecret(resolved)) return true;
     const fromHome = within(this.realHome, resolved);
     if (fromHome !== undefined) {
@@ -326,6 +337,20 @@ class Places {
     return (
       within(resolved, this.realHome) !== undefined ||
       (this.workspace !== undefined && within(resolved, this.workspace) !== undefined)
+    );
+  }
+  /**
+   * Whether a read descending from `folder` reaches a path the user keeps private, or a
+   * credential store the sandbox keeps closed, at or below it, as written or resolved.
+   */
+  holdsClosed(folder: string): boolean {
+    const resolved = canonicalPath(folder) ?? folder;
+    return (
+      this.rules.private.some(
+        (path) =>
+          within(folder, path) !== undefined ||
+          within(resolved, canonicalPath(path) ?? path) !== undefined,
+      ) || this.credentials.below(folder)
     );
   }
 }
@@ -1595,6 +1620,23 @@ const BOB_SUBAGENT_TITLE = "Running subagent: ";
 const BOB_WEB_SEARCH_TITLE = "Searching the web";
 const BOB_WEB_FETCH_TITLE = "Fetching ";
 const BOB_SKILL_TITLE = "Using skill ";
+/** The inputs of Bob's file tools that only read: listing, reading, searching and finding files. */
+const BOB_READ_KEYS = [
+  "path",
+  "recursive",
+  "range",
+  "context_focus_query",
+  "pattern",
+  "include",
+  "ignore_case",
+  "invert_match",
+  "word_regexp",
+  "files_with_matches",
+  "mode",
+  "query",
+  "name_path_pattern",
+  "relative_path",
+];
 
 /**
  * T3's own MCP tools Auto lets Bob call without asking: reading T3's threads, projects, queues
@@ -1744,7 +1786,8 @@ export type BobPermissionMode = "approval-required" | "auto-accept-edits" | "aut
  * With `sandboxed`, Bob's commands run in the sandbox: read-only in Supervised, the workspace in
  * Accept edits and Auto. Supervised runs commands that only read; Accept edits and Auto run any
  * command the sandbox bounds and edits in the workspace; Auto also leaves web searches, fetches,
- * skills and GitHub reads to its reviewer. Everything else asks.
+ * skills and GitHub reads to its reviewer. Every mode lets Bob's file tools read anything but
+ * secrets, as its sandbox lets commands. Everything else asks.
  */
 export function reviewBobPermission(
   toolCall: EffectAcpSchema.RequestPermissionRequest["toolCall"],
@@ -1785,6 +1828,46 @@ export function reviewBobPermission(
           : ask(read.reason);
       }
       return reviewed(reviewBobCommandInSandbox(command, cwd, context));
+    }
+    case "read": {
+      // Bob's file tools read in its own process, outside the sandbox, so they get its read bounds
+      // here in every mode: anything but secrets and the folders the user's rules keep private. A
+      // search or a recursive listing descends, so one from a folder holding the home folder, the
+      // workspace, a private path or a credential store the sandbox keeps closed asks too, the
+      // workspace itself when Bob is given no path. A search reads every file below its folder,
+      // `.env` files included, as Bob's reads did when Bob approved them itself.
+      if (!onlyKeys(raw, BOB_READ_KEYS)) return ask("a tool Bob counts as a read");
+      const places = new Places(context);
+      const workspace = places.workspace;
+      if (workspace === undefined) return ask("a read without a workspace");
+      const inputs = ["path", "relative_path", "include"].flatMap((key) =>
+        raw[key] === undefined ? [] : [raw[key]],
+      );
+      const words = inputs.filter((word) => typeof word === "string");
+      if (words.length < inputs.length) return ask("a read the rules cannot place");
+      // Bob trims a path before it reads it, so `" private"` would be checked as a name that is
+      // not the one Bob reads.
+      if (words.some((word) => word.trim() !== word)) {
+        return ask("a path Bob reads in another spelling than the rules check");
+      }
+      const descends =
+        raw.recursive === true ||
+        ["pattern", "include", "name_path_pattern"].some((key) => raw[key] !== undefined);
+      const roots = ["path", "relative_path"].flatMap((key) => {
+        const value = raw[key];
+        return typeof value === "string" ? [value] : [];
+      });
+      const from = roots.length === 0 ? ["."] : roots;
+      if ([...from, ...words].some((word) => places.namesSecret(word, workspace, !descends))) {
+        return ask("reads a secret, a private folder, or a folder holding them");
+      }
+      const holdsClosed = (root: string) => {
+        const absolute = places.absolute(root, workspace);
+        return absolute === undefined || places.holdsClosed(absolute);
+      };
+      return descends && from.some(holdsClosed)
+        ? ask("searches a folder holding a private folder or a credential store")
+        : allow("reads files outside any secret");
     }
     case "edit":
     case "delete":

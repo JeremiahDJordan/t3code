@@ -38,8 +38,8 @@ session-wide choice, because Grok would remember that command for the whole proj
 For Bob Shell, **Always allow for this task** allows that tool for the rest of Bob's task, even
 when the thread picks it up again later; for commands and edits, cards offer Bob's permission
 rules instead. Bob's own approval settings also apply in every mode, **Supervised** included:
-its file reads, a few commands that only read, such as `git status` and `ls`, and anything you
-approved in Bob itself run without a card. See
+whatever they approve runs without a card, and a turn says so when they approve more than Bob's
+defaults. To leave every decision to the permission mode, turn Bob's auto-approval off. See
 [Bob Shell approvals](./providers-bob.md#projects-and-approvals).
 
 ACP Registry agents run their own tools in their own mode; T3 Code answers their approval requests

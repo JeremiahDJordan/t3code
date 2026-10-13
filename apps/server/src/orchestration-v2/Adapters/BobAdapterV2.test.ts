@@ -655,6 +655,8 @@ const runBobTurn = (input: {
   readonly usageReadings?: ReadonlyArray<{ used: number; size: number; bobcoins: number }>;
   readonly subagentSteps?: TaskTranscript;
   readonly mode?: string;
+  readonly runtimeMode?: RuntimeMode;
+  readonly home?: string;
 }) =>
   Effect.gen(function* () {
     const bob = yield* openBob(input);
@@ -759,6 +761,47 @@ describe("BobAdapterV2 turns", () => {
       ]);
       const offered = yield* runBobTurn({ text: "hello", mode: "ask" });
       assert.deepEqual(notices(offered.events), []);
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
+  it.effect("says when Bob's own approval settings answer calls T3's mode would review", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const home = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-bob-home-" });
+      yield* fileSystem.makeDirectory(`${home}/.bob/settings`, { recursive: true });
+      const settings = (approval: Record<string, unknown>) =>
+        fileSystem.writeFileString(
+          `${home}/.bob/settings/settings.json`,
+          JSON.stringify({ approval }),
+        );
+      const notices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+        events.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [event.turnItem.message]
+            : [],
+        );
+      const permissive = {
+        allowed_permissions: ["read", "edit", "execute"],
+        allowedExecutors: [{ toolId: "execute_command", approvedCommands: ["cat", "gh"] }],
+      };
+      yield* settings(permissive);
+      const supervised = yield* runBobTurn({
+        text: "hello",
+        runtimeMode: "approval-required",
+        home,
+      });
+      assert.deepEqual(notices(supervised.events), [
+        "Bob's own approval settings let it edit files and run gh without asking T3, so T3's " +
+          "rules never see those calls; its commands still run in T3's sandbox, where any that " +
+          'need the network or your credentials fail. To have Bob ask T3 about everything, set "' +
+          'autoApprovalEnabled" to false under "approval" in ~/.bob/settings/settings.json.',
+      ]);
+      // Full access lets Bob approve its own calls anyway.
+      const full = yield* runBobTurn({ text: "hello", home });
+      assert.deepEqual(notices(full.events), []);
+      yield* settings({ ...permissive, autoApprovalEnabled: false });
+      const off = yield* runBobTurn({ text: "hello", runtimeMode: "approval-required", home });
+      assert.deepEqual(notices(off.events), []);
     }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
