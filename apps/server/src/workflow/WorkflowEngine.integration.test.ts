@@ -1,3 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off - commands' tests share files and a pipe with the command.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -66,6 +72,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as WorkflowEngine from "./WorkflowEngine.ts";
+import * as WorkflowExec from "./WorkflowExec.ts";
 import * as WorkflowSandbox from "./WorkflowSandbox.ts";
 import * as WorkflowSourceStore from "./WorkflowSourceStore.ts";
 import * as WorkflowWorkspaces from "./WorkflowWorkspaces.ts";
@@ -586,6 +593,9 @@ const withHarness = <A, E>(
               }),
             ).pipe(Layer.provide(layerThreads));
       const layerSources = WorkflowSourceStore.layer.pipe(Layer.provide(layerDatabase));
+      const layerConfig = ServerConfig.layerTest(cwd, { prefix: "t3-workflow-config-" }).pipe(
+        Layer.provide(NodeServices.layer),
+      );
       const layerEngine = WorkflowEngine.layer.pipe(
         Layer.provide(
           Layer.mergeAll(
@@ -595,11 +605,9 @@ const withHarness = <A, E>(
             layerSources,
             WorkflowSandbox.layerTest,
             layerWorkspaces,
+            WorkflowExec.layer.pipe(Layer.provide(Layer.merge(layerDatabase, layerConfig))),
           ),
         ),
-      );
-      const layerConfig = ServerConfig.layerTest(cwd, { prefix: "t3-workflow-config-" }).pipe(
-        Layer.provide(NodeServices.layer),
       );
       const layerMcp = WorkflowMcpService.layer.pipe(
         Layer.provide(
@@ -1323,6 +1331,143 @@ return result`,
             expect(yield* harness.wakeCount).toBe(2);
           }),
       );
+    }),
+  );
+
+  it.live("replays a finished command on Retry instead of running it again, and logs it", () =>
+    Effect.gen(function* () {
+      const attempts = yield* Ref.make(0);
+      const folder = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-workflow-exec-"));
+      const count = NodePath.join(folder, "count");
+      return yield* withHarness(
+        {
+          name: "workflow-exec-replay",
+          behave: (turn) =>
+            turn.text === "flaky"
+              ? Ref.updateAndGet(attempts, (n) => n + 1).pipe(
+                  Effect.map((n) => (n === 1 ? { fail: "flaky" } : { text: "fine" })),
+                )
+              : Effect.succeed({ text: "noted" }),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const started = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "exec-replay" }
+const counted = await exec("echo run >> " + args.count + "; wc -l < " + args.count)
+const result = await agent("flaky")
+if (result === null) throw new Error("the flaky agent failed")
+return { runs: counted.stdout.trim(), exitCode: counted.exitCode, result }`,
+              args: { count },
+            });
+            if (started.status !== "started") return yield* Effect.die("not started");
+            yield* harness.parentWoken;
+            yield* harness.threads.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:workflow-exec-replay:retry"),
+              threadId: started.childThreadId,
+              messageId: MessageId.make("message:workflow-exec-replay:retry"),
+              text: "Retry",
+              attachments: [],
+              modelSelection: {
+                instanceId: WORKFLOW_PROVIDER_INSTANCE_ID,
+                model: WorkflowAdapterV2.WORKFLOW_MODEL,
+              },
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* harness.parentWoken;
+            const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+            const row = parent.subagents.find((task) => task.id === started.taskId)!;
+            expect(row.status).toBe("completed");
+            expect(workflowValue(row.result)).toEqual({ runs: "1", exitCode: 0, result: "fine" });
+            expect(NodeFS.readFileSync(count, "utf8")).toBe("run\n");
+            const { turnItems } = yield* harness.threads
+              .getThreadRecords(started.childThreadId, ["turnItems"], {
+                turnItemTypes: ["assistant_message"],
+              })
+              .pipe(Effect.orDie);
+            const log = turnItems.flatMap((item) =>
+              item.type === "assistant_message" ? [item.text] : [],
+            );
+            expect(log).toContainEqual(
+              expect.stringMatching(/^`echo run >> .*count` exited 0 after \d+\.\d s\.$/),
+            );
+            expect(log).toContainEqual(
+              expect.stringMatching(
+                /^`echo run >> .*count` exited 0 on an earlier attempt; exec\(\) returned that result again\.$/,
+              ),
+            );
+            expect(log).toContainEqual(
+              expect.stringContaining("; 1 command, 1 replayed from an earlier attempt."),
+            );
+          }),
+      ).pipe(Effect.ensuring(Effect.sync(() => NodeFS.rmSync(folder, { recursive: true }))));
+    }),
+  );
+
+  it.live("runs a command again on Retry when the run was stopped while it ran", () =>
+    Effect.gen(function* () {
+      const folder = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-workflow-exec-"));
+      const count = NodePath.join(folder, "count");
+      const fifo = NodePath.join(folder, "pid");
+      NodeChildProcess.execFileSync("mkfifo", [fifo]);
+      return yield* withHarness(
+        { name: "workflow-exec-stopped", behave: () => Effect.succeed({ text: "noted" }) },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            // The first run reports its shell's pid and waits; a later one finishes.
+            const started = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "exec-stopped" }
+const ran = await exec("n=$(cat " + args.count + " 2>/dev/null | wc -l); echo run >> " + args.count + "; if [ $n -eq 0 ]; then echo $$ > " + args.fifo + "; exec sleep 60; fi; echo done")
+return ran.stdout`,
+              args: { count, fifo },
+            });
+            if (started.status !== "started") return yield* Effect.die("not started");
+            const pid = Number(
+              (yield* Effect.promise(() => NodeFS.promises.readFile(fifo, "utf8"))).trim(),
+            );
+            const coordinator = yield* harness.threads.getThreadRecords(started.childThreadId, [
+              "runs",
+            ]);
+            yield* harness.threads.dispatch({
+              type: "run.interrupt",
+              commandId: CommandId.make("command:workflow-exec-stopped:interrupt"),
+              threadId: started.childThreadId,
+              runId: coordinator.runs[0]!.id,
+            });
+            yield* harness.waitForRuns(
+              started.childThreadId,
+              (runs) => runs[0]?.status === "interrupted",
+            );
+            // Stopping the run killed the command.
+            expect(() => process.kill(pid, 0)).toThrow();
+            yield* harness.threads.dispatch({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:workflow-exec-stopped:retry"),
+              threadId: started.childThreadId,
+              messageId: MessageId.make("message:workflow-exec-stopped:retry"),
+              text: "Retry",
+              attachments: [],
+              modelSelection: {
+                instanceId: WORKFLOW_PROVIDER_INSTANCE_ID,
+                model: WorkflowAdapterV2.WORKFLOW_MODEL,
+              },
+              dispatchMode: { type: "start_immediately" },
+            });
+            yield* harness.waitForRuns(started.childThreadId, (runs) =>
+              runs.some((run) => run.status === "completed"),
+            );
+            const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+            const row = parent.subagents.find((task) => task.id === started.taskId)!;
+            expect(row.result).toBe("done\n");
+            expect(NodeFS.readFileSync(count, "utf8")).toBe("run\nrun\n");
+          }),
+      ).pipe(Effect.ensuring(Effect.sync(() => NodeFS.rmSync(folder, { recursive: true }))));
     }),
   );
 

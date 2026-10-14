@@ -18,6 +18,7 @@ import {
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex } from "@noble/hashes/utils";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -48,6 +49,7 @@ import {
   type WorkflowRoleBinding,
 } from "./WorkflowInvocation.ts";
 import { clampWorkflowRoleBinding } from "./WorkflowRoles.ts";
+import * as WorkflowExec from "./WorkflowExec.ts";
 import * as WorkflowSandbox from "./WorkflowSandbox.ts";
 import { claudeModelRole } from "./WorkflowScript.ts";
 import * as WorkflowSourceStore from "./WorkflowSourceStore.ts";
@@ -59,6 +61,9 @@ const MAX_LABEL_CHARS = 200;
 const MAX_PHASES = 50;
 /** Refused requests a call steps past before it gives up starting. */
 const MAX_REFUSED_ATTEMPTS = 100;
+/** `exec()` commands one run runs at once; the rest wait their turn. */
+const MAX_CONCURRENT_EXECS = 2;
+const MAX_EXEC_ENV = 100;
 const toJsonText = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const toIndentedJsonText = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown, { space: 2 }));
 
@@ -180,6 +185,80 @@ function decodeAgentCall(
     effort: Result.getOrUndefined(effort),
   });
 }
+
+interface ExecCall {
+  readonly command: string;
+  readonly workspace: string | undefined;
+  readonly timeoutMs: number;
+  readonly env: Readonly<Record<string, string>>;
+}
+
+const EXEC_OPTIONS = new Set(["workspace", "timeoutMs", "env"]);
+
+/** Reads an `exec()` call's options. */
+function decodeExecCall(request: unknown): Result.Result<ExecCall, string> {
+  const { command, opts } = (request ?? {}) as {
+    readonly command?: unknown;
+    readonly opts?: unknown;
+  };
+  if (typeof command !== "string" || command.trim() === "") {
+    return Result.fail("exec(command, opts) needs a non-empty command string.");
+  }
+  if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
+    return Result.fail("exec() options must be an object.");
+  }
+  const options = opts as Record<string, unknown>;
+  for (const key of Object.keys(options)) {
+    if (!EXEC_OPTIONS.has(key)) return Result.fail(`exec(): option "${key}" is not supported.`);
+  }
+  const workspace = options.workspace as { readonly name?: unknown } | undefined;
+  if (
+    workspace !== undefined &&
+    (typeof workspace !== "object" || typeof workspace?.name !== "string")
+  ) {
+    return Result.fail("exec(): workspace must be a value returned by workspace().");
+  }
+  const timeoutMs = options.timeoutMs ?? WorkflowExec.EXEC_DEFAULT_TIMEOUT_MS;
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > WorkflowExec.EXEC_MAX_TIMEOUT_MS
+  ) {
+    return Result.fail(
+      `exec(): timeoutMs must be a whole number of milliseconds, at most ${WorkflowExec.EXEC_MAX_TIMEOUT_MS} (60 minutes).`,
+    );
+  }
+  const env = options.env ?? {};
+  if (typeof env !== "object" || env === null || Array.isArray(env)) {
+    return Result.fail("exec(): env must be an object of strings.");
+  }
+  const entries = Object.entries(env);
+  if (entries.length > MAX_EXEC_ENV) {
+    return Result.fail(`exec(): env takes at most ${MAX_EXEC_ENV} variables.`);
+  }
+  for (const [name, value] of entries) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== "string") {
+      return Result.fail(
+        `exec(): env.${name} must be a string, under a name of letters, digits and underscores.`,
+      );
+    }
+  }
+  return Result.succeed({
+    command,
+    workspace: workspace?.name as string | undefined,
+    timeoutMs,
+    env: Object.fromEntries(entries) as Record<string, string>,
+  });
+}
+
+/** How a command ended, for the run's log. */
+const execOutcome = (result: WorkflowExec.WorkflowExecResult) =>
+  result.timedOut
+    ? "timed out and was stopped"
+    : result.exitCode === null
+      ? "was ended by a signal"
+      : `exited ${result.exitCode}`;
 
 /** The turn's timeline: assistant messages, the phase list, and the terminal. */
 function makeTurnOutput(turn: WorkflowTurn, startedAt: DateTime.Utc) {
@@ -327,6 +406,7 @@ const make = Effect.gen(function* () {
   const sources = yield* WorkflowSourceStore.WorkflowSourceStore;
   const sandbox = yield* WorkflowSandbox.WorkflowSandbox;
   const workspaces = yield* WorkflowWorkspaces.WorkflowWorkspaces;
+  const execs = yield* WorkflowExec.WorkflowExec;
 
   const children = (threadId: ThreadId) =>
     threads
@@ -622,6 +702,8 @@ const make = Effect.gen(function* () {
         let started = 0;
         let reused = 0;
         let nulls = 0;
+        let commandsRun = 0;
+        let commandsReplayed = 0;
         let capReported = false;
 
         const phaseSteps = () =>
@@ -929,6 +1011,79 @@ const make = Effect.gen(function* () {
             return { name, branch: ensured.branch };
           });
 
+        const execSlots = yield* Semaphore.make(MAX_CONCURRENT_EXECS);
+        /**
+         * Runs a command once per call: the journal holds every command that
+         * finished, so a rerun replays its result instead of running it again,
+         * and runs one that an earlier turn stopped midway.
+         */
+        const exec = (request: unknown) =>
+          Effect.gen(function* () {
+            const decoded = decodeExecCall(request);
+            if (Result.isFailure(decoded)) return yield* scriptError(decoded.failure);
+            const call = decoded.success;
+            const named =
+              call.workspace === undefined ? undefined : workspaceCalls.get(call.workspace);
+            if (call.workspace !== undefined && named === undefined) {
+              return yield* scriptError(
+                `exec(): workspace "${call.workspace}" was not created in this run; call workspace() first.`,
+              );
+            }
+            const callKey = hashKey({
+              exec: call.command,
+              workspace: call.workspace ?? null,
+              timeoutMs: call.timeoutMs,
+              env: call.env,
+            });
+            const occurrence = (occurrences.get(callKey) ?? 0) + 1;
+            occurrences.set(callKey, occurrence);
+            const callId = `exec:${callKey}:${occurrence}`;
+            const shown = `\`${truncate(call.command.replace(/\s+/g, " ").trim(), 200)}\`${
+              call.workspace === undefined ? "" : ` in workspace "${call.workspace}"`
+            }`;
+            const replayed = yield* execs.recorded(coordinatorThreadId, callId);
+            if (Option.isSome(replayed)) {
+              commandsReplayed += 1;
+              yield* log(
+                `${shown} ${execOutcome(replayed.value)} on an earlier attempt; exec() returned that result again.`,
+              );
+              return replayed.value;
+            }
+            const workspace = named === undefined ? undefined : yield* Deferred.await(named);
+            const execCwd = workspace?.worktreePath ?? cwd;
+            if (execCwd === null) return yield* scriptError("exec(): this thread has no checkout.");
+            const runCommand = execSlots.withPermit(
+              Effect.gen(function* () {
+                const startedAt = yield* Clock.currentTimeMillis;
+                const result = yield* execs.run({
+                  command: call.command,
+                  cwd: execCwd,
+                  workspace: workspace !== undefined,
+                  runtimeMode: input.runtimePolicy.runtimeMode,
+                  interactionMode: input.runtimePolicy.interactionMode,
+                  timeoutMs: call.timeoutMs,
+                  env: call.env,
+                });
+                return { result, elapsedMs: (yield* Clock.currentTimeMillis) - startedAt };
+              }),
+            );
+            // A command in a workspace takes its turn there with the agents that edit it.
+            const { result, elapsedMs } =
+              workspace === undefined
+                ? yield* runCommand
+                : yield* (yield* writerLock(workspace.branch)).withPermit(runCommand);
+            yield* execs.record(coordinatorThreadId, callId, result);
+            commandsRun += 1;
+            yield* log(`${shown} ${execOutcome(result)} after ${(elapsedMs / 1000).toFixed(1)} s.`);
+            return result;
+          }).pipe(
+            Effect.mapError((error) =>
+              WorkflowSandbox.isWorkflowScriptError(error)
+                ? error
+                : scriptError(`exec() failed: ${error.message}`),
+            ),
+          );
+
         yield* out.phases(phaseSteps(), false);
         const outcome = yield* sandbox
           .run({
@@ -937,6 +1092,7 @@ const make = Effect.gen(function* () {
             host: {
               agent,
               workspace,
+              exec,
               phase: (title) =>
                 Effect.gen(function* () {
                   const next = title.trim() || null;
@@ -979,8 +1135,13 @@ const make = Effect.gen(function* () {
           if (status === "running") phaseStates.set(title, "completed");
         }
         yield* out.phases(phaseSteps(), true);
+        const commands = commandsRun + commandsReplayed;
         yield* log(
-          `Ran ${started} agent${started === 1 ? "" : "s"}${reused > 0 ? `, ${reused} reused from an earlier attempt` : ""}${nulls > 0 ? `; ${nulls} returned null` : ""}.`,
+          `Ran ${started} agent${started === 1 ? "" : "s"}${reused > 0 ? `, ${reused} reused from an earlier attempt` : ""}${nulls > 0 ? `; ${nulls} returned null` : ""}${
+            commands === 0
+              ? ""
+              : `; ${commands} command${commands === 1 ? "" : "s"}${commandsReplayed > 0 ? `, ${commandsReplayed} replayed from an earlier attempt` : ""}`
+          }.`,
         );
         return yield* outcome;
       });
@@ -992,6 +1153,14 @@ const make = Effect.gen(function* () {
         const exit = yield* body.pipe(Effect.scoped, Effect.exit);
         if (Exit.isSuccess(exit)) {
           yield* removeWorkspaces;
+          // Only a failed or stopped run is retried, so a finished one's commands are not replayed.
+          yield* execs
+            .forget(coordinatorThreadId)
+            .pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("Could not drop a workflow's command results", { error }),
+              ),
+            );
           const value = exit.value;
           const result =
             value === null || value === undefined
