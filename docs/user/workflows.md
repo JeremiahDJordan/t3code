@@ -38,6 +38,11 @@ their agents; Retry carries on from where they stopped. With **Settings → Gene
 after restarts** on (on mobile, **Settings → Maintenance → Continue after restart**), a workflow
 continues by itself instead. See [Updating T3 Code](updating.md#before-you-update).
 
+A run keeps the script it started with. Editing the file afterwards changes neither a running
+workflow nor a Retry or continuation of it: each reruns the copy the run took when it started. To
+use your edits, ask the agent to run the file again. That is a new run, and all of its agents start
+fresh rather than reusing the earlier run's.
+
 The card also heads the workflow's own thread, which keeps the workflow's log as a timeline. That
 thread takes no messages; Stop and Retry on its card are how you steer it.
 
@@ -126,3 +131,78 @@ with a summary that says what the agent needs.
 A workflow cannot read the clock or random numbers, so a retry replays the same steps. A workflow
 coordinates agents rather than computing: a script that computes for more than a quarter second
 without waiting on an agent is stopped.
+
+### Example: parallel writers, then a merge
+
+`workspace(name)` gives agents a worktree on a branch of its own, so writers in different
+workspaces work at the same time. Combining their branches is the script's job: here each writer
+commits on its own branch, then one agent merges them in another workspace and resolves any
+conflicts, and a reviewer checks the result, with one round of fixes.
+
+```js
+export const meta = {
+  t3: 1,
+  name: "parallel-build",
+  description: "Builds the parts of PLAN.md side by side, then merges and checks them.",
+  roles: {
+    writer: { inherit: true },
+    reviewer: { inherit: true, interactionMode: "plan" },
+  },
+  phases: [{ title: "Build" }, { title: "Merge" }, { title: "Check" }],
+};
+
+const parts = ["api", "ui"];
+const branches = await parallel(
+  parts.map((part) => async () => {
+    const ws = await workspace(part);
+    const done = await agent(
+      `Implement the ${part} part of PLAN.md. Run its tests, then commit your work on this branch.`,
+      { as: "writer", label: `build ${part}`, phase: "Build", workspace: ws },
+    );
+    return done === null ? null : ws.branch;
+  }),
+);
+const built = branches.filter((branch) => branch !== null);
+
+const merged = await workspace("merged");
+await agent(
+  `Merge these branches into this branch, one at a time: ${built.join(", ")}. ` +
+    "Resolve each conflict so every part keeps working, run all the tests, and commit.",
+  { as: "writer", label: "merge", phase: "Merge", workspace: merged },
+);
+
+const verdict = {
+  type: "object",
+  required: ["ok", "problems"],
+  properties: {
+    ok: { type: "boolean" },
+    problems: { type: "array", items: { type: "string" } },
+  },
+};
+const review = () =>
+  agent(
+    "Review this branch against PLAN.md: is every part there, and did resolving a conflict drop or break anything?",
+    { as: "reviewer", label: "review", phase: "Check", workspace: merged, schema: verdict },
+  );
+let check = await review();
+if (check !== null && !check.ok) {
+  await agent(
+    `Fix these problems on this branch, run all the tests, and commit:\n${check.problems.join("\n")}`,
+    { as: "writer", label: "fix", phase: "Check", workspace: merged },
+  );
+  check = await review();
+}
+
+return {
+  summary: check?.ok
+    ? `Built and merged ${built.join(", ")} on ${merged.branch}.`
+    : `Merged ${built.join(", ")} on ${merged.branch}, with problems left.`,
+  branch: merged.branch,
+  missing: parts.filter((part, index) => branches[index] === null),
+  problems: check?.problems ?? ["The review did not finish."],
+};
+```
+
+When the run finishes, its worktrees are removed and every branch stays: review the branch the
+result names and merge it as you would any other. Retry reuses the writers that finished, so a
+failed merge does not rebuild the parts.
