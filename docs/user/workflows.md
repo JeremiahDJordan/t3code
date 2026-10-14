@@ -33,6 +33,10 @@ a long run.
 - **Copy script** and **Download** give you the exact script the run used. On mobile, Download opens
   the share sheet.
 
+When an agent's provider is only unavailable for a moment, because its model is at capacity,
+overloaded or rate limited, the workflow starts that agent again by itself after 30 seconds, then 2
+minutes, then 5 minutes, and its log says so. Retries do not count toward the run's agent limit.
+
 Restarting the server or the desktop app, which every update does, stops running workflows and
 their agents; Retry carries on from where they stopped. With **Settings → General → Continue threads
 after restarts** on (on mobile, **Settings → Maintenance → Continue after restart**), a workflow

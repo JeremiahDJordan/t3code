@@ -10,17 +10,24 @@ import {
   MessageId,
   type NodeId,
   type OrchestrationV2PlanStep,
+  type OrchestrationV2ProviderFailure,
   type OrchestrationV2Subagent,
   PlanId,
   type ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import {
+  latestExecutedRun,
+  latestRootProviderFailure,
+} from "@t3tools/shared/orchestrationV2ThreadError";
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex } from "@noble/hashes/utils";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -96,6 +103,46 @@ function workflowResultText(value: unknown): string {
   if (typeof summary !== "string" || summary.trim() === "") return block(value);
   return Object.keys(rest).length === 0 ? summary : `${summary}\n\n${block(rest)}`;
 }
+/** How long the engine waits before each automatic retry of an agent whose provider was unavailable. */
+const AGENT_RETRY_DELAYS = [
+  Duration.seconds(30),
+  Duration.minutes(2),
+  Duration.minutes(5),
+] as const;
+
+/**
+ * Waits out an automatic retry's delay. Tests replace it so a retry never
+ * waits on the clock.
+ */
+export const AgentRetryWait = Context.Reference<(delay: Duration.Duration) => Effect.Effect<void>>(
+  "t3/workflow/WorkflowEngine/AgentRetryWait",
+  { defaultValue: () => Effect.sleep },
+);
+
+/** Messages of providers that mark nothing retryable, for a model or service that is busy. */
+const BUSY_PROVIDER_MESSAGE =
+  /at capacity|overloaded|temporarily unavailable|service unavailable|too many requests/i;
+
+/**
+ * Whether a failure says the provider was only unavailable for now, so the
+ * same request may succeed shortly: the provider marked it retryable, the
+ * connection failed, or, from a provider that marks nothing, the model or
+ * service is busy. A usage limit counts only when marked retryable, since most
+ * wait hours for their reset.
+ */
+const isTransientFailure = (failure: OrchestrationV2ProviderFailure) =>
+  failure.retryable === true ||
+  (failure.retryable === null &&
+    failure.class !== "usage_limit" &&
+    (failure.class === "transport_error" ||
+      failure.code === "serverOverloaded" ||
+      BUSY_PROVIDER_MESSAGE.test(failure.message)));
+
+/** "30 s", "2 min". */
+const formatDelay = (delay: Duration.Duration) => {
+  const seconds = Math.round(Duration.toMillis(delay) / 1000);
+  return seconds < 60 || seconds % 60 !== 0 ? `${seconds} s` : `${seconds / 60} min`;
+};
 
 interface AgentCall {
   readonly prompt: string;
@@ -473,6 +520,24 @@ const make = Effect.gen(function* () {
   const sandbox = yield* WorkflowSandbox.WorkflowSandbox;
   const workspaces = yield* WorkflowWorkspaces.WorkflowWorkspaces;
   const execs = yield* WorkflowExec.WorkflowExec;
+  const retryWait = yield* AgentRetryWait;
+
+  /** The provider failure that ended a failed agent's run, when its provider reported one. */
+  const failureOf = (task: OrchestrationV2Subagent) =>
+    Effect.gen(function* () {
+      if (task.childThreadId === null) return null;
+      const { runs } = yield* threads.getThreadRecords(task.childThreadId, ["runs"]);
+      const run =
+        runs
+          .filter((candidate) => candidate.delegatedTaskId === task.id)
+          .toSorted((left, right) => right.ordinal - left.ordinal)[0] ?? latestExecutedRun(runs);
+      if (run === null) return null;
+      const { turnItems } = yield* threads.getThreadRecords(task.childThreadId, ["turnItems"], {
+        turnItemRunId: run.id,
+        turnItemTypes: ["error"],
+      });
+      return latestRootProviderFailure(run, turnItems);
+    }).pipe(Effect.orElseSucceed(() => null));
 
   const children = (threadId: ThreadId) =>
     threads
@@ -1025,10 +1090,10 @@ const make = Effect.gen(function* () {
               reused += 1;
               return yield* deliver(prior);
             }
-            // A live child from an earlier turn is awaited, not restarted.
-            const attached = prior !== undefined && !isTerminal(prior.status) ? prior : undefined;
-            if (attached === undefined && (yield* readOnlyChanged)) return null;
-            const firstAttempt = prior === undefined ? 1 : attemptOf(prior) + 1;
+            // A read-only workspace that changed fails the call before it starts again.
+            if ((prior === undefined || isTerminal(prior.status)) && (yield* readOnlyChanged)) {
+              return null;
+            }
             const checkout = workspace?.branch ?? "";
             // Agents in a read-only workspace run side by side whatever their role: none may write.
             const lock =
@@ -1085,59 +1150,91 @@ const make = Effect.gen(function* () {
                       }),
                 })
                 .pipe(Effect.exit);
-            const execute = Effect.gen(function* () {
-              if (attached !== undefined) return yield* watch(attached.id);
-              // A request refused on an earlier run stays refused under its id,
-              // so a rerun steps to the next attempt.
-              for (let taskAttempt = firstAttempt; ; taskAttempt += 1) {
-                const dispatched = yield* dispatchAttempt(taskAttempt);
-                if (Exit.isSuccess(dispatched)) return yield* watch(taskIdFor(taskAttempt));
-                if (
-                  isRefusedBefore(dispatched.cause) &&
-                  taskAttempt < firstAttempt + MAX_REFUSED_ATTEMPTS
-                ) {
-                  continue;
+            /**
+             * Runs one attempt of the call to its terminal row: awaits `attached`, a
+             * child an earlier turn left running, or starts `firstAttempt`.
+             * Undefined when the agent could not start.
+             */
+            const runAttempt = (
+              attached: OrchestrationV2Subagent | undefined,
+              firstAttempt: number,
+            ) => {
+              const execute = Effect.gen(function* () {
+                if (attached !== undefined) return yield* watch(attached.id);
+                // A request refused on an earlier run stays refused under its id,
+                // so a rerun steps to the next attempt.
+                for (let taskAttempt = firstAttempt; ; taskAttempt += 1) {
+                  const dispatched = yield* dispatchAttempt(taskAttempt);
+                  if (Exit.isSuccess(dispatched)) return yield* watch(taskIdFor(taskAttempt));
+                  if (
+                    isRefusedBefore(dispatched.cause) &&
+                    taskAttempt < firstAttempt + MAX_REFUSED_ATTEMPTS
+                  ) {
+                    continue;
+                  }
+                  yield* Effect.logWarning("Could not start a workflow agent", {
+                    coordinatorThreadId,
+                    cause: dispatched.cause,
+                  });
+                  return undefined;
                 }
-                yield* Effect.logWarning("Could not start a workflow agent", {
-                  coordinatorThreadId,
-                  cause: dispatched.cause,
-                });
-                return undefined;
+              });
+              // A writer waits for its checkout before taking a slot, so waiting
+              // writers never keep plan-mode agents from running. An agent left
+              // running by an earlier turn already holds its slot and its checkout.
+              const slotted =
+                attached !== undefined && heldSlots.has(attached.id)
+                  ? execute.pipe(Effect.ensuring(releaseHeld(attached.id)))
+                  : concurrency.withPermit(execute);
+              const where =
+                call.workspace === undefined ? "the checkout" : `workspace "${call.workspace}"`;
+              return lock === undefined
+                ? slotted
+                : attached !== undefined && heldCheckouts.has(attached.id)
+                  ? slotted.pipe(Effect.ensuring(releaseHeldCheckout(attached.id)))
+                  : lock
+                      .withPermitsIfAvailable(1)(slotted)
+                      .pipe(
+                        Effect.flatMap(
+                          Option.match({
+                            onNone: () =>
+                              log(`${label} waits for its turn in ${where}.`).pipe(
+                                Effect.andThen(lock.withPermit(slotted)),
+                              ),
+                            onSome: Effect.succeed,
+                          }),
+                        ),
+                      );
+            };
+            // A live child from an earlier turn is awaited, not restarted.
+            let attached = prior !== undefined && !isTerminal(prior.status) ? prior : undefined;
+            let firstAttempt = prior === undefined ? 1 : attemptOf(prior) + 1;
+            // An agent whose provider was only unavailable starts again after a
+            // delay, as the call's next attempt; it is not another agent toward
+            // the run's limit. A rerun starts the call's retries over.
+            for (let retry = 0; ; retry += 1) {
+              const finished = yield* runAttempt(attached, firstAttempt);
+              if (finished === undefined) {
+                nulls += 1;
+                unfinished += 1;
+                yield* log(`${label} could not start. agent() returned null.`);
+                return null;
               }
-            });
-            // A writer waits for its checkout before taking a slot, so waiting
-            // writers never keep plan-mode agents from running. An agent left
-            // running by an earlier turn already holds its slot and its checkout.
-            const slotted =
-              attached !== undefined && heldSlots.has(attached.id)
-                ? execute.pipe(Effect.ensuring(releaseHeld(attached.id)))
-                : concurrency.withPermit(execute);
-            const where =
-              call.workspace === undefined ? "the checkout" : `workspace "${call.workspace}"`;
-            const finished = yield* lock === undefined
-              ? slotted
-              : attached !== undefined && heldCheckouts.has(attached.id)
-                ? slotted.pipe(Effect.ensuring(releaseHeldCheckout(attached.id)))
-                : lock
-                    .withPermitsIfAvailable(1)(slotted)
-                    .pipe(
-                      Effect.flatMap(
-                        Option.match({
-                          onNone: () =>
-                            log(`${label} waits for its turn in ${where}.`).pipe(
-                              Effect.andThen(lock.withPermit(slotted)),
-                            ),
-                          onSome: Effect.succeed,
-                        }),
-                      ),
-                    );
-            if (finished === undefined) {
-              nulls += 1;
-              unfinished += 1;
-              yield* log(`${label} could not start. agent() returned null.`);
-              return null;
+              const delay = AGENT_RETRY_DELAYS[retry];
+              const failure =
+                finished.status === "failed" && delay !== undefined
+                  ? yield* failureOf(finished)
+                  : null;
+              if (delay === undefined || failure === null || !isTransientFailure(failure)) {
+                return yield* deliver(finished);
+              }
+              yield* log(
+                `${label} failed because its provider is unavailable (${truncate(failure.message, 300)}). Trying again in ${formatDelay(delay)}, retry ${retry + 1} of ${AGENT_RETRY_DELAYS.length}.`,
+              );
+              yield* retryWait(delay);
+              attached = undefined;
+              firstAttempt = attemptOf(finished) + 1;
             }
-            return yield* deliver(finished);
           }).pipe(
             Effect.mapError((error) =>
               WorkflowSandbox.isWorkflowScriptError(error)

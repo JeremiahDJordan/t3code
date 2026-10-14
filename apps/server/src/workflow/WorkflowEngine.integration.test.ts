@@ -30,6 +30,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FiberMap from "effect/FiberMap";
@@ -103,7 +104,11 @@ type FakeOutcome =
       /** What the provider reports it used, as Bob reports its task's Bobcoins. */
       readonly usage?: ThreadTokenUsageSnapshot;
     }
-  | { readonly fail: string };
+  | {
+      readonly fail: string;
+      /** What the provider says of retrying; false when unset. */
+      readonly retryable?: boolean | null;
+    };
 
 function providerSnapshot(
   instanceId: ProviderInstanceId,
@@ -259,7 +264,7 @@ function makeFakeAdapter(input: {
                           class: "provider_error",
                           message: outcome.fail,
                           code: null,
-                          retryable: false,
+                          retryable: outcome.retryable === undefined ? false : outcome.retryable,
                         },
                         threadDisposition: "reusable",
                       },
@@ -499,6 +504,10 @@ const withHarness = <A, E>(
     readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
     /** Runs before each thread read the orchestrator MCP service makes. */
     readonly beforeMcpRead?: Effect.Effect<void>;
+    /** Stands in for an automatic retry's delay; returns at once when unset. */
+    readonly retryWait?: (delay: Duration.Duration) => Effect.Effect<void>;
+    /** Stands in for running an exec() command; the journal stays real. */
+    readonly execRun?: WorkflowExec.WorkflowExec["Service"]["run"];
   },
   body: (harness: Harness) => Effect.Effect<A, E>,
 ) =>
@@ -616,7 +625,17 @@ const withHarness = <A, E>(
             layerSources,
             WorkflowSandbox.layerTest,
             layerWorkspaces,
-            WorkflowExec.layer.pipe(Layer.provide(Layer.merge(layerDatabase, layerConfig))),
+            Layer.effect(
+              WorkflowExec.WorkflowExec,
+              Effect.map(WorkflowExec.WorkflowExec, (real) =>
+                options.execRun === undefined ? real : { ...real, run: options.execRun },
+              ),
+            ).pipe(
+              Layer.provide(
+                WorkflowExec.layer.pipe(Layer.provide(Layer.merge(layerDatabase, layerConfig))),
+              ),
+            ),
+            Layer.succeed(WorkflowEngine.AgentRetryWait, options.retryWait ?? (() => Effect.void)),
           ),
         ),
       );
@@ -1014,6 +1033,90 @@ return { reads, writes, failed, capped }`,
       }),
   );
 
+  it.live("starts an agent again when its provider was only unavailable, then gives up", () =>
+    Effect.gen(function* () {
+      const turns = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
+      const delays = yield* Ref.make<ReadonlyArray<number>>([]);
+      return yield* withHarness(
+        {
+          name: "workflow-provider-retry",
+          retryWait: (delay) => Ref.update(delays, (all) => [...all, Duration.toMillis(delay)]),
+          behave: (turn) =>
+            Ref.modify(turns, (all) => {
+              const count = (all.get(turn.text) ?? 0) + 1;
+              return [count, new Map(all).set(turn.text, count)] as const;
+            }).pipe(
+              Effect.map((count): FakeOutcome => {
+                // A provider that marks nothing retryable, saying its model is busy.
+                if (turn.text === "busy") {
+                  return count <= 2
+                    ? { fail: "Selected model is at capacity.", retryable: null }
+                    : { text: "done at last" };
+                }
+                if (turn.text === "always busy") {
+                  return { fail: "Claude API is overloaded (529).", retryable: true };
+                }
+                if (turn.text === "broken") return { fail: "bad request", retryable: null };
+                return { text: "noted" };
+              }),
+            ),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const started = yield* harness.runWorkflow({
+              // Three calls under a limit of three agents: retries are not new agents.
+              source: String.raw`export const meta = { t3: 1, name: "provider-retry", limits: { agents: 3 } }
+const busy = await agent("busy")
+const always = await agent("always busy")
+const broken = await agent("broken")
+return { busy, always, broken }`,
+            });
+            if (started.status !== "started") return yield* Effect.die("not started");
+            yield* harness.parentWoken;
+            const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+            const coordinator = parent.subagents.find((task) => task.id === started.taskId)!;
+            expect(coordinator.status).toBe("completed");
+            expect(workflowValue(coordinator.result)).toEqual({
+              busy: "done at last",
+              always: null,
+              broken: null,
+            });
+            // Two retries for "busy", all three for "always busy", none for a request the
+            // provider refused for itself.
+            expect(Object.fromEntries(yield* Ref.get(turns))).toMatchObject({
+              busy: 3,
+              "always busy": 4,
+              broken: 1,
+            });
+            expect(yield* Ref.get(delays)).toEqual([30_000, 120_000, 30_000, 120_000, 300_000]);
+            // Each retry is the call's next attempt.
+            const agents = yield* harness.coordinatorChildren(started.childThreadId);
+            expect(
+              agents
+                .filter((task) => task.prompt === "always busy")
+                .map((task) => (task.t3Workflow?.kind === "agent" ? task.t3Workflow.attempt : 0))
+                .toSorted(),
+            ).toEqual([1, 2, 3, 4]);
+            const log = yield* harness.threads.getThreadRecords(
+              started.childThreadId,
+              ["turnItems"],
+              { turnItemTypes: ["assistant_message"] },
+            );
+            const lines = log.turnItems.flatMap((item) =>
+              item.type === "assistant_message" ? [item.text] : [],
+            );
+            expect(lines).toContain(
+              "busy failed because its provider is unavailable (Selected model is at capacity.). Trying again in 30 s, retry 1 of 3.",
+            );
+            expect(
+              lines.some((line) => line.includes("Trying again in 5 min, retry 3 of 3.")),
+            ).toBe(true);
+          }),
+      );
+    }),
+  );
+
   it.live("reruns after an interruption, reusing finished agents and waiting on live ones", () =>
     Effect.gen(function* () {
       const turns = yield* Ref.make<ReadonlyMap<string, number>>(new Map());
@@ -1341,6 +1444,43 @@ return result`,
             expect(row.result).toBe("fine");
             expect(yield* Ref.get(attempts)).toBe(2);
             expect(yield* harness.wakeCount).toBe(2);
+          }),
+      );
+    }),
+  );
+
+  it.live("runs a command in a read-only workspace as read-only", () =>
+    Effect.gen(function* () {
+      const asked: Array<{ readonly command: string; readonly writable: boolean }> = [];
+      return yield* withHarness(
+        {
+          name: "workflow-exec-read-only",
+          behave: () => Effect.succeed({ text: "noted" }),
+          execRun: (input) =>
+            Effect.sync(() => {
+              asked.push({ command: input.command, writable: input.workspace });
+              return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+            }),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const started = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "exec-read-only" }
+const look = await workspace("look", { readOnly: true })
+const work = await workspace("work")
+await exec("in look", { workspace: look })
+await exec("in work", { workspace: work })
+await exec("in checkout")
+return "done"`,
+            });
+            if (started.status !== "started") return yield* Effect.die("not started");
+            yield* harness.parentWoken;
+            expect(asked).toEqual([
+              { command: "in look", writable: false },
+              { command: "in work", writable: true },
+              { command: "in checkout", writable: false },
+            ]);
           }),
       );
     }),
