@@ -12,6 +12,7 @@ import {
   bobProcessSandboxSpawn,
   bobSandboxAvailable,
   bobSandboxFolderSuggestion,
+  commandSandboxSpawn,
   makeBobSandbox,
   NO_BOB_SANDBOX_RULES,
   type BobSandboxMode,
@@ -982,6 +983,145 @@ describe("bobSandboxFolderSuggestion", () => {
     expect(bobSandboxFolderSuggestion("/opt/homebrew/bin/x", input)).toBeUndefined();
     expect(
       bobSandboxFolderSuggestion(NodePath.join(workspace, "src", "a.ts"), input),
+    ).toBeUndefined();
+  });
+});
+
+describe.skipIf(!available)("commandSandboxSpawn", () => {
+  /** A repository with a linked worktree, as a workflow's workspace is, and a home with secrets. */
+  function setUpRepository() {
+    const base = NodeFS.mkdtempSync(NodePath.join(root, "command-"));
+    const home = NodePath.join(base, "home");
+    const repository = NodePath.join(base, "repo");
+    const worktree = NodePath.join(base, "t3", "worktrees", "ws");
+    const temporary = NodePath.join(base, "tmp");
+    for (const folder of [
+      NodePath.join(home, ".ssh"),
+      NodePath.join(home, "Library", "Caches"),
+      repository,
+      temporary,
+    ]) {
+      NodeFS.mkdirSync(folder, { recursive: true });
+    }
+    NodeFS.writeFileSync(NodePath.join(home, ".ssh", "id_ed25519"), "secret");
+    NodeFS.writeFileSync(NodePath.join(repository, "README.md"), "readme");
+    const git = (...args: Array<string>) =>
+      NodeChildProcess.execFileSync(
+        "git",
+        ["-c", "user.name=T3", "-c", "user.email=t3@example.com", ...args],
+        { cwd: repository, encoding: "utf8" },
+      );
+    git("init", "-q", "-b", "main");
+    git("add", ".");
+    git("commit", "-qm", "init");
+    git("worktree", "add", "-q", "-b", "ws", worktree);
+    const environment = { ...process.env, HOME: home, TMPDIR: temporary };
+    const run = (
+      cwd: string,
+      command: string,
+      options: { readonly mode: BobSandboxMode; readonly network?: boolean },
+    ) => {
+      const spawn = commandSandboxSpawn({
+        platform: HostProcess.Platform.defaultValue(),
+        command,
+        cwd,
+        mode: options.mode,
+        network: options.network ?? false,
+        environment,
+        cacheDir: NodePath.join(base, "t3", "caches"),
+        stateDir: NodePath.join(base, "t3", "userdata"),
+      })!;
+      return NodeChildProcess.spawnSync(spawn.command, spawn.args, {
+        cwd,
+        env: environment,
+        encoding: "utf8",
+      });
+    };
+    return { home, repository, worktree, temporary, git, run };
+  }
+
+  it("writes only a worktree, the git folders its commits need, temporary folders and caches", () => {
+    const { home, repository, worktree, temporary, git, run } = setUpRepository();
+    const inWorktree = (command: string) => run(worktree, command, { mode: "workspace-write" });
+    expect(inWorktree("echo hi > made.txt").status).toBe(0);
+    const commit = inWorktree(
+      "git add made.txt && git -c user.name=T3 -c user.email=t3@example.com commit -qm made",
+    );
+    expect(commit.status, commit.stderr).toBe(0);
+    expect(git("log", "--format=%s", "ws")).toBe("made\ninit\n");
+    expect(inWorktree(`echo x > ${NodePath.join(temporary, "t.txt")}`).status).toBe(0);
+    expect(inWorktree(`mkdir ${NodePath.join(home, "Library", "Caches", "tool")}`).status).toBe(0);
+    // Not the base checkout, its git configuration, or where the worktree says its repository is.
+    const gitDir = NodePath.join(repository, ".git", "worktrees", "ws");
+    for (const target of [
+      NodePath.join(repository, "README.md"),
+      NodePath.join(repository, ".git", "config"),
+      NodePath.join(repository, ".git", "hooks", "pre-commit"),
+      NodePath.join(gitDir, "commondir"),
+      NodePath.join(gitDir, "gitdir"),
+      NodePath.join(gitDir, "config.worktree"),
+      NodePath.join(worktree, ".git"),
+      NodePath.join(home, "escaped.txt"),
+    ]) {
+      expect(inWorktree(`echo x > ${target}`).status, target).not.toBe(0);
+    }
+    expect(NodeFS.readFileSync(NodePath.join(repository, "README.md"), "utf8")).toBe("readme");
+    expect(inWorktree(`cat ${NodePath.join(home, ".ssh", "id_ed25519")}`).stdout).toBe("");
+  });
+
+  it("keeps a read-only checkout unchanged, even inside a temporary folder", () => {
+    const { worktree, temporary, run } = setUpRepository();
+    const checkout = NodePath.join(temporary, "checkout");
+    NodeFS.mkdirSync(checkout);
+    NodeFS.writeFileSync(NodePath.join(checkout, "README.md"), "readme");
+    for (const cwd of [worktree, checkout]) {
+      expect(run(cwd, "echo x > made.txt", { mode: "read-only" }).status, cwd).not.toBe(0);
+      expect(NodeFS.existsSync(NodePath.join(cwd, "made.txt"))).toBe(false);
+      expect(run(cwd, "cat README.md", { mode: "read-only" }).stdout).toBe("readme");
+    }
+    const elsewhere = `echo x > ${NodePath.join(temporary, "t.txt")}`;
+    expect(run(checkout, elsewhere, { mode: "read-only" }).status).toBe(0);
+  });
+
+  it("reaches other machines only when asked, and never this one", async () => {
+    const { worktree, run } = setUpRepository();
+    const server = NodeNet.createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as NodeNet.AddressInfo).port;
+    const connect = `${JSON.stringify(process.execPath)} -e "require('net').connect(${port}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(3))"`;
+    for (const network of [false, true]) {
+      expect(run(worktree, connect, { mode: "workspace-write", network }).status).toBe(3);
+    }
+    server.close();
+    const profileOf = (network: boolean) =>
+      commandSandboxSpawn({
+        platform: HostProcess.Platform.defaultValue(),
+        command: "true",
+        cwd: worktree,
+        mode: "workspace-write",
+        network,
+        environment: { HOME: root, PATH: "/usr/bin:/bin" },
+        cacheDir: NodePath.join(root, "caches"),
+        stateDir: NodePath.join(root, "state"),
+      })!.args[1]!;
+    expect(profileOf(true)).toContain("(allow network-outbound)");
+    expect(profileOf(false)).not.toContain("network-outbound");
+  });
+});
+
+describe("commandSandboxSpawn without a sandbox", () => {
+  it("gives none where the host has no sandbox", () => {
+    expect(
+      commandSandboxSpawn({
+        platform: "linux",
+        command: "true",
+        cwd: root,
+        mode: "read-only",
+        network: false,
+        environment: { HOME: root, PATH: "/usr/bin:/bin" },
+        cacheDir: root,
+        stateDir: root,
+      }),
     ).toBeUndefined();
   });
 });
