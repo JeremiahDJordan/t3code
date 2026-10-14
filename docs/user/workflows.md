@@ -105,6 +105,12 @@ did.
 Workflows written for Claude Code's Workflow tool run too, except for `agentType`, `budget` and
 nested workflows.
 
+What the script returns is the workflow's result. Text reads as written, and anything else as a
+JSON block. An object with a text `summary` field, such as `return { summary, findings, branch }`,
+opens the result with that summary and lists its other fields after it. An agent reads at most
+20,000 characters of a result at a time and reads a longer one in parts, so lead a large result
+with a summary that says what the agent needs.
+
 A workflow cannot read the clock or random numbers, so a retry replays the same steps. A workflow
 coordinates agents rather than computing: a script that computes for more than a quarter second
 without waiting on an agent is stopped.

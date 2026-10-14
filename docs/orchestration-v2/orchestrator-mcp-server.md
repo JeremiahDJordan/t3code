@@ -307,7 +307,10 @@ Starts a workflow script (`source`, or `file` in the thread's workspace or its
 attachments) as a delegated task driven by the hidden `t3-workflow` provider, and
 returns its `taskId` at once. `dryRun` reports the phases, clamped limits and role
 bindings; a role that cannot bind returns `unbound_roles` with candidates and starts
-nothing unless `unboundRoles: "inherit"`. See [Workflows](../internals/workflows.md).
+nothing unless `unboundRoles: "inherit"`. A script that returns an object with a
+string `summary` gets a result that opens with that summary, so the part
+`task_status` cuts from a long result still carries it. See
+[Workflows](../internals/workflows.md).
 
 ### `task_status`
 
@@ -319,6 +322,17 @@ finishes. Its published `summary` and result transfer then remain stable across
 later follow-ups. `hasPendingChildRuns` reports later queued or executing turns;
 `latestTerminal*` exposes later executed, non-monitor results without replacing
 the published task result.
+
+`summary` and `latestTerminalSummary` carry at most 20,000 characters
+(`ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS`) in any reply, `delegate_task`'s
+included, since one 164,000-character workflow result overflowed a calling
+agent's tool output. A longer text is cut and ends with a note naming the
+`resultOffset` that `task_status` reads the next part from; the task row keeps
+the whole text. Paging over MCP works the same for every provider and sandbox,
+where a results file would need a path each agent's sandbox and Bob's Auto
+review let it read (both treat `.t3` folders as settings). A long
+`latestTerminalSummary` identical to `summary` is replaced by a note rather
+than sent twice.
 
 ### `task_cancel`
 

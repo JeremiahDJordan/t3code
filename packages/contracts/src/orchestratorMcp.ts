@@ -215,6 +215,15 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
 });
 export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTaskInput.Type;
 
+/**
+ * The most characters of a task's result text one MCP reply carries. A longer
+ * result is cut there and read on with task_status's resultOffset, so one
+ * large result cannot overflow the calling agent's tool output.
+ */
+export const ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS = 20_000;
+
+const pagedResultDescription = `At most ${ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS.toLocaleString("en-US")} characters: a longer text is cut there and ends with a note giving the resultOffset task_status reads on from.`;
+
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
   childThreadId: ThreadId,
@@ -225,11 +234,15 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   hasPendingChildRuns: Schema.Boolean,
   latestTerminalRunId: Schema.NullOr(RunId),
   latestTerminalStatus: Schema.NullOr(OrchestratorMcpTerminalDelegatedTaskStatus),
-  latestTerminalSummary: Schema.NullOr(Schema.String),
+  latestTerminalSummary: Schema.NullOr(Schema.String).annotate({
+    description: pagedResultDescription,
+  }),
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
-  summary: Schema.NullOr(Schema.String),
+  summary: Schema.NullOr(Schema.String).annotate({
+    description: `The task's result. ${pagedResultDescription}`,
+  }),
   /**
    * For a task with a resultSchema, once its result is available: the value
    * it returned with t3_task_return, else the last JSON object in its final
@@ -378,6 +391,12 @@ export type OrchestratorMcpWorkflowRunResult = typeof OrchestratorMcpWorkflowRun
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
+  resultOffset: Schema.optional(
+    NonNegativeInt.annotate({
+      description:
+        "For a result cut at its size limit: the character to read on from, as the note ending the previous part gives it. Default 0.",
+    }),
+  ),
 });
 export type OrchestratorMcpTaskStatusInput = typeof OrchestratorMcpTaskStatusInput.Type;
 

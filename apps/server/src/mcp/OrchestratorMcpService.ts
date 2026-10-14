@@ -12,6 +12,7 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2TurnItem,
+  ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS,
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpCreateThreadsInput,
@@ -145,9 +146,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTaskInput,
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
+  /** Result texts are cut to a part; `resultOffset` picks which. */
   readonly taskStatus: (
     scope: McpInvocationScope,
     taskId: NodeId,
+    resultOffset?: number,
   ) => Effect.Effect<OrchestratorMcpDelegateTaskResult, OrchestratorMcpFailure>;
   /** Records the calling child's structured result, checked against its task's resultSchema. */
   readonly returnTaskResult: (
@@ -344,6 +347,49 @@ function invalidOptionSelections(
     }
   }
   return problems;
+}
+
+/**
+ * One reply's part of a result text: whole when it fits the limit, else the
+ * part from `offset`, ending with a note saying where the next part starts.
+ */
+function resultPart(text: string, offset: number): string {
+  if (text.length <= ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS) return text;
+  const start = Math.min(offset, text.length);
+  let end = Math.min(start + ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS, text.length);
+  // Never split a surrogate pair across two parts.
+  const last = text.charCodeAt(end - 1);
+  if (end < text.length && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  const total = text.length;
+  const note =
+    end < total
+      ? `[T3: characters ${start}-${end} of ${total} shown. Call task_status with resultOffset: ${end} for the next part.]`
+      : `[T3: characters ${start}-${end} of ${total}, the end of this result.]`;
+  return `${text.slice(start, end)}\n\n${note}`;
+}
+
+/**
+ * Bounds a task read's result texts for an MCP reply, so one large result
+ * cannot overflow the calling agent's tool output. The task row keeps the
+ * whole text, which `resultOffset` pages through.
+ */
+function pageTaskResult(
+  result: OrchestratorMcpDelegateTaskResult,
+  resultOffset = 0,
+): OrchestratorMcpDelegateTaskResult {
+  const { summary, latestTerminalSummary } = result;
+  return {
+    ...result,
+    summary: summary === null ? null : resultPart(summary, resultOffset),
+    // The common case repeats the task's own result; one copy is enough.
+    latestTerminalSummary:
+      latestTerminalSummary === null
+        ? null
+        : latestTerminalSummary === summary &&
+            latestTerminalSummary.length > ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS
+          ? "[T3: the same text as summary.]"
+          : resultPart(latestTerminalSummary, resultOffset),
+  };
 }
 
 function taskStatusForRun(
@@ -2226,11 +2272,11 @@ const make = Effect.gen(function* () {
             ),
           );
         return yield* readTask(scope, taskId, Option.isNone(waited), true);
-      }),
-    taskStatus: (callerScope, taskId) =>
+      }).pipe(Effect.map((result) => pageTaskResult(result))),
+    taskStatus: (callerScope, taskId, resultOffset) =>
       Effect.gen(function* () {
         const scope = yield* requireThreadScope(callerScope, "task_status");
-        return yield* readTask(scope, taskId, false, true);
+        return pageTaskResult(yield* readTask(scope, taskId, false, true), resultOffset);
       }),
     returnTaskResult: (callerScope, input) =>
       Effect.gen(function* () {

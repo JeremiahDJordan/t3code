@@ -5,6 +5,7 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
+  ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS,
   type ModelSelection,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -1376,6 +1377,35 @@ return verdict`,
           }),
       );
     }),
+  );
+
+  it.live("opens a result with its summary, which task_status's cut part keeps", () =>
+    withHarness(
+      { name: "workflow-summary", behave: () => Effect.succeed({ text: "noted" }) },
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.startParent;
+          const started = yield* harness.runWorkflow({
+            source: String.raw`export const meta = { t3: 1, name: "summary" }
+return { findings: "z".repeat(30000), summary: "Two findings survived.", count: 2 }`,
+          });
+          if (started.status !== "started") return yield* Effect.die("not started");
+          yield* harness.parentWoken;
+          const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+          const result = parent.subagents.find((task) => task.id === started.taskId)!.result!;
+          // The summary leads as prose; the other fields follow as JSON.
+          expect(result.startsWith("Two findings survived.\n\n```json\n")).toBe(true);
+          expect(workflowValue(result.slice("Two findings survived.\n\n".length))).toEqual({
+            findings: "z".repeat(30000),
+            count: 2,
+          });
+          const read = yield* harness.orchestratorMcp.taskStatus(parentScope, started.taskId);
+          expect(read.summary!.startsWith("Two findings survived.")).toBe(true);
+          expect(read.summary).toContain(
+            `Call task_status with resultOffset: ${ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS}`,
+          );
+        }),
+    ),
   );
 
   it.live("refuses an agent() schema it cannot check before starting the agent", () =>
