@@ -535,6 +535,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       return { kind: "working", startedAt: props.activeWorkStartedAt };
     }
     if (pendingBackgroundWork !== null && contentPresentationKind === "ready") {
+      // One subagent opens its own thread, as its row in the feed does; several, or commands
+      // beside it, open the agents sheet, which lists them.
+      const subagentThreads = pendingBackgroundWork.items.flatMap((item) =>
+        item.childThreadId === undefined ? [] : [item.childThreadId],
+      );
+      const onlyThread = pendingBackgroundWork.items.length === 1 ? subagentThreads[0] : undefined;
       return {
         kind: "background",
         label: pendingBackgroundWork.title,
@@ -542,6 +548,20 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           .map((item) => item.label)
           .join(", ")}`,
         waiting: pendingBackgroundWork.waiting,
+        onPress: () => {
+          Keyboard.dismiss();
+          if (onlyThread !== undefined) {
+            navigation.navigate("Thread", {
+              environmentId: props.environmentId,
+              threadId: onlyThread,
+            });
+            return;
+          }
+          navigation.navigate("ThreadAgents", {
+            environmentId: props.environmentId,
+            threadId: props.selectedThread.id,
+          });
+        },
       };
     }
     if (props.selectedThread.goal !== null && contentPresentationKind === "ready") {
