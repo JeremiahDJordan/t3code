@@ -138,10 +138,13 @@ const isTransientFailure = (failure: OrchestrationV2ProviderFailure) =>
       failure.code === "serverOverloaded" ||
       BUSY_PROVIDER_MESSAGE.test(failure.message)));
 
-/** "30 s", "2 min". */
-const formatDelay = (delay: Duration.Duration) => {
-  const seconds = Math.round(Duration.toMillis(delay) / 1000);
-  return seconds < 60 || seconds % 60 !== 0 ? `${seconds} s` : `${seconds / 60} min`;
+/** "45 s", "2 min", "2 min 10 s", "1 h 3 min". */
+const formatDuration = (millis: number) => {
+  const seconds = Math.round(millis / 1000);
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes >= 60) return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  return seconds % 60 === 0 ? `${minutes} min` : `${minutes} min ${seconds % 60} s`;
 };
 
 interface AgentCall {
@@ -536,6 +539,77 @@ const formatSpend = (amount: number) => Number(amount.toFixed(2)).toLocaleString
 const joinParts = (parts: ReadonlyArray<string>) =>
   parts.length <= 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
 
+/** "850", "12.3k", "1.2M". */
+const formatTokens = (tokens: number) =>
+  tokens >= 1_000_000
+    ? `${Number((tokens / 1_000_000).toFixed(1))}M`
+    : tokens >= 1_000
+      ? `${Number((tokens / 1_000).toFixed(1))}k`
+      : `${tokens}`;
+
+/** What one agent() call used over all its attempts, summed as its rows are read. */
+interface AgentUsage {
+  readonly label: string;
+  readonly role: string | null;
+  startedAt: number;
+  attempts: number;
+  durationMs: number;
+  tokens: number;
+  readonly costs: Map<string, number>;
+}
+
+/** Agents a finished run's result lists one by one; past this, it sums them by role. */
+const MAX_LISTED_AGENTS = 8;
+
+/** "2 min 10 s, 12.3k tokens, 1.25 Bobcoins". */
+const formatUsage = (usage: Pick<AgentUsage, "durationMs" | "tokens" | "costs">) =>
+  [
+    formatDuration(usage.durationMs),
+    ...(usage.tokens > 0 ? [`${formatTokens(usage.tokens)} tokens`] : []),
+    ...[...usage.costs].map(([currency, amount]) => `${formatSpend(amount)} ${currency}`),
+  ].join(", ");
+
+/** "- review: api (reviewer, 2 attempts): 2 min 10 s, 12.3k tokens". */
+const agentUsageLine = (usage: AgentUsage) => {
+  const facts = [
+    ...(usage.role === null ? [] : [usage.role]),
+    ...(usage.attempts > 1 ? [`${usage.attempts} attempts`] : []),
+  ];
+  return `- ${usage.label}${facts.length === 0 ? "" : ` (${facts.join(", ")})`}: ${formatUsage(usage)}`;
+};
+
+/**
+ * The time and usage of a run's agents for its result: one line each, or one
+ * per role when there are many, which leaves the full list to the run's log.
+ */
+const agentUsageSummary = (agents: ReadonlyArray<AgentUsage>) => {
+  if (agents.length <= MAX_LISTED_AGENTS) {
+    return ["Time and usage per agent:", ...agents.map(agentUsageLine)].join("\n");
+  }
+  const byRole = new Map<
+    string,
+    { count: number; durationMs: number; tokens: number; costs: Map<string, number> }
+  >();
+  for (const agent of agents) {
+    const role = agent.role ?? "no role";
+    const total = byRole.get(role) ?? { count: 0, durationMs: 0, tokens: 0, costs: new Map() };
+    total.count += 1;
+    total.durationMs += agent.durationMs;
+    total.tokens += agent.tokens;
+    for (const [currency, amount] of agent.costs) {
+      total.costs.set(currency, (total.costs.get(currency) ?? 0) + amount);
+    }
+    byRole.set(role, total);
+  }
+  return [
+    "Time and usage per role, summed over its agents (the run's log lists each agent):",
+    ...[...byRole].map(
+      ([role, total]) =>
+        `- ${role}, ${total.count} agent${total.count === 1 ? "" : "s"}: ${formatUsage(total)}`,
+    ),
+  ].join("\n");
+};
+
 const make = Effect.gen(function* () {
   const host = yield* WorkflowEngineHost;
   const threads = yield* ThreadManagementService.ThreadManagementService;
@@ -575,27 +649,69 @@ const make = Effect.gen(function* () {
       );
 
   /**
-   * What a run's agents spent, from their threads' provider usage, in each
-   * billing unit a provider reports, such as Bob's Bobcoins. Every attempt's
-   * agents count, so after a Retry it is the whole run's total, and says so.
-   * Undefined when they reported none, or the threads could not be read.
+   * What a run's agents used, from their rows and their threads' provider
+   * usage. `agents` has each agent() call's time across its attempts, the
+   * tokens its provider reported (processed, else in its context) and what it
+   * spent. `spent` sums the spend in each billing unit a provider reports,
+   * such as Bob's Bobcoins; every attempt counts, so after a Retry it is the
+   * whole run's total, and says so. Undefined when the agents reported none.
+   * Nothing at all when the threads could not be read.
    */
-  const spentBy = (threadId: ThreadId) =>
+  const usageBy = (threadId: ThreadId) =>
     Effect.gen(function* () {
       const costs = new Map<string, number>();
+      const byCall = new Map<string, AgentUsage>();
       for (const task of yield* children(threadId)) {
         if (task.childThreadId === null) continue;
+        const key = task.t3Workflow?.kind === "agent" ? (task.t3Workflow.call ?? task.id) : task.id;
+        const startedAt = task.startedAt === null ? 0 : DateTime.toEpochMillis(task.startedAt);
+        const usage: AgentUsage = byCall.get(key) ?? {
+          label: task.title ?? truncate(task.prompt.split("\n")[0]!.trim(), 80),
+          role: task.t3Workflow?.kind === "agent" ? task.t3Workflow.role : null,
+          startedAt,
+          attempts: 0,
+          durationMs: 0,
+          tokens: 0,
+          costs: new Map<string, number>(),
+        };
+        usage.attempts += 1;
+        usage.startedAt = Math.min(usage.startedAt, startedAt);
+        if (task.startedAt !== null && task.completedAt !== null) {
+          usage.durationMs += Math.max(
+            0,
+            DateTime.toEpochMillis(task.completedAt) - DateTime.toEpochMillis(task.startedAt),
+          );
+        }
         const records = yield* threads.getThreadRecords(task.childThreadId, ["providerThreads"]);
         for (const { contextUsage } of records.providerThreads) {
-          const cost = contextUsage?.cost;
-          if (cost) costs.set(cost.currency, (costs.get(cost.currency) ?? 0) + cost.amount);
+          if (!contextUsage) continue;
+          usage.tokens += contextUsage.totalProcessedTokens ?? contextUsage.usedTokens;
+          const cost = contextUsage.cost;
+          if (!cost) continue;
+          costs.set(cost.currency, (costs.get(cost.currency) ?? 0) + cost.amount);
+          usage.costs.set(cost.currency, (usage.costs.get(cost.currency) ?? 0) + cost.amount);
         }
+        byCall.set(key, usage);
       }
+      const agents: ReadonlyArray<AgentUsage> = [...byCall.values()].toSorted(
+        (left, right) => left.startedAt - right.startedAt,
+      );
       const parts = [...costs].map(([currency, amount]) => `${formatSpend(amount)} ${currency}`);
-      if (parts.length === 0) return undefined;
+      if (parts.length === 0) return { spent: undefined, agents };
       const { runs } = yield* threads.getThreadRecords(threadId, ["runs"]);
-      return `Its agents spent ${joinParts(parts)}${runs.length > 1 ? " in total, across attempts" : ""}.`;
-    }).pipe(Effect.orElseSucceed(() => undefined));
+      return {
+        spent: `Its agents spent ${joinParts(parts)}${runs.length > 1 ? " in total, across attempts" : ""}.`,
+        agents,
+      };
+    }).pipe(
+      Effect.orElseSucceed(() => ({
+        spent: undefined,
+        agents: [] as ReadonlyArray<AgentUsage>,
+      })),
+    );
+
+  /** The total spend line of `usageBy`. */
+  const spentBy = (threadId: ThreadId) => usageBy(threadId).pipe(Effect.map(({ spent }) => spent));
 
   /**
    * Resolves each child's row once it is terminal, from one event stream per
@@ -1278,7 +1394,7 @@ const make = Effect.gen(function* () {
                 return deliver(call, yield* outcomeOf(finished));
               }
               yield* log(
-                `${label} failed because its provider is unavailable (${truncate(failure.message, 300)}). Trying again in ${formatDelay(delay)}, retry ${retry + 1} of ${AGENT_RETRY_DELAYS.length}.`,
+                `${label} failed because its provider is unavailable (${truncate(failure.message, 300)}). Trying again in ${formatDuration(Duration.toMillis(delay))}, retry ${retry + 1} of ${AGENT_RETRY_DELAYS.length}.`,
               );
               yield* retryWait(delay);
               attached = undefined;
@@ -1475,13 +1591,20 @@ const make = Effect.gen(function* () {
                     ? [`- and ${missed.length - MAX_LISTED_MISSES} more`]
                     : []),
                 ];
-          const spent = yield* spentBy(coordinatorThreadId);
+          const { spent, agents } = yield* usageBy(coordinatorThreadId);
+          // Many agents read as one line per role in the result; the log keeps each one.
+          if (agents.length > MAX_LISTED_AGENTS) {
+            yield* out.message(
+              ["Time and usage per agent:", ...agents.map(agentUsageLine)].join("\n"),
+            );
+          }
           yield* Effect.uninterruptible(
             out
               .message(
                 [
                   result,
                   ...(spent === undefined ? [] : [spent]),
+                  ...(agents.length === 0 ? [] : [agentUsageSummary(agents)]),
                   ...(notes.length === 0 ? [] : [notes.join("\n")]),
                 ].join("\n\n"),
               )

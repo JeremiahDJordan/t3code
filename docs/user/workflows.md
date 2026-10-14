@@ -122,7 +122,9 @@ full conversation with its provider and is billed like one. A workflow that send
 every agent pays for that plan once per agent.
 
 When a run ends, its result says what its agents spent where their providers report it, such as
-Bob Shell's Bobcoins. After a Retry the figure covers every attempt.
+Bob Shell's Bobcoins, and how long each agent worked and the tokens its provider reported. With more
+than 8 agents the result sums them by role, and the workflow's thread lists each one. After a Retry
+the figures cover every attempt.
 
 ## Writing a workflow
 

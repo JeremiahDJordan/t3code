@@ -92,6 +92,9 @@ function workflowValue(result: string | null | undefined): unknown {
   return JSON.parse(fenced[1]!);
 }
 
+/** What a finished workflow's script returned, before the paragraphs the engine adds. */
+const scriptResult = (result: string | null | undefined) => result?.split("\n\n")[0];
+
 /** What a fake provider turn sees and how it ends. */
 interface FakeTurn {
   readonly instanceId: ProviderInstanceId;
@@ -990,7 +993,7 @@ return { reads, writes, failed, capped }`,
               const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
               const coordinator = parent.subagents.find((task) => task.id === started.taskId)!;
               // The script carried on past the cap, so its result says what the cap cut.
-              const [result, note] = coordinator.result!.split("\n\n");
+              const [result, usage, note] = coordinator.result!.split("\n\n");
               expect(workflowValue(result)).toEqual({
                 reads: ["READ 1", "READ 2", "READ 3"],
                 writes: ["WRITE 1", "WRITE 2"],
@@ -1002,6 +1005,19 @@ return { reads, writes, failed, capped }`,
                   message: "This run reached its limit of 6 agents.",
                 },
               });
+              // Six agents ran, each listed with its time; the capped call never did.
+              const [heading, ...agentLines] = usage!.split("\n");
+              expect(heading).toBe("Time and usage per agent:");
+              expect(
+                agentLines.map((line) => line.replace(/: \d+ s$/, ": N s")).toSorted(),
+              ).toEqual([
+                "- fail please (reader): N s",
+                "- read 1 (reader): N s",
+                "- read 2 (reader): N s",
+                "- read 3 (reader): N s",
+                "- write 1 (writer): N s",
+                "- write 2 (writer): N s",
+              ]);
               expect(note).toBe(
                 [
                   "Note: agent() returned null for 2 calls:",
@@ -1314,6 +1330,56 @@ return await parallel([() => agent("one"), () => agent("two")])`,
           expect(row.status).toBe("completed");
           // One attempt: nothing to total across.
           expect(row.result).toContain("Its agents spent 2.5 Bobcoins.");
+          // Each agent's time, the tokens its provider processed and what it spent.
+          expect(row.result).toMatch(
+            /\n\nTime and usage per agent:\n- one: \d+ s, 5k tokens, 1\.25 Bobcoins\n- two: \d+ s, 5k tokens, 1\.25 Bobcoins$/,
+          );
+        }),
+    ),
+  );
+
+  it.live("sums many agents' time and usage by role, leaving each agent to the log", () =>
+    withHarness(
+      {
+        name: "workflow-usage-by-role",
+        behave: () =>
+          Effect.succeed({
+            text: "done",
+            usage: { usedTokens: 2_000, cost: { amount: 0.5, currency: "Bobcoins" } },
+          }),
+      },
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.startParent;
+          const started = yield* harness.runWorkflow({
+            source: String.raw`export const meta = {
+  t3: 1,
+  name: "usage-by-role",
+  roles: { reviewer: { inherit: true, interactionMode: "plan" }, judge: { inherit: true, interactionMode: "plan" } },
+}
+await parallel([1, 2, 3, 4, 5, 6].map((n) => () => agent("review " + n, { as: "reviewer" })))
+await parallel([1, 2, 3].map((n) => () => agent("judge " + n, { as: "judge" })))
+return "ok"`,
+          });
+          if (started.status !== "started") return yield* Effect.die("not started");
+          yield* harness.parentWoken;
+          const records = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+          const row = records.subagents.find((task) => task.id === started.taskId)!;
+          // Without a processed total, the tokens are those in each agent's context.
+          expect(row.result).toMatch(
+            /^ok\n\nIts agents spent 4\.5 Bobcoins\.\n\nTime and usage per role, summed over its agents \(the run's log lists each agent\):\n- reviewer, 6 agents: \d+ s, 12k tokens, 3 Bobcoins\n- judge, 3 agents: \d+ s, 6k tokens, 1\.5 Bobcoins$/,
+          );
+          const log = yield* harness.threads.getThreadRecords(
+            started.childThreadId,
+            ["turnItems"],
+            { turnItemTypes: ["assistant_message"] },
+          );
+          const table = log.turnItems.find(
+            (item) =>
+              item.type === "assistant_message" &&
+              item.text.startsWith("Time and usage per agent:"),
+          );
+          expect(table?.type === "assistant_message" && table.text.split("\n")).toHaveLength(10);
         }),
     ),
   );
@@ -1374,7 +1440,7 @@ return result`,
             yield* harness.parentWoken;
             const retried = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
             expect(retried.subagents.find((task) => task.id === started.taskId)?.result).toMatch(
-              /^fine\n\nIts agents spent [\d.]+ Bobcoins in total, across attempts\.$/,
+              /^fine\n\nIts agents spent [\d.]+ Bobcoins in total, across attempts\.\n\nTime and usage per agent:\n/,
             );
           }),
       );
@@ -1505,7 +1571,7 @@ return result`,
             expect(retried.subagents.map((task) => task.id)).toEqual([started.taskId]);
             const row = retried.subagents.find((task) => task.id === started.taskId)!;
             expect(row.status).toBe("completed");
-            expect(row.result).toBe("fine");
+            expect(scriptResult(row.result)).toBe("fine");
             expect(yield* Ref.get(attempts)).toBe(2);
             expect(yield* harness.wakeCount).toBe(2);
           }),
@@ -1734,7 +1800,7 @@ return verdict`,
             const retried = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
             const row = retried.subagents.find((task) => task.id === started.taskId)!;
             expect(row.status).toBe("completed");
-            expect(row.result).toBe("judged");
+            expect(scriptResult(row.result)).toBe("judged");
             const agents = yield* harness.coordinatorChildren(started.childThreadId);
             expect(
               agents.map((task) => task.t3Workflow?.kind === "agent" && task.t3Workflow.attempt),
@@ -2831,7 +2897,7 @@ return "done"`,
             const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
             const coordinator = parent.subagents.find((task) => task.id === started.taskId)!;
             expect(coordinator.status).toBe("completed");
-            expect(coordinator.result).toBe("done");
+            expect(scriptResult(coordinator.result)).toBe("done");
             const agents = yield* harness.coordinatorChildren(started.childThreadId);
             expect(Object.fromEntries(agents.map((task) => [task.prompt, task.status]))).toEqual({
               linger: "interrupted",
@@ -2940,9 +3006,9 @@ return await agent("second", { as: "r" })`,
             yield* harness.parentWoken;
 
             const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
-            expect(parent.subagents.find((task) => task.id === started.taskId)?.result).toBe(
-              "second",
-            );
+            expect(
+              scriptResult(parent.subagents.find((task) => task.id === started.taskId)?.result),
+            ).toBe("second");
             expect(yield* concurrency.peak("agent")).toBe(1);
             const agents = yield* harness.coordinatorChildren(coordinatorThreadId);
             const fallback = agents.find((task) => task.prompt === "fallback")!;
@@ -3063,9 +3129,9 @@ return await agent("second", { as: "w" })`,
             yield* harness.parentWoken;
 
             const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
-            expect(parent.subagents.find((task) => task.id === started.taskId)?.result).toBe(
-              "second",
-            );
+            expect(
+              scriptResult(parent.subagents.find((task) => task.id === started.taskId)?.result),
+            ).toBe("second");
             expect(yield* concurrency.peak("agent")).toBe(1);
             const agents = yield* harness.coordinatorChildren(coordinatorThreadId);
             const fallback = agents.find((task) => task.prompt === "fallback")!;
@@ -3145,7 +3211,9 @@ return steady + flaky`,
             yield* harness.parentWoken;
 
             const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
-            expect(parent.subagents.find((task) => task.id === started.taskId)?.result).toBe("SF");
+            expect(
+              scriptResult(parent.subagents.find((task) => task.id === started.taskId)?.result),
+            ).toBe("SF");
             // The finished agent is reused, not rerun at the narrower mode.
             expect(Object.fromEntries(yield* Ref.get(turns))).toMatchObject({
               steady: 1,
