@@ -13,6 +13,8 @@
  *
  * Work that must change nothing, a review guide, runs the whole `bob acp` process under one
  * read-only profile instead (`bobProcessSandboxSpawn`), Bob's own tools and its commands alike.
+ * A workflow script's `exec()` runs its commands under the commands' profile too
+ * (`commandSandboxSpawn`), with build tools' caches writable and, in Full access, the network.
  *
  * The base of the Seatbelt profile follows Codex's (openai/codex, Apache-2.0,
  * `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl`).
@@ -1057,6 +1059,19 @@ const NETWORK_SERVICES = [
 ];
 
 /**
+ * Rules that let a sandboxed process reach other machines. Nothing on this machine but the name
+ * resolver, since a port or a socket here, Docker's, tmux's or T3's own, would let a command
+ * change what the rest of the profile keeps.
+ */
+const OTHER_MACHINES = `(allow network-outbound)
+(deny network-outbound (remote ip "localhost:*") (remote unix-socket))
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
+(allow system-socket)
+(allow mach-lookup
+  ${NETWORK_SERVICES.map((name) => `(global-name ${quote(name)})`).join("\n  ")})
+`;
+
+/**
  * The Seatbelt profile for a whole `bob acp` process that must change nothing, such as one reading
  * a pull request's checkout for its review guide. Seatbelt refuses a second, different profile
  * inside a sandbox, so Bob's commands cannot have their own: they, Bob's own tools and every
@@ -1118,15 +1133,8 @@ function bobProcessSandboxProfile(input: {
 ; which a pull request may give Bob.
 (deny file-read* file-read-data file-read-metadata file-write* (subpath ${projectBob}))
 ; Other machines, for Bob's model: which commands run is T3's to answer, and none that reaches
-; the network is let through. Nothing on this machine but the name resolver, since a port or a
-; socket here, Docker's, tmux's or T3's own, would let a command change what the rules above keep.
-(allow network-outbound)
-(deny network-outbound (remote ip "localhost:*") (remote unix-socket))
-(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
-(allow system-socket)
-(allow mach-lookup
-  ${NETWORK_SERVICES.map((name) => `(global-name ${quote(name)})`).join("\n  ")})
-`;
+; the network is let through.
+${OTHER_MACHINES}`;
 }
 
 /** `command` as `PATH` finds it, or as given when it names a path. None when it is not there. */
@@ -1213,6 +1221,142 @@ export function bobProcessSandboxSpawn(input: {
     install,
   });
   return { command: SANDBOX_EXEC, args: ["-p", profile, executable] };
+}
+
+/**
+ * Caches build tools write as they install and build, which a command run for a workflow's
+ * `exec` may write in: compilers' and package managers' caches and stores, never a toolchain's
+ * own folders, whose programs run outside the sandbox. A later build outside the sandbox still
+ * reads what a command left in them.
+ */
+const BUILD_CACHES = [
+  "Library/Caches",
+  ".cache",
+  "Library/pnpm/store",
+  ".local/share/pnpm/store",
+  ".npm/_cacache",
+  ".yarn/berry/cache",
+  ".bun/install/cache",
+  ".cargo/registry",
+  ".cargo/git",
+  "go/pkg/mod",
+  ".gradle/caches",
+  ".m2/repository",
+];
+
+/**
+ * The git folders a commit in the worktree at `worktree` writes: its own folder in the
+ * repository, and the repository's objects, refs and their logs. None when `worktree` is not a
+ * linked worktree, whose `.git` would be the whole repository, hooks and configuration included.
+ */
+function worktreeGitFolders(
+  worktree: string,
+): { readonly gitDir: string; readonly writable: ReadonlyArray<string> } | undefined {
+  try {
+    const pointer = /^gitdir: (.+)$/m.exec(
+      NodeFS.readFileSync(NodePath.join(worktree, ".git"), "utf8"),
+    );
+    if (pointer === null) return undefined;
+    const gitDir = NodePath.resolve(worktree, pointer[1]!.trim());
+    const commonDir = NodePath.resolve(
+      gitDir,
+      NodeFS.readFileSync(NodePath.join(gitDir, "commondir"), "utf8").trim(),
+    );
+    return {
+      gitDir,
+      writable: [
+        gitDir,
+        ...["objects", "refs", "logs", "packed-refs", "packed-refs.lock"].map((entry) =>
+          NodePath.join(commonDir, entry),
+        ),
+      ],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How to run one shell command, `/bin/sh -c`, under the profile of Bob's commands, as a
+ * workflow script's `exec` does: in `cwd`, which only workspace-write lets it change, and in a
+ * linked worktree the git folders a commit writes, but never the files that say where its
+ * repository is. It writes the temporary folders and the build tools' caches too, and reaches
+ * other machines only when `network`, never this one. The profile goes as text, so no file of it
+ * outlives the command. None where the host has no sandbox, or a place cannot be named in a
+ * profile or runs through a symlink another sandbox could have made.
+ */
+export function commandSandboxSpawn(input: {
+  readonly platform: NodeJS.Platform;
+  readonly command: string;
+  readonly cwd: string;
+  readonly mode: BobSandboxMode;
+  readonly network: boolean;
+  /** The environment the command runs with: its home, `PATH` and temporary folder. */
+  readonly environment: NodeJS.ProcessEnv;
+  /** T3's caches and state. */
+  readonly cacheDir: string;
+  readonly stateDir: string;
+}): { readonly command: string; readonly args: ReadonlyArray<string> } | undefined {
+  if (!bobSandboxAvailable(input.platform)) return undefined;
+  const home = input.environment.HOME || NodeOS.homedir();
+  const searchPath = input.environment.PATH;
+  const temporaryFolders = [
+    input.environment.TMPDIR || NodeOS.tmpdir(),
+    "/private/tmp",
+    "/private/var/tmp",
+  ];
+  const git = input.mode === "workspace-write" ? worktreeGitFolders(input.cwd) : undefined;
+  if (
+    !nameable([
+      input.cwd,
+      home,
+      input.cacheDir,
+      input.stateDir,
+      ...temporaryFolders,
+      ...(searchPath?.split(":") ?? []),
+      ...(git?.writable ?? []),
+    ])
+  ) {
+    return undefined;
+  }
+  const workspace = bobWorkspace(input.cwd, home);
+  if (workspace === undefined) return undefined;
+  const profile = bobSandboxProfile({
+    mode: input.mode,
+    workspace: [input.cwd, workspace],
+    home,
+    privateFolders: [input.stateDir],
+    temporaryFolders,
+    searchPath,
+    rules: {
+      read: [],
+      write: [...BUILD_CACHES.map((cache) => NodePath.join(home, cache)), ...(git?.writable ?? [])],
+      private: [],
+    },
+    sandboxFolders: [input.cacheDir],
+  });
+  const pointers =
+    git === undefined
+      ? []
+      : ["commondir", "gitdir", "config.worktree"].map(
+          (file) => `(literal ${quote(realPath(NodePath.join(git.gitDir, file)))})`,
+        );
+  const text = `${profile}${
+    input.mode === "read-only"
+      ? `; The checkout, even inside a temporary folder the rules above let commands write.
+(deny file-write* (subpath ${quote(workspace)}))
+`
+      : ""
+  }${
+    pointers.length === 0
+      ? ""
+      : `; The files that say where the worktree's repository is: rewritten, they could point git,
+; which also runs outside the sandbox, at a configuration and hooks of a command's own.
+(deny file-write*
+  ${pointers.join("\n  ")})
+`
+  }${input.network ? OTHER_MACHINES : ""}`;
+  return { command: SANDBOX_EXEC, args: ["-p", text, "/bin/sh", "-c", input.command] };
 }
 
 /** Whether a file holds exactly `content`. */
