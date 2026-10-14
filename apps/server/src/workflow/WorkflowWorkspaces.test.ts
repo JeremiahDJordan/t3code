@@ -299,6 +299,101 @@ describe("WorkflowWorkspaces", () => {
     ),
   );
 
+  it.live("starts a worktree at the commit from names, and at the same one on a rerun", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const repo = yield* checkpointWorkspace("workflow-workspaces-from");
+        const setups = yield* Ref.make<ReadonlyArray<string>>([]);
+        const failNext = yield* Ref.make(false);
+        const workspaceRoot = yield* Ref.make<string | null>(repo);
+        yield* Effect.gen(function* () {
+          const workspaces = yield* WorkflowWorkspaces.WorkflowWorkspaces;
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const fs = yield* FileSystem.FileSystem;
+          const read = (cwd: string, ...args: ReadonlyArray<string>) =>
+            git(cwd, ...args)
+              .toString()
+              .trim();
+          const head = read(repo, "rev-parse", "HEAD");
+          // A feature branch one commit ahead, not checked out anywhere.
+          git(repo, "switch", "-q", "-c", "feature/base");
+          yield* fs.writeFileString(`${repo}/feature.txt`, "feature\n");
+          git(repo, "add", "feature.txt");
+          git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "feature");
+          const feature = read(repo, "rev-parse", "HEAD");
+          git(repo, "switch", "-q", "-");
+          const branchOf = (name: string) =>
+            WorkflowWorkspaces.workflowWorkspaceBranch(coordinatorThreadId, name);
+          const input = (name: string, from?: string) => ({
+            projectId,
+            ownerThreadId: coordinatorThreadId,
+            cwd: repo,
+            branch: branchOf(name),
+            from,
+          });
+
+          // From a branch: on the run's own branch, at the branch's commit.
+          const review = yield* workspaces.ensure(input("review", "feature/base"));
+          expect(read(review.worktreePath, "rev-parse", "HEAD")).toBe(feature);
+          expect(read(review.worktreePath, "branch", "--show-current")).toBe(branchOf("review"));
+          expect(yield* fs.exists(`${review.worktreePath}/feature.txt`)).toBe(true);
+          // From a commit SHA, and from another workspace's branch.
+          const pinned = yield* workspaces.ensure(input("pinned", head));
+          expect(read(pinned.worktreePath, "rev-parse", "HEAD")).toBe(head);
+          const second = yield* workspaces.ensure(
+            input("second", `refs/heads/${branchOf("review")}`),
+          );
+          expect(read(second.worktreePath, "rev-parse", "HEAD")).toBe(feature);
+
+          // Nothing in this repository by that name, or no commit: refused, nothing created.
+          const tree = read(repo, "rev-parse", "HEAD^{tree}");
+          for (const missing of ["no-such-branch", tree]) {
+            const refused = yield* workspaces.ensure(input("missing", missing)).pipe(Effect.flip);
+            expect(refused.operation).toBe("resolve");
+            expect(refused.message).toBe(
+              `from "${missing}" is not a branch or commit in this repository.`,
+            );
+          }
+          expect(yield* driver.listLocalBranchNames(repo)).not.toContain(branchOf("missing"));
+          expect(yield* Ref.get(setups)).toHaveLength(3);
+
+          // A rerun starts where the first run did though the branch it named has moved, also
+          // once the workspace's branch was deleted by hand.
+          git(repo, "branch", "-f", "feature/base", head);
+          yield* driver.removeWorktree({ cwd: repo, path: review.worktreePath, force: true });
+          git(repo, "branch", "-D", "-q", branchOf("review"));
+          const again = yield* workspaces.ensure(input("review", "feature/base"));
+          expect(read(again.worktreePath, "rev-parse", "HEAD")).toBe(feature);
+        }).pipe(Effect.provide(makeLayer(repo, { setups, failNext, workspaceRoot })));
+      }),
+    ),
+  );
+
+  it("keeps a from to a plain branch, tag or commit name", () => {
+    for (const from of ["main", "HEAD", "origin/feature-x", "v1.2.0", "a1b2c3d", "_wip"]) {
+      expect(WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)).toBe(true);
+    }
+    // Options, paths and revision syntax are no branch names.
+    for (const from of [
+      "--output=/tmp/x",
+      "-b",
+      "/etc/passwd",
+      "../outside",
+      "HEAD~1",
+      "main^",
+      "@{u}",
+      "main:file",
+      "a..b",
+      "a//b",
+      "a/.hidden",
+      "a.lock",
+      "a/",
+      "",
+    ]) {
+      expect(WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)).toBe(false);
+    }
+  });
+
   it("keeps workspace names to what a branch can hold", () => {
     expect(WorkflowWorkspaces.isWorkflowWorkspaceName("task-1.a_b")).toBe(true);
     expect(WorkflowWorkspaces.isWorkflowWorkspaceName("../escape")).toBe(false);

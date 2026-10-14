@@ -84,7 +84,9 @@ unbound.
 
 Agents that can edit files take turns in a shared checkout. Agents in plan mode, and agents in
 their own worktree, run side by side. A workflow can give a group of agents a worktree on its own
-branch. When the run finishes, its worktrees are removed and the branches stay for you to merge. A
+branch with `workspace(name)`. The worktree starts at the starting thread's commit, or at what
+`workspace(name, { from })` names: a branch, a commit SHA, or another workspace, whose branch it
+starts from. Retry starts it at the same commit even if that branch has moved. When the run finishes, its worktrees are removed and the branches stay for you to merge. A
 worktree with changes nobody committed stays, and so do the worktrees of a run that failed or was
 stopped, so Retry carries on in them. A kept worktree belongs to its agents' threads, so
 [storage cleanup](project-settings.md#storage-cleanup) removes it like any other once it is clean.

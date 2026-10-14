@@ -47,6 +47,15 @@ for the rerun; the run that finishes removes them without forcing, so git keeps 
 uncommitted work. The run's invocation lives in the
 coordinator's first message and its source in `workflow_sources`, keyed by hash.
 
+A workspace's `from` is resolved once, when its branch is first created, and the commit is recorded
+in `refs/t3/workflow-bases/<branch>` before the branch is made. A rerun reuses the branch, or
+recreates it from the recorded commit, so a `from` branch that moved meanwhile cannot move the
+workspace. The record is a ref rather than a file in the worktree's git directory because storage
+cleanup removes a kept worktree that is clean, and Retry must still find it. It sits outside
+`refs/t3/wf/`: git looks up `refs/<name>` before `refs/heads/<name>`, so a ref there would shadow the
+`t3/wf/...` branch it records. A script's `from` must be a plain ref name or SHA, with no revision
+syntax, so it can name nothing outside the coordinator's repository.
+
 A coordinator row that ended unfinished is the one delegated task whose later runs publish their
 result again (`finalizeAppOwnedSubagent`), so a successful Retry wakes the starting agent with the
 real result. A coordinator interrupted while its agents still run stays "waiting for children" and

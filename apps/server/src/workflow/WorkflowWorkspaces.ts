@@ -1,10 +1,10 @@
 /**
  * Git worktrees for a workflow's `workspace()` calls, so agents that edit
  * files can work in parallel. Each workspace is a branch `t3/wf/<run>/<name>`;
- * its worktree is created from the coordinator checkout's HEAD the first time,
- * found again on a rerun (set up again if its setup failed), and removed when
- * a run finishes unless it has uncommitted changes. Branches stay: merging is
- * the script's business.
+ * its worktree is created the first time at the commit its `from` names (the
+ * coordinator checkout's HEAD by default), found again on a rerun (set up again
+ * if its setup failed), and removed when a run finishes unless it has
+ * uncommitted changes. Branches stay: merging is the script's business.
  */
 import type { ProjectId, ThreadId } from "@t3tools/contracts";
 import { sha256 } from "@noble/hashes/sha2";
@@ -25,15 +25,22 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 export class WorkflowWorkspaceError extends Schema.TaggedError<WorkflowWorkspaceError>()(
   "WorkflowWorkspaceError",
   {
-    operation: Schema.Literals(["create", "setup", "remove"]),
+    operation: Schema.Literals(["create", "setup", "remove", "resolve"]),
     branch: Schema.String,
+    /** What a `resolve` could not find. */
+    from: Schema.optional(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
-    return this.operation === "setup"
-      ? `The setup script failed in the worktree for ${this.branch}.`
-      : `Could not ${this.operation} the worktree for ${this.branch}.`;
+    switch (this.operation) {
+      case "setup":
+        return `The setup script failed in the worktree for ${this.branch}.`;
+      case "resolve":
+        return `from "${this.from}" is not a branch or commit in this repository.`;
+      default:
+        return `Could not ${this.operation} the worktree for ${this.branch}.`;
+    }
   }
 }
 
@@ -44,6 +51,27 @@ export const isWorkflowWorkspaceName = (name: string) =>
   !name.endsWith(".") &&
   !name.endsWith(".lock");
 
+/**
+ * A `from` a script may name: a branch, tag or commit SHA, spelled as git's ref rules allow. No
+ * revision syntax (`~`, `^`, `@{`, `:`) and no leading `-`, so it names a ref or an object of the
+ * coordinator's repository, never an option or a path.
+ */
+export const isWorkflowWorkspaceFrom = (from: string) =>
+  /^[A-Za-z0-9_][A-Za-z0-9._/-]{0,254}$/.test(from) &&
+  !from.includes("..") &&
+  !from.includes("//") &&
+  !from.includes("/.") &&
+  !from.endsWith("/") &&
+  !from.endsWith(".") &&
+  !from.endsWith(".lock");
+
+/**
+ * Where the commit a workspace's branch started at is recorded. It is written before the branch,
+ * so a rerun, or one after the branch was deleted by hand, starts the workspace at the same commit
+ * however its `from` has moved since.
+ */
+export const workflowWorkspaceBaseRef = (branch: string) => `refs/t3/workflow-bases/${branch}`;
+
 /** The branch a run's workspace lives on; stable across reruns of the same run. */
 export function workflowWorkspaceBranch(coordinatorThreadId: ThreadId, name: string): string {
   const run = bytesToHex(sha256(new TextEncoder().encode(coordinatorThreadId))).slice(0, 10);
@@ -53,13 +81,18 @@ export function workflowWorkspaceBranch(coordinatorThreadId: ThreadId, name: str
 export class WorkflowWorkspaces extends Context.Service<
   WorkflowWorkspaces,
   {
-    /** The worktree for `branch`: an existing one, else one made from `cwd`'s HEAD with setup run. */
+    /**
+     * The worktree for `branch`: an existing one, else one made at the commit `from` names in
+     * `cwd`'s repository (its HEAD by default), with setup run.
+     */
     readonly ensure: (input: {
       readonly projectId: ProjectId;
       /** The coordinator thread, whose terminals run the setup script. */
       readonly ownerThreadId: ThreadId;
       readonly cwd: string;
       readonly branch: string;
+      /** A ref or commit SHA, read only when the branch is first created. */
+      readonly from?: string | undefined;
     }) => Effect.Effect<{ readonly worktreePath: string }, WorkflowWorkspaceError>;
     readonly remove: (input: {
       readonly cwd: string;
@@ -211,6 +244,44 @@ const make = Effect.gen(function* () {
       return null;
     });
 
+  /** The commit `revision` names in `cwd`'s repository, or null when it names none. */
+  const commitOf = (cwd: string, revision: string) =>
+    git
+      .execute({
+        operation: "WorkflowWorkspaces.commitOf",
+        cwd,
+        args: ["rev-parse", "--verify", "--quiet", `${revision}^{commit}`],
+        allowNonZeroExit: true,
+      })
+      .pipe(Effect.map((result) => (result.exitCode === 0 ? result.stdout.trim() : null)));
+
+  /** The commit a new branch starts at: the recorded one, else `from` resolved now and recorded. */
+  const startCommit = (input: {
+    readonly cwd: string;
+    readonly branch: string;
+    readonly from?: string | undefined;
+  }) =>
+    Effect.gen(function* () {
+      const ref = workflowWorkspaceBaseRef(input.branch);
+      const recorded = yield* commitOf(input.cwd, ref);
+      if (recorded !== null) return recorded;
+      const from = input.from ?? "HEAD";
+      const commit = yield* commitOf(input.cwd, from);
+      if (commit === null) {
+        return yield* new WorkflowWorkspaceError({
+          operation: "resolve",
+          branch: input.branch,
+          from,
+        });
+      }
+      yield* git.execute({
+        operation: "WorkflowWorkspaces.recordStart",
+        cwd: input.cwd,
+        args: ["update-ref", ref, commit],
+      });
+      return commit;
+    });
+
   const runSetup = (input: {
     readonly projectId: ProjectId;
     readonly ownerThreadId: ThreadId;
@@ -280,7 +351,12 @@ const make = Effect.gen(function* () {
       const created = yield* git.createWorktree(
         branchExists
           ? { cwd: input.cwd, refName: input.branch, path: null }
-          : { cwd: input.cwd, refName: "HEAD", newRefName: input.branch, path: null },
+          : {
+              cwd: input.cwd,
+              refName: yield* startCommit(input),
+              newRefName: input.branch,
+              path: null,
+            },
         { worktreesDirectory },
       );
       yield* setUp({ ...input, worktreePath: created.worktree.path });

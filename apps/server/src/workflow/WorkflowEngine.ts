@@ -260,6 +260,48 @@ const execOutcome = (result: WorkflowExec.WorkflowExecResult) =>
       ? "was ended by a signal"
       : `exited ${result.exitCode}`;
 
+interface WorkspaceCall {
+  readonly name: string;
+  /** A ref or commit SHA, or the name of a workspace whose branch it starts from. */
+  readonly from: string | { readonly workspace: string } | undefined;
+}
+
+const WORKSPACE_OPTIONS = new Set(["from"]);
+
+/** Reads a `workspace()` call's name and options. */
+function decodeWorkspaceCall(request: unknown): Result.Result<WorkspaceCall, string> {
+  const { name, opts } = (request ?? {}) as {
+    readonly name?: unknown;
+    readonly opts?: unknown;
+  };
+  if (typeof name !== "string" || !WorkflowWorkspaces.isWorkflowWorkspaceName(name)) {
+    return Result.fail(
+      "workspace(name): name must be up to 64 letters, digits, dots, dashes or underscores, start with a letter or digit, and not contain `..` or end in `.` or `.lock`.",
+    );
+  }
+  if (opts !== undefined && (typeof opts !== "object" || opts === null || Array.isArray(opts))) {
+    return Result.fail("workspace() options must be an object.");
+  }
+  const options = (opts ?? {}) as Record<string, unknown>;
+  for (const key of Object.keys(options)) {
+    if (!WORKSPACE_OPTIONS.has(key)) {
+      return Result.fail(`workspace(): option "${key}" is not supported.`);
+    }
+  }
+  const from = options.from as unknown;
+  if (from === undefined) return Result.succeed({ name, from: undefined });
+  if (typeof from === "string" && WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)) {
+    return Result.succeed({ name, from });
+  }
+  const source = (from as { readonly name?: unknown } | null)?.name;
+  if (typeof from === "object" && typeof source === "string") {
+    return Result.succeed({ name, from: { workspace: source } });
+  }
+  return Result.fail(
+    "workspace(): from must be a branch name, a commit SHA, or a value returned by workspace().",
+  );
+}
+
 /** The turn's timeline: assistant messages, the phase list, and the terminal. */
 function makeTurnOutput(turn: WorkflowTurn, startedAt: DateTime.Utc) {
   const { input } = turn;
@@ -688,12 +730,16 @@ const make = Effect.gen(function* () {
           );
         }
         const occurrences = new Map<string, number>();
+        /** Each workspace this turn asked for, by name, with the options it was first asked with. */
         const workspaceCalls = new Map<
           string,
-          Deferred.Deferred<
-            { readonly branch: string; readonly worktreePath: string },
-            WorkflowSandbox.WorkflowScriptError
-          >
+          {
+            readonly options: string;
+            readonly ready: Deferred.Deferred<
+              { readonly branch: string; readonly worktreePath: string },
+              WorkflowSandbox.WorkflowScriptError
+            >;
+          }
         >();
         const phaseStates = new Map<string, OrchestrationV2PlanStep["status"]>(
           run.phases.map((phase) => [phase.title, "pending"] as const),
@@ -733,38 +779,58 @@ const make = Effect.gen(function* () {
             yield* out.message(`**${title}**`);
             yield* out.phases(phaseSteps(), false);
           });
-        const ensureWorkspace = (name: string) =>
+        const ensureWorkspace = (call: WorkspaceCall) =>
           Effect.gen(function* () {
+            const { name } = call;
+            const options = toJsonText({ from: call.from ?? null });
             const existing = workspaceCalls.get(name);
-            if (existing !== undefined) return yield* Deferred.await(existing);
-            const deferred = yield* Deferred.make<
+            if (existing !== undefined) {
+              if (existing.options !== options) {
+                return yield* scriptError(
+                  `workspace("${name}"): this run already asked for it with other options.`,
+                );
+              }
+              return yield* Deferred.await(existing.ready);
+            }
+            const ready = yield* Deferred.make<
               { readonly branch: string; readonly worktreePath: string },
               WorkflowSandbox.WorkflowScriptError
             >();
-            workspaceCalls.set(name, deferred);
-            if (cwd === null) {
-              yield* Deferred.fail(
-                deferred,
-                scriptError("workspace(): this thread has no checkout."),
-              );
-              return yield* Deferred.await(deferred);
-            }
-            const branch = WorkflowWorkspaces.workflowWorkspaceBranch(coordinatorThreadId, name);
-            const ensured = yield* workspaces
-              .ensure({
-                projectId: input.appThread.projectId,
-                ownerThreadId: coordinatorThreadId,
-                cwd,
-                branch,
-              })
-              .pipe(
-                Effect.map(({ worktreePath }) => ({ branch, worktreePath })),
-                Effect.mapError((error) => scriptError(`workspace("${name}"): ${error.message}`)),
-                Effect.exit,
-              );
+            workspaceCalls.set(name, { options, ready });
+            const ensured = yield* Effect.gen(function* () {
+              if (cwd === null) {
+                return yield* scriptError("workspace(): this thread has no checkout.");
+              }
+              // A workspace starts from another one's branch as it is when this one is first made.
+              let from: string | undefined;
+              if (typeof call.from === "object") {
+                const source = workspaceCalls.get(call.from.workspace);
+                if (source === undefined || call.from.workspace === name) {
+                  return yield* scriptError(
+                    `workspace("${name}"): from workspace "${call.from.workspace}" was not created in this run; call workspace() for it first.`,
+                  );
+                }
+                from = `refs/heads/${(yield* Deferred.await(source.ready)).branch}`;
+              } else {
+                from = call.from;
+              }
+              const branch = WorkflowWorkspaces.workflowWorkspaceBranch(coordinatorThreadId, name);
+              return yield* workspaces
+                .ensure({
+                  projectId: input.appThread.projectId,
+                  ownerThreadId: coordinatorThreadId,
+                  cwd,
+                  branch,
+                  from,
+                })
+                .pipe(
+                  Effect.map(({ worktreePath }) => ({ branch, worktreePath })),
+                  Effect.mapError((error) => scriptError(`workspace("${name}"): ${error.message}`)),
+                );
+            }).pipe(Effect.exit);
             if (Exit.isSuccess(ensured)) created.set(name, ensured.value);
-            yield* Deferred.done(deferred, ensured);
-            return yield* Deferred.await(deferred);
+            yield* Deferred.done(ready, ensured);
+            return yield* Deferred.await(ready);
           });
 
         const resultOf = (task: OrchestrationV2Subagent, call: AgentCall, label: string) =>
@@ -856,9 +922,12 @@ const make = Effect.gen(function* () {
 
             const workspace =
               named !== undefined
-                ? yield* Deferred.await(named)
+                ? yield* Deferred.await(named.ready)
                 : call.isolated
-                  ? yield* ensureWorkspace(`agent-${callKey.slice(0, 8)}-${occurrence}`)
+                  ? yield* ensureWorkspace({
+                      name: `agent-${callKey.slice(0, 8)}-${occurrence}`,
+                      from: undefined,
+                    })
                   : undefined;
 
             const callId = `${callKey}:${occurrence}`;
@@ -1001,14 +1070,10 @@ const make = Effect.gen(function* () {
 
         const workspace = (request: unknown) =>
           Effect.gen(function* () {
-            const name = (request as { readonly name?: unknown } | null)?.name;
-            if (typeof name !== "string" || !WorkflowWorkspaces.isWorkflowWorkspaceName(name)) {
-              return yield* scriptError(
-                "workspace(name): name must be up to 64 letters, digits, dots, dashes or underscores, start with a letter or digit, and not contain `..` or end in `.` or `.lock`.",
-              );
-            }
-            const ensured = yield* ensureWorkspace(name);
-            return { name, branch: ensured.branch };
+            const decoded = decodeWorkspaceCall(request);
+            if (Result.isFailure(decoded)) return yield* scriptError(decoded.failure);
+            const ensured = yield* ensureWorkspace(decoded.success);
+            return { name: decoded.success.name, branch: ensured.branch };
           });
 
         const execSlots = yield* Semaphore.make(MAX_CONCURRENT_EXECS);
@@ -1049,7 +1114,7 @@ const make = Effect.gen(function* () {
               );
               return replayed.value;
             }
-            const workspace = named === undefined ? undefined : yield* Deferred.await(named);
+            const workspace = named === undefined ? undefined : yield* Deferred.await(named.ready);
             const execCwd = workspace?.worktreePath ?? cwd;
             if (execCwd === null) return yield* scriptError("exec(): this thread has no checkout.");
             const runCommand = execSlots.withPermit(
