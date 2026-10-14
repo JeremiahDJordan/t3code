@@ -17,6 +17,7 @@ const provide = Effect.provide(WorkflowSandbox.layerTest);
 const noHost: WorkflowSandbox.WorkflowSandboxHost<never> = {
   agent: () => Effect.die("unused"),
   workspace: () => Effect.die("unused"),
+  exec: () => Effect.die("unused"),
   phase: () => Effect.void,
   log: () => Effect.void,
 };
@@ -164,7 +165,7 @@ describe("WorkflowSandbox", () => {
     }).pipe(provide),
   );
 
-  it.live("runs agent calls through the host and returns the script's result", () =>
+  it.live("runs agent and exec calls through the host and returns the script's result", () =>
     Effect.gen(function* () {
       const calls = yield* Ref.make<ReadonlyArray<unknown>>([]);
       const logs = yield* Ref.make<ReadonlyArray<string>>([]);
@@ -178,6 +179,7 @@ describe("WorkflowSandbox", () => {
             ),
           ),
         workspace: () => Effect.die("unused"),
+        exec: (request) => Effect.succeed({ exitCode: 0, request }),
         phase: () => Effect.void,
         log: (message) => Ref.update(logs, (all) => [...all, message]),
       };
@@ -188,7 +190,8 @@ describe("WorkflowSandbox", () => {
           "const results = await parallel(args.items.map((item) => () => agent(item, { label: item })))",
           "log(`got ${results.filter(Boolean).length}`)",
           "const piped = await pipeline(['p'], (value) => agent(value), (value, item, index) => ({ value, item, index }))",
-          "return { results, piped }",
+          "const ran = await exec('pnpm install', { timeoutMs: 5000 })",
+          "return { results, piped, ran }",
         ].join("\n"),
         host,
         { items: ["one", "fail", "two"] },
@@ -196,6 +199,7 @@ describe("WorkflowSandbox", () => {
       expect(result).toEqual({
         results: [{ echoed: "one" }, null, { echoed: "two" }],
         piped: [{ value: { echoed: "p" }, item: "p", index: 0 }],
+        ran: { exitCode: 0, request: { command: "pnpm install", opts: { timeoutMs: 5000 } } },
       });
       const recorded = yield* Ref.get(calls);
       expect(recorded[0]).toEqual({

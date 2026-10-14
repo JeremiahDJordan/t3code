@@ -206,3 +206,29 @@ return {
 When the run finishes, its worktrees are removed and every branch stays: review the branch the
 result names and merge it as you would any other. Retry reuses the writers that finished, so a
 failed merge does not rebuild the parts.
+
+## Running commands
+
+A workflow can run a shell command without spending an agent on it, such as an install and a
+check: `await exec("pnpm install --offline && pnpm run check", { workspace: ws })` returns
+`{ exitCode, stdout, stderr, timedOut }`. The command runs in the workspace's worktree, or in the
+starting thread's checkout when no `workspace` is given. The workflow's thread logs each command
+with its exit code and how long it took.
+
+- On macOS a command runs in the same sandbox as Bob Shell's commands. It writes only in its
+  workspace's worktree, where it can also commit, in temporary folders and in build tools' caches,
+  never in the starting thread's checkout, and it cannot read your credentials. In a read-only
+  workspace, or from a thread in Supervised or plan mode, it writes no worktree either.
+- It reaches the network only when the workflow was started from a thread in Full access. Outside
+  Full access an install must come from the package store or cache, such as
+  `pnpm install --offline`, or it fails.
+- On Linux and Windows there is no sandbox for commands yet, so `exec()` runs only in a workflow
+  started from a thread in Full access, and then as you.
+- A command stops after `timeoutMs`, 10 minutes by default and at most 60, with `timedOut: true`.
+  Each output keeps its last 256 KB, with a note saying how much was cut. A run runs two commands
+  at once, and a command in a workspace waits for the agents editing it.
+- Variables named like credentials (with KEY, SECRET, TOKEN, PASSWORD or CREDENTIAL in the name)
+  and T3 Code's own are left out of the command's environment. Pass what it needs in `env`.
+- **Retry** does not run a command that finished again, since running it twice may not be safe; it
+  returns the earlier result, a failed one included. A command the run was stopped in runs again.
+  **Stop** ends running commands.

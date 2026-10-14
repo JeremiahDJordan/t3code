@@ -66,7 +66,7 @@ export const SandboxOp = Schema.Union([
   Schema.Struct({ type: Schema.Literals(["phase", "log"]), text: Schema.String }),
   Schema.Struct({
     type: Schema.Literal("call"),
-    kind: Schema.Literals(["agent", "workspace"]),
+    kind: Schema.Literals(["agent", "workspace", "exec"]),
     id: Schema.Number,
     payload: Schema.String,
   }),

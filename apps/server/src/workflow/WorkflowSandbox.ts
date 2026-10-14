@@ -60,7 +60,7 @@ export class WorkflowScriptError extends Schema.TaggedError<WorkflowScriptError>
 export const isWorkflowScriptError = Schema.is(WorkflowScriptError);
 
 /**
- * What a running script can reach. `agent` and `workspace` resolve to JSON
+ * What a running script can reach. `agent`, `workspace` and `exec` resolve to JSON
  * values; a failure rejects the script's promise with its message, which the
  * script may catch.
  */
@@ -70,6 +70,7 @@ export interface WorkflowSandboxHost<R> {
     context: { readonly phase: string | null },
   ) => Effect.Effect<unknown, WorkflowScriptError, R>;
   readonly workspace: (request: unknown) => Effect.Effect<unknown, WorkflowScriptError, R>;
+  readonly exec: (request: unknown) => Effect.Effect<unknown, WorkflowScriptError, R>;
   readonly phase: (title: string) => Effect.Effect<void, never, R>;
   readonly log: (message: string) => Effect.Effect<void, never, R>;
 }
@@ -357,7 +358,9 @@ const make = (launcher: WorkflowSandboxLauncher) => {
             const work =
               op.kind === "agent"
                 ? input.host.agent(request, { phase: currentPhase })
-                : input.host.workspace(request);
+                : op.kind === "exec"
+                  ? input.host.exec(request)
+                  : input.host.workspace(request);
             return FiberSet.run(
               fibers,
               work.pipe(

@@ -33,6 +33,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as WorkflowAdapterV2 from "./Adapters/WorkflowAdapterV2.ts";
 import * as WorkflowEngine from "../workflow/WorkflowEngine.ts";
+import * as WorkflowExec from "../workflow/WorkflowExec.ts";
 import * as WorkflowWorkspaces from "../workflow/WorkflowWorkspaces.ts";
 import * as ProviderContinuationService from "./ProviderContinuationService.ts";
 import * as ThreadTitleRegenerationService from "./ThreadTitleRegenerationService.ts";
@@ -336,6 +337,7 @@ const layerWorkflowEngineProvided = WorkflowEngine.layer.pipe(
       WorkflowAdapterV2.layerEngineHost,
       layerThreadManagementProvided,
       IdAllocator.layer,
+      WorkflowExec.layer,
       WorkflowWorkspaces.layer.pipe(
         Layer.provide(Layer.merge(layerProjectService, layerProjectSetupScriptRunner)),
       ),

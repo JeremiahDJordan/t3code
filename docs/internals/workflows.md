@@ -82,3 +82,38 @@ promise jobs in small batches so a job that queues jobs cannot spin inside one c
 
 QuickJS records source positions only at some opcodes, so for a loop of pure arithmetic the
 reported line is the last recorded position before it, not the loop.
+
+## Commands
+
+`exec()` is a host call like `agent()`: the sandbox process asks, and the server runs the command
+([`WorkflowExec`](../../apps/server/src/workflow/WorkflowExec.ts)), since QuickJS has no I/O.
+
+A command leaves no subagent row, so its journal is a table of its own, `workflow_exec_results`,
+keyed by the coordinator thread and a call id built like an agent's: a hash of the command, its
+workspace, timeout and `env`, and its occurrence. A result is recorded only once the command
+ended, so one a Stop or restart cut short runs again on Retry, and one that finished is replayed
+even when it failed or timed out, because commands may not be idempotent (owner, 2026-10-14). The
+run that finishes drops its rows, since only a failed or stopped run is retried.
+
+On macOS a command runs under the profile of Bob's commands (`commandSandboxSpawn` in
+[`bobSandbox.ts`](../../apps/server/src/provider/acp/bobSandbox.ts)), so both keep one set of
+credential, `.env` and T3-state rules. A command in a workspace may write its worktree; one in the
+base checkout may not, since that is the starting thread's working copy, holding the user's
+uncommitted work, which no branch or cleanup sets apart; a command that must write gets a
+workspace. Supervised and plan mode keep worktrees read-only too, as a role never runs broader
+than the coordinator. A workspace command also writes the git
+folders a commit in a linked worktree needs: the worktree's own folder in the repository, objects,
+refs and their logs, but never its `commondir`, `gitdir` or `config.worktree`, which would let a
+command point git, run outside the sandbox later, at hooks of its own. The repository's `config`
+and `hooks` stay read-only for the same reason. The network is Full access's alone, and even then
+reaches other machines only: a port or socket on this one, Docker's, tmux's or T3's, would undo
+the write rules. Build tools' caches are writable (`BUILD_CACHES`) so builds and offline installs
+work; a later build outside the sandbox runs what a command leaves there, which the owner accepted
+for workable builds. Without a sandbox, only Full access runs a command, unsandboxed.
+
+A command is its own process group, killed past its timeout, on Stop, and right after its shell
+exits, so a background job it started does not outlive it. A process that leaves the group keeps
+the pipes open at most two seconds longer. Each stream keeps its last 256 KB: a value entering the
+script is at most 1 MB of JSON, and escaping can grow output six-fold, so the result is cut
+further until it fits. A server that crashes mid-command leaves the command running; nothing in
+the command watches for its parent, as the sandbox process's watchdog does.

@@ -82,7 +82,7 @@ heap.grow = (pages) => {
 const STACK_LIMIT_BYTES = 1024 * 1024;
 /** CPU the sandbox allows itself to read a script's error. */
 const HOST_READ_MS = 100;
-/** `agent()` and `workspace()` calls one run may make. */
+/** `agent()`, `workspace()` and `exec()` calls one run may make. */
 const MAX_HOST_CALLS = 5_000;
 /** `log()` and `phase()` calls one run may make; later ones are dropped. */
 const MAX_EMITS = 1_000;
@@ -182,6 +182,12 @@ const RUN_PRELUDE = String.raw`(() => {
     return fromJson(await host.call("agent", toJson({ prompt, opts: opts ?? {} }, "agent() options")));
   };
   globalThis.workspace = async (name) => fromJson(await host.call("workspace", toJson({ name }, "workspace() name")));
+  globalThis.exec = async (command, opts) => {
+    if (typeof command !== "string" || command.trim() === "") {
+      throw new TypeError("exec(command, opts) needs a non-empty command string.");
+    }
+    return fromJson(await host.call("exec", toJson({ command, opts: opts ?? {} }, "exec() options")));
+  };
   globalThis.phase = (title) => { host.emit("phase", text(title, ${MAX_PHASE_CHARS})); };
   globalThis.log = (message) => { host.emit("log", text(message, ${MAX_LOG_CHARS})); };
   const MAX_ITEMS = 4096;
@@ -230,7 +236,7 @@ const META_PRELUDE = String.raw`(() => {
   const add = Function.prototype.call.bind(Set.prototype.add);
   const stop = () => { throw new Error("__t3_meta_read_stop"); };
   const unavailable = () => stop;
-  for (const name of ["agent", "workspace", "parallel", "pipeline", "phase", "log", "workflow"]) {
+  for (const name of ["agent", "workspace", "exec", "parallel", "pipeline", "phase", "log", "workflow"]) {
     globalThis[name] = stop;
   }
   ${NO_CLOCK}
@@ -496,7 +502,7 @@ async function runScript(
     if (nextId > MAX_HOST_CALLS) {
       return rejected(
         deferred,
-        `A workflow can make at most ${MAX_HOST_CALLS} agent() and workspace() calls.`,
+        `A workflow can make at most ${MAX_HOST_CALLS} agent(), workspace() and exec() calls.`,
       );
     }
     const payload = vm.typeof(payloadHandle) === "string" ? vm.getString(payloadHandle) : "null";
@@ -505,7 +511,12 @@ async function runScript(
       return rejected(deferred, `The ${kind}() input is larger than 1 MB of JSON.`);
     }
     pending.set(id, deferred);
-    ops.push({ type: "call", kind: kind === "workspace" ? "workspace" : "agent", id, payload });
+    ops.push({
+      type: "call",
+      kind: kind === "workspace" || kind === "exec" ? kind : "agent",
+      id,
+      payload,
+    });
     return deferred.handle;
   });
   const emit = vm.newFunction("emit", (kindHandle, textHandle) => {
