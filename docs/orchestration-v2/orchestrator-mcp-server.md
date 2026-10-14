@@ -303,8 +303,8 @@ can correct it and call again.
 
 ### `t3_workflow_run`
 
-Starts a workflow script (`source`, or `file` in the thread's workspace or its
-attachments) as a delegated task driven by the hidden `t3-workflow` provider, and
+Starts a workflow script (`source`, or `file` in the thread's workspace, the
+`workflows` folder of T3 home, or its attachments) as a delegated task driven by the hidden `t3-workflow` provider, and
 returns its `taskId` at once. `dryRun` reports the phases, clamped limits and role
 bindings; a role that cannot bind returns `unbound_roles` with candidates and starts
 nothing unless `unboundRoles: "inherit"`. A script that returns an object with a

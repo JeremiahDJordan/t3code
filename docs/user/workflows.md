@@ -5,8 +5,8 @@ try to refute each finding, then a judge, for instance. Each stage can use its o
 model. T3 Code runs the script in the background on your environment and shows every agent as a
 child thread. When the workflow ends, the agent that started it is woken with the result.
 
-A workflow is a file. You keep it like any other file, in the repo or with your notes, and hand it
-to an agent when you want it run.
+A workflow is a file. You keep it like any other file, in the repo, with your notes, or in your
+own [workflows folder](#keeping-your-own-workflows), and hand it to an agent when you want it run.
 
 ## Running a workflow
 
@@ -44,6 +44,18 @@ thread takes no messages; Stop and Retry on its card are how you steer it.
 In the web and desktop apps, the starting thread's **Lineage** section in its details also lists the
 run: expand it for its phases and their agents, select an agent to open its thread, or stop the
 whole run.
+
+## Keeping your own workflows
+
+Workflows you use in every project can live in one place instead of a copy in each repo: the
+`workflows` folder of the T3 home on the machine the environment runs on, `~/.t3/workflows` by
+default (`<path>/workflows` for a server started with `--home-dir <path>`). Create the folder,
+save the file there, and ask for it by name: "Run `judged-review.workflow.js` on `main..HEAD`." A
+file in a subfolder goes by its path inside the folder, such as `team/review.workflow.js`. When the
+project has a file at the same path, the project's copy runs.
+
+An agent cannot point T3 Code at any other file on the machine this way: a path or a link that
+leads out of the folder or the project is refused.
 
 ## Moving a workflow to another environment
 

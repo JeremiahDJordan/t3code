@@ -292,7 +292,7 @@ export const OrchestratorMcpWorkflowRunInput = Schema.Struct({
   file: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(4_096)).annotate({
       description:
-        "A workflow file in this thread's workspace (relative or absolute), one of this thread's message attachments (its path or name), or a Claude workflow run's script (its absolute path under ~/.claude/projects). The server reads it.",
+        "A workflow file in this thread's workspace (relative or absolute), in the user's workflows folder (the workflows folder of T3 home, by its name there such as review.workflow.js, or its absolute path), one of this thread's message attachments (its path or name), or a Claude workflow run's script (its absolute path under ~/.claude/projects). A name found in both the workspace and the workflows folder reads the workspace's. Nothing else is read. The server reads it.",
     }),
   ),
   args: Schema.optional(

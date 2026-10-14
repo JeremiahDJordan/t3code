@@ -34,6 +34,7 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
 import type { McpInvocationScope } from "../mcp/McpInvocationContext.ts";
@@ -400,6 +401,8 @@ interface Harness {
   /** The starting thread's checkout. */
   readonly cwd: string;
   readonly attachmentsDir: string;
+  /** The server's T3 home, a temporary folder. */
+  readonly t3Home: string;
   readonly startParent: Effect.Effect<void>;
   /** Starts the parent with message attachments. */
   readonly startParentWith: (attachments: ReadonlyArray<ChatAttachment>) => Effect.Effect<void>;
@@ -703,6 +706,7 @@ const withHarness = <A, E>(
         current = {
           cwd,
           attachmentsDir: config.attachmentsDir,
+          t3Home: config.baseDir,
           startParent: startParentWith([]),
           startParentWith,
           runWorkflow: (input) => workflowMcp.runWorkflow(parentScope, input),
@@ -1713,6 +1717,49 @@ return args.range`;
     ),
   );
 
+  it.live("reads a workflow from the user's workflows folder, and nothing else outside", () =>
+    withHarness(
+      { name: "workflow-personal", behave: () => Effect.succeed({ text: "noted" }) },
+      (harness) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const script = (name: string) => `export const meta = { t3: 1, name: "${name}" }
+return 1`;
+          const folder = `${harness.t3Home}/workflows`;
+          yield* fs.makeDirectory(`${folder}/team`, { recursive: true });
+          yield* fs.writeFileString(`${folder}/mine.workflow.js`, script("personal"));
+          yield* fs.writeFileString(`${folder}/team/review.js`, script("team-review"));
+          yield* fs.writeFileString(`${folder}/shared.workflow.js`, script("personal-shared"));
+          yield* fs.writeFileString(`${harness.cwd}/shared.workflow.js`, script("project-shared"));
+          // Beside the folder, and a link out of it: neither may be read.
+          yield* fs.writeFileString(`${harness.t3Home}/beside.js`, script("beside"));
+          yield* fs.symlink(`${harness.t3Home}/beside.js`, `${folder}/link.js`);
+          yield* harness.startParent;
+
+          const nameOf = (file: string) =>
+            harness.runWorkflow({ file, dryRun: true }).pipe(Effect.map((result) => result.name));
+          expect(yield* nameOf("mine.workflow.js")).toBe("personal");
+          expect(yield* nameOf("team/review.js")).toBe("team-review");
+          expect(yield* nameOf(`${folder}/mine.workflow.js`)).toBe("personal");
+          // The project's copy wins over a personal one of the same name.
+          expect(yield* nameOf("shared.workflow.js")).toBe("project-shared");
+
+          for (const file of [
+            "link.js",
+            "../beside.js",
+            `${harness.t3Home}/beside.js`,
+            `${folder}/../beside.js`,
+          ]) {
+            const refused = yield* harness
+              .runWorkflow({ file, dryRun: true })
+              .pipe(Effect.asVoid, Effect.flip);
+            expect(refused.code).toBe("invalid_request");
+            expect(refused.message).toContain(`the workflows folder ${folder}`);
+          }
+        }).pipe(Effect.provide(NodeServices.layer)),
+    ),
+  );
+
   it.live("refuses a role broader than the starting thread's modes before starting anything", () =>
     withHarness(
       { name: "workflow-modes", behave: () => Effect.succeed({ text: "noted" }) },
@@ -2142,18 +2189,9 @@ return 1`,
   it.live("runs a Claude workflow run's own script by its path", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      // Claude keeps a run's script under ~/.claude/projects; the read below sees a scratch home.
+      // Not through HOME: the home folder is read once per process and kept.
       const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-workflow-home-" });
-      const previousHome = process.env.HOME;
-      // Claude keeps a run's script under ~/.claude/projects; point HOME at a scratch one.
-      yield* Effect.acquireRelease(
-        Effect.sync(() => {
-          process.env.HOME = home;
-        }),
-        () =>
-          Effect.sync(() => {
-            process.env.HOME = previousHome;
-          }),
-      );
       const scriptPath = `${home}/.claude/projects/repo/session/workflow-script.js`;
       yield* fs.makeDirectory(`${home}/.claude/projects/repo/session`, { recursive: true });
       yield* fs.writeFileString(
@@ -2165,7 +2203,9 @@ return 1`,
         (harness) =>
           Effect.gen(function* () {
             yield* harness.startParent;
-            const dry = yield* harness.runWorkflow({ file: scriptPath, dryRun: true });
+            const dry = yield* harness
+              .runWorkflow({ file: scriptPath, dryRun: true })
+              .pipe(Effect.provideService(HostProcess.HomeDirectory, home));
             expect(dry).toMatchObject({
               status: "dry_run",
               name: "from-claude",

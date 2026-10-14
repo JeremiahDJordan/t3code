@@ -103,7 +103,29 @@ const make = Effect.gen(function* () {
       return { scope: threadScope, caller } as const;
     });
 
-  /** Reads a file in the thread's checkout or one of its message attachments. */
+  /** The user's own workflows, kept once for every project. */
+  const personalWorkflowsDir = path.join(config.baseDir, "workflows");
+
+  /**
+   * `file` resolved against `root`, links followed, when it exists and stays inside `root`, so
+   * a path or a link cannot reach anything else.
+   */
+  const fileWithin = (root: string, file: string) =>
+    Effect.gen(function* () {
+      const realRoot = yield* fileSystem.realPath(root).pipe(Effect.option);
+      const resolved = yield* fileSystem.realPath(path.resolve(root, file)).pipe(Effect.option);
+      return Option.isSome(realRoot) &&
+        Option.isSome(resolved) &&
+        (resolved.value === realRoot.value ||
+          resolved.value.startsWith(`${realRoot.value}${path.sep}`))
+        ? resolved.value
+        : null;
+    });
+
+  /**
+   * Reads a file in the thread's checkout, then the user's workflows folder, or one of the
+   * thread's message attachments.
+   */
   const readWorkflowFile = (
     caller: Pick<OrchestrationV2ThreadProjection, "thread" | "messages">,
     file: string,
@@ -131,19 +153,9 @@ const make = Effect.gen(function* () {
               .getById(caller.thread.projectId)
               .pipe(Effect.mapError(orchestrationError("Unable to read this thread's project"))),
           )?.workspaceRoot;
-        if (workspaceRoot !== undefined) {
-          const root = yield* fileSystem.realPath(workspaceRoot).pipe(Effect.option);
-          const resolved = yield* fileSystem
-            .realPath(path.resolve(workspaceRoot, file))
-            .pipe(Effect.option);
-          if (
-            Option.isSome(root) &&
-            Option.isSome(resolved) &&
-            (resolved.value === root.value || resolved.value.startsWith(`${root.value}${path.sep}`))
-          ) {
-            target = resolved.value;
-          }
-        }
+        if (workspaceRoot !== undefined) target = yield* fileWithin(workspaceRoot, file);
+        // The project's own copy wins over a personal one of the same name.
+        target ??= yield* fileWithin(personalWorkflowsDir, file);
       }
       if (target === null) {
         // A Claude run's own script, under the same containment Copy script uses.
@@ -153,7 +165,7 @@ const make = Effect.gen(function* () {
         }
         return yield* failure(
           "invalid_request",
-          `${file} is not in this thread's workspace, among its message attachments, or a Claude workflow script.`,
+          `${file} is not in this thread's workspace, the workflows folder ${personalWorkflowsDir}, among its message attachments, or a Claude workflow script.`,
         );
       }
       const opened = target;
