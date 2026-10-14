@@ -181,7 +181,8 @@ const RUN_PRELUDE = String.raw`(() => {
     }
     return fromJson(await host.call("agent", toJson({ prompt, opts: opts ?? {} }, "agent() options")));
   };
-  globalThis.workspace = async (name) => fromJson(await host.call("workspace", toJson({ name }, "workspace() name")));
+  globalThis.workspace = async (name, opts) =>
+    fromJson(await host.call("workspace", toJson({ name, opts: opts ?? {} }, "workspace() options")));
   globalThis.exec = async (command, opts) => {
     if (typeof command !== "string" || command.trim() === "") {
       throw new TypeError("exec(command, opts) needs a non-empty command string.");

@@ -547,10 +547,11 @@ const withHarness = <A, E>(
       const layerWorkspaces = Layer.succeed(
         WorkflowWorkspaces.WorkflowWorkspaces,
         WorkflowWorkspaces.WorkflowWorkspaces.of({
-          ensure: ({ branch }) =>
-            Ref.update(workspaceLog, (all) => [...all, `ensure ${branch}`]).pipe(
-              Effect.as({ worktreePath: `${cwd}-worktrees/${branch.replaceAll("/", "-")}` }),
-            ),
+          ensure: ({ branch, from }) =>
+            Ref.update(workspaceLog, (all) => [
+              ...all,
+              `ensure ${branch}${from === undefined ? "" : ` from ${from}`}`,
+            ]).pipe(Effect.as({ worktreePath: `${cwd}-worktrees/${branch.replaceAll("/", "-")}` })),
           remove: ({ branch }) => Ref.update(workspaceLog, (all) => [...all, `remove ${branch}`]),
         }),
       );
@@ -1723,6 +1724,65 @@ return await parallel(["one", "two"].map((name) => async () => {
             }),
         );
       }),
+  );
+
+  it.live("starts a workspace from a ref or another workspace, and refuses a bad from", () =>
+    withHarness(
+      {
+        name: "workflow-workspace-from",
+        behave: () => Effect.succeed({ text: "noted" }),
+      },
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.startParent;
+          const started = yield* harness.runWorkflow({
+            source: String.raw`export const meta = { t3: 1, name: "from" }
+const impl = await workspace("impl")
+const review = await workspace("review", { from: impl })
+await workspace("pinned", { from: "feature/base" })
+const refused = []
+const attempts = [
+  ["a", { from: "HEAD~1" }],
+  ["b", { from: "--output=/tmp/x" }],
+  ["c", { from: 42 }],
+  ["d", { from: { name: "nope" } }],
+  ["e", { color: "red" }],
+  ["impl", { from: "main" }],
+]
+for (const [name, opts] of attempts) {
+  try { await workspace(name, opts) } catch (error) { refused.push(error.message) }
+}
+return { review: review.branch, refused }`,
+          });
+          if (started.status !== "started") return yield* Effect.die("not started");
+          yield* harness.parentWoken;
+          const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+          const branchOf = (name: string) =>
+            WorkflowWorkspaces.workflowWorkspaceBranch(started.childThreadId, name);
+          expect(
+            workflowValue(parent.subagents.find((task) => task.id === started.taskId)!.result),
+          ).toEqual({
+            review: branchOf("review"),
+            refused: [
+              expect.stringContaining("from must be a branch name, a commit SHA"),
+              expect.stringContaining("from must be a branch name, a commit SHA"),
+              expect.stringContaining("from must be a branch name, a commit SHA"),
+              expect.stringContaining('from workspace "nope" was not created in this run'),
+              expect.stringContaining('option "color" is not supported'),
+              expect.stringContaining('workspace("impl"): this run already asked for it'),
+            ],
+          });
+          // The review starts from the impl workspace's branch, by its full ref.
+          expect(yield* Ref.get(harness.workspaceLog)).toEqual([
+            `ensure ${branchOf("impl")}`,
+            `ensure ${branchOf("review")} from refs/heads/${branchOf("impl")}`,
+            `ensure ${branchOf("pinned")} from feature/base`,
+            `remove ${branchOf("impl")}`,
+            `remove ${branchOf("review")}`,
+            `remove ${branchOf("pinned")}`,
+          ]);
+        }),
+    ),
   );
 
   it.live("runs a Claude workflow: model tiers become roles and isolation gets a worktree", () =>
