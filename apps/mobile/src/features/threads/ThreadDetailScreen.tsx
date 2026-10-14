@@ -153,7 +153,8 @@ import {
   workflowCoordinatorSource,
   WorkflowThreadBar,
 } from "./WorkflowCard";
-import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { useThreadSubagents, useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { workflowPillSegment } from "./threadAgentsPresentation";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
@@ -431,7 +432,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const composerError = useAtomValue(threadComposerErrorsAtom)[selectedThreadKey]?.message ?? null;
   const queuedCount = useThreadQueuedCount(props.selectedThreadDetailRef);
   const turnSubagents = useThreadTurnSubagents(props.selectedThreadDetailRef);
-  const agentsSegment = resolveSubagentPillSegment(turnSubagents);
+  const threadSubagents = useThreadSubagents(props.selectedThreadDetailRef);
+  const agentsSegment =
+    resolveSubagentPillSegment(turnSubagents) ??
+    workflowPillSegment(threadSubagents ?? [], turnSubagents?.subagents ?? []);
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
   // A provider-native subagent shows status instead of a composer.
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
@@ -569,12 +573,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       return { kind: "working", startedAt: props.activeWorkStartedAt };
     }
     if (pendingBackgroundWork !== null && contentPresentationKind === "ready") {
-      // One subagent opens its own thread, as its row in the feed does; several, or commands
-      // beside it, open the agents sheet, which lists them.
-      const subagentThreads = pendingBackgroundWork.items.flatMap((item) =>
-        item.childThreadId === undefined ? [] : [item.childThreadId],
-      );
-      const onlyThread = pendingBackgroundWork.items.length === 1 ? subagentThreads[0] : undefined;
       return {
         kind: "background",
         label: pendingBackgroundWork.title,
@@ -582,15 +580,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           .map((item) => item.label)
           .join(", ")}`,
         waiting: pendingBackgroundWork.waiting,
+        // The agents sheet lists what still runs, with a workflow as its card.
         onPress: () => {
           Keyboard.dismiss();
-          if (onlyThread !== undefined) {
-            navigation.navigate("Thread", {
-              environmentId: props.environmentId,
-              threadId: onlyThread,
-            });
-            return;
-          }
           navigation.navigate("ThreadAgents", {
             environmentId: props.environmentId,
             threadId: props.selectedThread.id,

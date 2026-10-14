@@ -18,7 +18,9 @@ limits it will run with, and which provider and model each role gets on this env
 role cannot be matched, nothing starts: the agent asks you, picks one of the offered models, or
 runs those roles on its own model if you tell it to.
 
-While the workflow runs, the thread that started it shows a workflow card and waits. The card lists
+While the workflow runs, the thread that started it shows a workflow card and waits. On the phone
+the card opens from the agents button above the composer, or from the **Waiting on** status there,
+rather than sitting in the conversation. The card lists
 the workflow's phases in order. Each phase shows how many agents are working, done, failed or
 stopped, and opens to list its agents with their role, provider and model. Select an agent to open
 its thread. When an agent asks for approval or a question, the card shows **Waiting for you** and

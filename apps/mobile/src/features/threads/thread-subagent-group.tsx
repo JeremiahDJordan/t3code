@@ -4,7 +4,6 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { summarizeSubagentStatuses } from "@t3tools/client-runtime/state/subagent-display";
 import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
 import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
-import { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/client-runtime/state/workflowCard";
 import type { EnvironmentId, OrchestrationV2TurnItem } from "@t3tools/contracts";
 import { Pressable, View, type ColorValue } from "react-native";
 
@@ -17,7 +16,6 @@ import { serverEnvironment } from "../../state/server";
 import { environmentThreadDetails } from "../../state/threads";
 import { SubagentElapsed } from "./SubagentElapsed";
 import { SubagentRow } from "./SubagentRow";
-import { WorkflowCard } from "./WorkflowCard";
 import { WorkLogBlock } from "./work-log-layout";
 
 type SubagentItem = Extract<OrchestrationV2TurnItem, { type: "subagent" }>;
@@ -54,30 +52,7 @@ export function ThreadSubagentGroup(props: {
     environmentThreadDetails.threadAtom(scopeThreadRef(props.environmentId, items[0]!.threadId)),
     selectSubagents,
   );
-  // A workflow run draws as its card once its live row says so; the rest stay a group.
-  const workflowRuns = items.flatMap((item) => {
-    if (item.providerInstanceId !== WORKFLOW_PROVIDER_INSTANCE_ID) return [];
-    const live = liveAgents?.find((agent) => agent.id === item.subagentId);
-    return live?.t3Workflow?.kind === "run" ? [live] : [];
-  });
-  const members =
-    workflowRuns.length === 0
-      ? items
-      : items.filter((item) => !workflowRuns.some((run) => run.id === item.subagentId));
-  const workflowCards = workflowRuns.map((coordinator) => (
-    <WorkflowCard
-      key={coordinator.id}
-      environmentId={props.environmentId}
-      coordinator={coordinator}
-      phaseDisclosure={{
-        expandedRows: props.expandedRows,
-        anchorKey: props.anchorKey,
-        onToggleRow: props.onToggleRow,
-      }}
-    />
-  ));
-  if (members.length === 0) return <>{workflowCards}</>;
-  const agents = members.map((item) => {
+  const agents = items.map((item) => {
     const live = liveAgents?.find((agent) => agent.id === item.subagentId);
     return {
       ...item,
@@ -181,12 +156,5 @@ export function ThreadSubagentGroup(props: {
       ) : null}
     </WorkLogBlock>
   );
-  return workflowCards.length === 0 ? (
-    group
-  ) : (
-    <>
-      {workflowCards}
-      {group}
-    </>
-  );
+  return group;
 }

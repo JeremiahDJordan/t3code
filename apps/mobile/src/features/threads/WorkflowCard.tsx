@@ -188,8 +188,8 @@ interface PhaseDisclosure {
 
 /**
  * A workflow run as one card: its declared phases, each with its agents, and
- * the run's controls. It sits in the starting thread's feed and heads the
- * coordinator thread.
+ * the run's controls. It sits in the starting thread's agents sheet and heads
+ * the coordinator thread.
  */
 export function WorkflowCard(props: {
   readonly environmentId: EnvironmentId;
@@ -198,6 +198,8 @@ export function WorkflowCard(props: {
   readonly phaseDisclosure?: PhaseDisclosure;
   /** Drawn at the top of the coordinator thread, which needs no link to itself. */
   readonly inCoordinatorThread?: boolean;
+  /** Opens a thread the card links to; a sheet replaces itself rather than pushing. */
+  readonly onOpenThread?: (threadId: ThreadId) => void;
 }) {
   const { environmentId, coordinator } = props;
   const navigation = useNavigation();
@@ -268,6 +270,10 @@ export function WorkflowCard(props: {
   const result = live ? null : subagentCardDetail(workflowResultPreview(coordinator.result));
 
   const openThread = (threadId: ThreadId) => {
+    if (props.onOpenThread) {
+      props.onOpenThread(threadId);
+      return;
+    }
     // Push, not navigate: navigate reuses this Thread route, so back would
     // skip the thread the card sits in.
     navigation.dispatch(

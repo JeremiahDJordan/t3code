@@ -22,7 +22,7 @@ export type FloatingWorkingStatus =
       readonly label: string;
       readonly accessibilityLabel: string;
       readonly waiting: boolean;
-      /** Opens the one subagent's thread, or the agents sheet. */
+      /** Opens the agents sheet. */
       readonly onPress: () => void;
     }
   // A native /goal on an idle thread: paused, blocked, complete, or set.

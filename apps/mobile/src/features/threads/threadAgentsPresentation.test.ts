@@ -11,6 +11,8 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   groupWorkflowAgentsByPhase,
   resolveSubagentRowPresentation,
+  sheetWorkflowRuns,
+  workflowPillSegment,
 } from "./threadAgentsPresentation";
 
 const base = {
@@ -150,5 +152,42 @@ describe("groupWorkflowAgentsByPhase", () => {
     const plain = { ...workflowAgent("plain", null, 1), t3Workflow: undefined };
 
     expect(groupWorkflowAgentsByPhase([plain], null)).toBeNull();
+  });
+});
+
+function workflowRun(
+  id: string,
+  status: OrchestrationV2Subagent["status"],
+  updated: number,
+): OrchestrationV2Subagent {
+  const updatedAt = DateTime.makeUnsafe(`2026-10-07T11:00:${String(updated).padStart(2, "0")}Z`);
+  return {
+    ...workflowAgent(id, null, 1),
+    providerInstanceId: ProviderInstanceId.make("t3-workflow"),
+    status,
+    t3Workflow: { kind: "run", name: id, phases: [] },
+    updatedAt,
+  };
+}
+
+describe("the agents sheet's workflow cards", () => {
+  const live = workflowRun("live", "running", 1);
+  const earlierDone = workflowRun("earlier-done", "completed", 2);
+  const thisTurnDone = workflowRun("this-turn-done", "completed", 3);
+  const plain = workflowAgent("plain", null, 4);
+  const thread = [earlierDone, plain, thisTurnDone, live];
+
+  it("shows every live run and the turn's finished ones, live first", () => {
+    expect(sheetWorkflowRuns(thread, [thisTurnDone, plain]).map((run) => run.id)).toEqual([
+      "live",
+      "this-turn-done",
+    ]);
+  });
+
+  it("keeps the pill for a run still going from an earlier turn", () => {
+    expect(workflowPillSegment(thread, [plain])?.label).toBe("1 workflow");
+    // The turn's own segment already counts a run in the turn.
+    expect(workflowPillSegment(thread, [live])).toBeNull();
+    expect(workflowPillSegment([earlierDone, plain], [])).toBeNull();
   });
 });
