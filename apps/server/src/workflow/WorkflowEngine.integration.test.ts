@@ -1235,6 +1235,57 @@ return { a, b, c }`,
     }),
   );
 
+  it.live("reports a running workflow's progress in task_status", () =>
+    Effect.gen(function* () {
+      const slowStarted = yield* Deferred.make<void>();
+      const releaseSlow = yield* Deferred.make<void>();
+      return yield* withHarness(
+        {
+          name: "workflow-progress",
+          behave: (turn) =>
+            turn.text === "slow"
+              ? Deferred.succeed(slowStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseSlow)),
+                  Effect.as({ text: "SLOW" }),
+                )
+              : Effect.succeed({ text: turn.text.toUpperCase() }),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const started = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "progress", phases: [{ title: "Review" }, { title: "Judge" }] }
+const quick = await agent("quick", { phase: "Review" })
+log("Halfway there, quick said " + quick + ".\nThe rest is detail.")
+return [quick, await agent("slow", { phase: "Review" })]`,
+            });
+            if (started.status !== "started") return yield* Effect.die("not started");
+            yield* Deferred.await(slowStarted);
+            const running = yield* harness.orchestratorMcp
+              .taskStatus(parentScope, started.taskId)
+              .pipe(Effect.orDie);
+            expect(running.status).toBe("running");
+            expect(running.workflowProgress).toEqual({
+              runningPhases: ["Review"],
+              agentsDone: 1,
+              agentsStarted: 2,
+              waitingForUser: 0,
+              latestLog: "Halfway there, quick said QUICK.",
+            });
+
+            yield* Deferred.succeed(releaseSlow, undefined);
+            yield* harness.parentWoken;
+            const finished = yield* harness.orchestratorMcp
+              .taskStatus(parentScope, started.taskId)
+              .pipe(Effect.orDie);
+            expect(finished.status).toBe("completed");
+            // Once the run ends its result says the rest.
+            expect(finished.workflowProgress).toBeUndefined();
+          }),
+      );
+    }),
+  );
+
   it.live("says what the run's agents spent, in each provider's unit", () =>
     withHarness(
       {
