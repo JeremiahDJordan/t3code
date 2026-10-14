@@ -4,6 +4,7 @@ import {
   CommandId,
   EnvironmentId,
   NodeId,
+  ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS,
   type OrchestrationV2ThreadShell,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
@@ -179,6 +180,94 @@ describe("OrchestratorMcpService", () => {
         const commandIds = yield* Ref.get(acknowledgementCommandIds);
         assert.equal(commandIds.length, 2);
         assert.notEqual(commandIds[0], commandIds[1]);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("cuts a long result to parts that resultOffset pages through", () =>
+    Effect.gen(function* () {
+      const parentThreadId = ThreadId.make("thread:mcp-page-parent");
+      const childThreadId = ThreadId.make("thread:mcp-page-child");
+      const taskId = NodeId.make("node:mcp-page-task");
+      // The emoji straddles the first cut, so that part ends a character early.
+      const result = `${"x".repeat(ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS - 1)}😀${"y".repeat(25_000)}`;
+      const parentProjection = {
+        thread: { id: parentThreadId },
+        runs: [],
+        contextTransfers: [],
+        subagents: [
+          {
+            id: taskId,
+            threadId: parentThreadId,
+            origin: "app_owned",
+            childThreadId,
+            driver: "codex",
+            model: "gpt-5.6-terra",
+            status: "completed",
+            result,
+            completionDelivery: { state: "acknowledged" },
+          },
+        ],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const childProjection = {
+        thread: { id: childThreadId },
+        runs: [{ id: RunId.make("run:mcp-page-child"), ordinal: 1, status: "completed" }],
+        contextTransfers: [],
+        messages: [],
+        subagents: [],
+        providerThreads: [],
+      } as unknown as OrchestrationV2ThreadProjection;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) =>
+            Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-page"),
+        requestNamespace: "provider-session:mcp-page",
+        thread: {
+          threadId: parentThreadId,
+          providerSessionId: "provider-session:mcp-page",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        },
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const parts: Array<string> = [];
+        const notes: Array<string> = [];
+        let offset: number | undefined;
+        for (let read = 0; read < 3; read += 1) {
+          const page = yield* service.taskStatus(scope, taskId, offset);
+          assert.equal(page.status, "completed");
+          const [part, note] = page.summary!.split("\n\n[T3: ");
+          assert.isAtMost(part!.length, ORCHESTRATOR_MCP_TASK_RESULT_MAX_CHARS);
+          parts.push(part!);
+          notes.push(note!);
+          // One copy of a long result is enough.
+          assert.equal(page.latestTerminalSummary, "[T3: the same text as summary.]");
+          offset = Number(/resultOffset: (\d+)/.exec(note!)?.[1]);
+          if (note!.includes("the end of this result")) break;
+        }
+        assert.equal(parts.join(""), result);
+        assert.deepEqual(notes, [
+          `characters 0-19999 of ${result.length} shown. Call task_status with resultOffset: 19999 for the next part.]`,
+          `characters 19999-39999 of ${result.length} shown. Call task_status with resultOffset: 39999 for the next part.]`,
+          `characters 39999-${result.length} of ${result.length}, the end of this result.]`,
+        ]);
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
     }),
   );

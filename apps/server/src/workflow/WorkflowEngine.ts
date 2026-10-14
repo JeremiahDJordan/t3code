@@ -77,6 +77,21 @@ const scriptError = (reason: string) =>
 const truncate = (text: string, max: number) =>
   text.length > max ? `${text.slice(0, max - 1)}…` : text;
 
+/**
+ * A finished script's value as its run's result. A value that is not text reads as a JSON block,
+ * which the thread shows as code and an agent still reads as the result. An object's string
+ * `summary` leads, as prose, ahead of its other fields, so a result cut to fit an agent's tool
+ * output still opens with it.
+ */
+function workflowResultText(value: unknown): string {
+  if (typeof value === "string") return value;
+  const block = (data: unknown) => `\`\`\`json\n${toIndentedJsonText(data)}\n\`\`\``;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return block(value);
+  const { summary, ...rest } = value as Record<string, unknown>;
+  if (typeof summary !== "string" || summary.trim() === "") return block(value);
+  return Object.keys(rest).length === 0 ? summary : `${summary}\n\n${block(rest)}`;
+}
+
 interface AgentCall {
   readonly prompt: string;
   readonly label: string | undefined;
@@ -978,14 +993,10 @@ const make = Effect.gen(function* () {
         if (Exit.isSuccess(exit)) {
           yield* removeWorkspaces;
           const value = exit.value;
-          // A value that is not text reads as a JSON block, which the thread shows as code and an
-          // agent still reads as the result.
           const result =
             value === null || value === undefined
               ? "The workflow finished without a result."
-              : typeof value === "string"
-                ? value
-                : `\`\`\`json\n${toIndentedJsonText(value)}\n\`\`\``;
+              : workflowResultText(value);
           // A script may carry on past null results; the starting agent should
           // still know some of its agents never delivered.
           const notes = [
