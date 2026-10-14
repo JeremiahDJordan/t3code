@@ -4,7 +4,8 @@
  * its worktree is created the first time at the commit its `from` names (the
  * coordinator checkout's HEAD by default), found again on a rerun (set up again
  * if its setup failed), and removed when a run finishes unless it has
- * uncommitted changes. Branches stay: merging is the script's business.
+ * uncommitted changes. The finished run then deletes a branch without commits
+ * of its own; one with commits stays, as merging is the script's business.
  */
 import type { ProjectId, ThreadId } from "@t3tools/contracts";
 import { sha256 } from "@noble/hashes/sha2";
@@ -25,7 +26,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 export class WorkflowWorkspaceError extends Schema.TaggedError<WorkflowWorkspaceError>()(
   "WorkflowWorkspaceError",
   {
-    operation: Schema.Literals(["create", "setup", "remove", "resolve", "check"]),
+    operation: Schema.Literals(["create", "setup", "remove", "resolve", "check", "settle"]),
     branch: Schema.String,
     /** What a `resolve` could not find. */
     from: Schema.optional(Schema.String),
@@ -38,6 +39,8 @@ export class WorkflowWorkspaceError extends Schema.TaggedError<WorkflowWorkspace
         return `The setup script failed in the worktree for ${this.branch}.`;
       case "resolve":
         return `from "${this.from}" is not a branch or commit in this repository.`;
+      case "settle":
+        return `Could not delete the branch ${this.branch}.`;
       default:
         return `Could not ${this.operation} the worktree for ${this.branch}.`;
     }
@@ -71,6 +74,13 @@ export const isWorkflowWorkspaceFrom = (from: string) =>
  * however its `from` has moved since.
  */
 export const workflowWorkspaceBaseRef = (branch: string) => `refs/t3/workflow-bases/${branch}`;
+
+/**
+ * What a finished run does with a workspace's branch: "unchanged" deletes it when it has no
+ * commits beyond where it started, "always" deletes it whatever it holds, "keep" keeps it.
+ */
+export const WORKFLOW_WORKSPACE_CLEANUPS = ["unchanged", "keep", "always"] as const;
+export type WorkflowWorkspaceCleanup = (typeof WORKFLOW_WORKSPACE_CLEANUPS)[number];
 
 /** The branch a run's workspace lives on; stable across reruns of the same run. */
 export function workflowWorkspaceBranch(coordinatorThreadId: ThreadId, name: string): string {
@@ -108,6 +118,16 @@ export class WorkflowWorkspaces extends Context.Service<
       readonly worktreePath: string;
       readonly branch: string;
     }) => Effect.Effect<void, WorkflowWorkspaceError>;
+    /**
+     * Ends a finished run's hold on a branch whose worktree is gone or kept: deletes the branch as
+     * `cleanup` says and drops its start record. A branch with an unknown start is only deleted by
+     * "always", and git refuses one checked out anywhere. Whether the branch is gone.
+     */
+    readonly settle: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+      readonly cleanup: WorkflowWorkspaceCleanup;
+    }) => Effect.Effect<{ readonly deleted: boolean }, WorkflowWorkspaceError>;
   }
 >()("t3/workflow/WorkflowWorkspaces") {}
 
@@ -427,7 +447,36 @@ const make = Effect.gen(function* () {
       Effect.withSpan("WorkflowWorkspaces.changes"),
     );
 
-  return WorkflowWorkspaces.of({ ensure, changes, remove });
+  const settle: WorkflowWorkspaces["Service"]["settle"] = (input) =>
+    Effect.gen(function* () {
+      const ref = workflowWorkspaceBaseRef(input.branch);
+      const start = yield* commitOf(input.cwd, ref);
+      const tip = yield* commitOf(input.cwd, `refs/heads/${input.branch}`);
+      const deletes =
+        tip !== null &&
+        (input.cleanup === "always" || (input.cleanup === "unchanged" && tip === start));
+      // Forced because the branch has no upstream and its start need not be merged anywhere; the
+      // check above is what keeps commits, and "always" is the script asking to drop them.
+      if (deletes) {
+        yield* git.deleteLocalBranch({ cwd: input.cwd, refName: input.branch, force: true });
+      }
+      if (start !== null) {
+        yield* git.execute({
+          operation: "WorkflowWorkspaces.dropStart",
+          cwd: input.cwd,
+          args: ["update-ref", "-d", ref],
+        });
+      }
+      return { deleted: tip === null || deletes };
+    }).pipe(
+      Effect.catchTags({
+        GitCommandError: (cause) =>
+          new WorkflowWorkspaceError({ operation: "settle", branch: input.branch, cause }),
+      }),
+      Effect.withSpan("WorkflowWorkspaces.settle"),
+    );
+
+  return WorkflowWorkspaces.of({ ensure, changes, remove, settle });
 });
 
 export const layer = Layer.effect(WorkflowWorkspaces, make);

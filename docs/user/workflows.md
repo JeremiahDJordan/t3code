@@ -86,10 +86,13 @@ Agents that can edit files take turns in a shared checkout. Agents in plan mode,
 their own worktree, run side by side. A workflow can give a group of agents a worktree on its own
 branch with `workspace(name)`. The worktree starts at the starting thread's commit, or at what
 `workspace(name, { from })` names: a branch, a commit SHA, or another workspace, whose branch it
-starts from. Retry starts it at the same commit even if that branch has moved. When the run
-finishes, its worktrees are removed and the branches stay for you to merge. A worktree with changes
-nobody committed stays, and so do the worktrees of a run that failed or was stopped, so Retry
-carries on in them. A kept worktree belongs to its agents' threads, so
+starts from. Retry starts it at the same commit even if that branch has moved.
+
+When the run finishes, its worktrees are removed. A branch its agents committed to stays for you to
+merge, and a branch with no new commits is deleted. `workspace(name, { cleanup: "keep" })` keeps the
+branch either way, and `cleanup: "always"` deletes it even with commits. A worktree with changes
+nobody committed stays with its branch. A run that failed or was stopped deletes nothing, so Retry
+carries on in its worktrees. A kept worktree belongs to its agents' threads, so
 [storage cleanup](project-settings.md#storage-cleanup) removes it like any other once it is clean.
 
 For reviewers, `workspace(name, { from, readOnly: true })` gives a worktree whose agents run side by
@@ -97,7 +100,8 @@ side and are told not to change it. Agents keep their own provider's permissions
 checks rather than prevents: before an agent starts there and when its result is read, any changed
 file (ignored files aside) or new commit turns that agent's result into `null`, and the workflow's
 log says what changed. The change stays for you to inspect, and agents sharing the workspace at the
-time get `null` too, since it is unclear which of them made it.
+time get `null` too, since it is unclear which of them made it. A read-only branch that gained
+commits is kept when the run finishes, and the log names it.
 
 ## Limits and cost
 
