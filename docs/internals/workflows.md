@@ -40,6 +40,14 @@ if each `agent()` call reaches the same child id on every run, so ids derive fro
 sandbox has no clock, randomness or I/O. Anything nondeterministic in a call's id or in what the
 script can read starts agents over on every Retry.
 
+An agent whose provider was only unavailable is started again by the engine, after a delay, as
+the call's next attempt, so automatic retries follow the same journal and a rerun starts the call's
+retries over. Most providers never mark a failure `retryable`, so besides that flag the engine
+treats a connection failure, Codex's `serverOverloaded`, and an unmarked failure whose message says
+the model is at capacity or overloaded as transient (`isTransientFailure`). A usage limit counts
+only when marked retryable: most wait hours for their reset. The delay is taken outside the
+agent's concurrency slot and checkout, so other agents run meanwhile.
+
 Agents an earlier turn left running each hold a concurrency slot, and a writer its checkout, until
 they end or the rerun reaches them, so a Retry cannot exceed the run's limit or start a second
 writer where one is still editing. A failed or stopped run keeps its worktrees
