@@ -135,8 +135,10 @@ inside itself, is longer than 256 characters, or repeats so much that it expands
 set of values. The rest are checked against strings of up to hundreds of thousands of characters,
 fewer the larger the pattern; a longer string fails the check, as does a result whose strings
 together take too long to check against large patterns. An agent that fails, is stopped, or
-would pass the run's agent limit gives `null` instead, and the workflow's result notes how many
-did.
+would pass the run's agent limit gives `null` instead, and the workflow's result lists those agents
+and why. For the reason in the script, pass `detailed: true`: `agent()` then gives
+`{ ok: true, value }`, or `{ ok: false, reason, message }` with a `reason` of
+`provider-unavailable`, `failed`, `stopped`, `limit` or `no-result` (no result matching the schema).
 Workflows written for Claude Code's Workflow tool run too, except for `agentType`, `budget` and
 nested workflows.
 

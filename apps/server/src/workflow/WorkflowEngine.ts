@@ -153,10 +153,30 @@ interface AgentCall {
   readonly workspace: string | undefined;
   readonly isolated: boolean;
   readonly effort: string | undefined;
+  /** Whether the script asked for an outcome, `{ ok, value }` or `{ ok: false, reason, message }`. */
+  readonly detailed: boolean;
 }
 
-const T3_OPTIONS = new Set(["as", "label", "phase", "schema", "workspace", "effort"]);
-const CLAUDE_OPTIONS = new Set(["label", "phase", "schema", "model", "effort", "isolation"]);
+/** Why an agent() call delivered no result, as `detailed: true` tells the script. */
+type MissedReason = "provider-unavailable" | "failed" | "stopped" | "limit" | "no-result";
+
+type AgentOutcome =
+  | { readonly ok: true; readonly value: unknown }
+  | { readonly ok: false; readonly reason: MissedReason; readonly message: string };
+
+/** agent() calls that returned null a finished run lists by name in its result. */
+const MAX_LISTED_MISSES = 20;
+
+const T3_OPTIONS = new Set(["as", "label", "phase", "schema", "workspace", "effort", "detailed"]);
+const CLAUDE_OPTIONS = new Set([
+  "label",
+  "phase",
+  "schema",
+  "model",
+  "effort",
+  "isolation",
+  "detailed",
+]);
 
 /** Reads an `agent()` call's options, refusing anything the dialect does not have. */
 function decodeAgentCall(
@@ -220,6 +240,9 @@ function decodeAgentCall(
   if (options.isolation !== undefined && options.isolation !== "worktree") {
     return Result.fail('agent(): isolation can only be "worktree".');
   }
+  if (options.detailed !== undefined && typeof options.detailed !== "boolean") {
+    return Result.fail("agent(): detailed must be true or false.");
+  }
   const roleName = Result.getOrUndefined(role);
   return Result.succeed({
     prompt,
@@ -230,6 +253,7 @@ function decodeAgentCall(
     workspace: workspace?.name as string | undefined,
     isolated: options.isolation === "worktree",
     effort: Result.getOrUndefined(effort),
+    detailed: options.detailed === true,
   });
 }
 
@@ -671,12 +695,13 @@ const make = Effect.gen(function* () {
       const out = makeTurnOutput(turn, startedAt);
       const cwd = input.runtimePolicy.cwd;
       const created = new Map<string, Workspace>();
-      // agent() calls the run's agent limit turned into null. The result says
-      // so, or a script that carried on past them would read as a clean run.
-      let capped = 0;
-      let agentLimit = 0;
-      /** agent() calls that returned null because their agent did not finish well. */
-      let unfinished = 0;
+      // agent() calls that delivered no result, and why. The result lists
+      // them, or a script that carried on past them would read as a clean run.
+      const missed: Array<{
+        readonly label: string;
+        readonly reason: MissedReason;
+        readonly message: string;
+      }> = [];
       let terminalSent = false;
       const finishTurn = (outcome: Parameters<typeof out.terminal>[0]) =>
         Effect.suspend(() => {
@@ -751,7 +776,6 @@ const make = Effect.gen(function* () {
           return yield* scriptError("This thread is not a workflow run.");
         }
         const run = invocation.value;
-        agentLimit = run.limits.agents;
         const source = yield* sources.get(run.sourceHash);
         if (Option.isNone(source)) {
           return yield* scriptError(
@@ -948,27 +972,47 @@ const make = Effect.gen(function* () {
             return yield* Deferred.await(ready);
           });
 
+        /** Records a call that delivered nothing, for the run's result. */
+        const miss = (label: string, reason: MissedReason, message: string) =>
+          Effect.sync((): AgentOutcome => {
+            nulls += 1;
+            missed.push({ label, reason, message });
+            return { ok: false, reason, message };
+          });
+
         const resultOf = (task: OrchestrationV2Subagent, call: AgentCall, label: string) =>
           Effect.gen(function* () {
             if (task.status !== "completed") {
-              nulls += 1;
-              unfinished += 1;
               yield* log(
                 `${label} ${task.status}${task.result ? `: ${truncate(task.result, 300)}` : ""}. agent() returned null.`,
               );
-              return null;
+              if (task.status !== "failed") {
+                return yield* miss(label, "stopped", task.result ?? "The agent was stopped.");
+              }
+              const failure = yield* failureOf(task);
+              return yield* miss(
+                label,
+                failure !== null && (failure.class === "usage_limit" || isTransientFailure(failure))
+                  ? "provider-unavailable"
+                  : "failed",
+                failure?.message ?? task.result ?? "The agent failed.",
+              );
             }
-            if (call.schema === undefined) return task.result;
-            if (task.structuredResult !== undefined) return task.structuredResult;
+            if (call.schema === undefined) return { ok: true, value: task.result } as const;
+            if (task.structuredResult !== undefined) {
+              return { ok: true, value: task.structuredResult } as const;
+            }
             const recovered = structuredResultFromText(call.schema, task.result ?? "");
-            if (Result.isSuccess(recovered)) return recovered.success;
-            nulls += 1;
-            unfinished += 1;
+            if (Result.isSuccess(recovered)) return { ok: true, value: recovered.success } as const;
             yield* log(
               `${label} returned no valid result (${recovered.failure}). agent() returned null.`,
             );
-            return null;
+            return yield* miss(label, "no-result", recovered.failure);
           });
+
+        /** What the script gets: the outcome when it asked for one, else the value or null. */
+        const deliver = (call: AgentCall, outcome: AgentOutcome) =>
+          call.detailed ? outcome : outcome.ok ? outcome.value : null;
 
         const agent = (request: unknown, context: { readonly phase: string | null }) =>
           Effect.gen(function* () {
@@ -1022,15 +1066,20 @@ const make = Effect.gen(function* () {
             const label = call.label ?? truncate(call.prompt.split("\n")[0]!.trim(), 80);
 
             if (started >= run.limits.agents) {
-              nulls += 1;
-              capped += 1;
               if (!capReported) {
                 capReported = true;
                 yield* log(
                   `Reached this run's limit of ${run.limits.agents} agents; agent() returns null from here on.`,
                 );
               }
-              return null;
+              return deliver(
+                call,
+                yield* miss(
+                  label,
+                  "limit",
+                  `This run reached its limit of ${run.limits.agents} agents.`,
+                ),
+              );
             }
             started += 1;
             yield* enterPhase(phase);
@@ -1049,22 +1098,23 @@ const make = Effect.gen(function* () {
 
             // A read-only workspace is checked before an agent starts in it and whenever an
             // agent's result is read: a change there discards the result and is left in place.
-            const readOnlyChanged = Effect.gen(function* () {
-              if (workspace?.readOnly !== true || cwd === null) return false;
+            const readOnlyChange = Effect.gen(function* () {
+              if (workspace?.readOnly !== true || cwd === null) return undefined;
               const change = yield* workspaces
                 .changes({ cwd, worktreePath: workspace.worktreePath, branch: workspace.branch })
                 .pipe(Effect.catch((error) => Effect.succeed(error.message)));
-              if (change === null) return false;
-              nulls += 1;
-              unfinished += 1;
-              yield* log(
-                `${label}: read-only workspace "${call.workspace}" has changes (${change}). agent() returned null.`,
-              );
-              return true;
+              if (change === null) return undefined;
+              const message = `read-only workspace "${call.workspace}" has changes (${change})`;
+              yield* log(`${label}: ${message}. agent() returned null.`);
+              return yield* miss(label, "failed", message);
             });
-            const deliver = (task: OrchestrationV2Subagent) =>
+            /** A finished agent's outcome, unless its read-only workspace changed. */
+            const outcomeOf = (task: OrchestrationV2Subagent) =>
               Effect.gen(function* () {
-                if (task.status === "completed" && (yield* readOnlyChanged)) return null;
+                if (task.status === "completed") {
+                  const changed = yield* readOnlyChange;
+                  if (changed !== undefined) return changed;
+                }
                 return yield* resultOf(task, call, label);
               });
 
@@ -1088,11 +1138,12 @@ const make = Effect.gen(function* () {
               );
             if (prior?.status === "completed") {
               reused += 1;
-              return yield* deliver(prior);
+              return deliver(call, yield* outcomeOf(prior));
             }
             // A read-only workspace that changed fails the call before it starts again.
-            if ((prior === undefined || isTerminal(prior.status)) && (yield* readOnlyChanged)) {
-              return null;
+            if (prior === undefined || isTerminal(prior.status)) {
+              const changed = yield* readOnlyChange;
+              if (changed !== undefined) return deliver(call, changed);
             }
             const checkout = workspace?.branch ?? "";
             // Agents in a read-only workspace run side by side whatever their role: none may write.
@@ -1215,10 +1266,8 @@ const make = Effect.gen(function* () {
             for (let retry = 0; ; retry += 1) {
               const finished = yield* runAttempt(attached, firstAttempt);
               if (finished === undefined) {
-                nulls += 1;
-                unfinished += 1;
                 yield* log(`${label} could not start. agent() returned null.`);
-                return null;
+                return deliver(call, yield* miss(label, "failed", "The agent could not start."));
               }
               const delay = AGENT_RETRY_DELAYS[retry];
               const failure =
@@ -1226,7 +1275,7 @@ const make = Effect.gen(function* () {
                   ? yield* failureOf(finished)
                   : null;
               if (delay === undefined || failure === null || !isTransientFailure(failure)) {
-                return yield* deliver(finished);
+                return deliver(call, yield* outcomeOf(finished));
               }
               yield* log(
                 `${label} failed because its provider is unavailable (${truncate(failure.message, 300)}). Trying again in ${formatDelay(delay)}, retry ${retry + 1} of ${AGENT_RETRY_DELAYS.length}.`,
@@ -1409,14 +1458,23 @@ const make = Effect.gen(function* () {
               : workflowResultText(value);
           // A script may carry on past null results; the starting agent should
           // still know some of its agents never delivered.
-          const notes = [
-            capped === 0
-              ? null
-              : `this run reached its limit of ${agentLimit} agents, so ${capped} agent() call${capped === 1 ? "" : "s"} returned null without running`,
-            unfinished === 0
-              ? null
-              : `${unfinished} agent${unfinished === 1 ? "" : "s"} failed, stopped or returned no valid result, so agent() returned null for ${unfinished === 1 ? "it" : "them"}`,
-          ].filter((note) => note !== null);
+          const oneLine = (text: string, max: number) =>
+            truncate(text.replace(/\s+/g, " ").trim(), max);
+          const notes =
+            missed.length === 0
+              ? []
+              : [
+                  `Note: agent() returned null for ${missed.length === 1 ? "1 call" : `${missed.length} calls`}:`,
+                  ...missed
+                    .slice(0, MAX_LISTED_MISSES)
+                    .map(
+                      ({ label, reason, message }) =>
+                        `- ${oneLine(label, 80)}: ${reason} (${oneLine(message, 160)})`,
+                    ),
+                  ...(missed.length > MAX_LISTED_MISSES
+                    ? [`- and ${missed.length - MAX_LISTED_MISSES} more`]
+                    : []),
+                ];
           const spent = yield* spentBy(coordinatorThreadId);
           yield* Effect.uninterruptible(
             out
@@ -1424,7 +1482,7 @@ const make = Effect.gen(function* () {
                 [
                   result,
                   ...(spent === undefined ? [] : [spent]),
-                  ...(notes.length === 0 ? [] : [`Note: ${notes.join("; ")}.`]),
+                  ...(notes.length === 0 ? [] : [notes.join("\n")]),
                 ].join("\n\n"),
               )
               .pipe(Effect.andThen(finishTurn({ status: "completed" }))),
