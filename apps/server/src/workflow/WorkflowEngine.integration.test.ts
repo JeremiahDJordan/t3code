@@ -982,7 +982,7 @@ describe("workflow engine", () => {
 const reads = await parallel([1, 2, 3].map((n) => () => agent("read " + n, { as: "reader" })))
 const writes = await parallel([1, 2].map((n) => () => agent("write " + n, { as: "writer" })))
 const failed = await agent("fail please", { as: "reader" })
-const capped = await agent("one too many", { as: "reader" })
+const capped = await agent("one too many", { as: "reader", detailed: true })
 return { reads, writes, failed, capped }`,
               });
               if (started.status !== "started") return yield* Effect.die("not started");
@@ -990,15 +990,24 @@ return { reads, writes, failed, capped }`,
               const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
               const coordinator = parent.subagents.find((task) => task.id === started.taskId)!;
               // The script carried on past the cap, so its result says what the cap cut.
-              const [result, note] = coordinator.result!.split("\n\nNote: ");
+              const [result, note] = coordinator.result!.split("\n\n");
               expect(workflowValue(result)).toEqual({
                 reads: ["READ 1", "READ 2", "READ 3"],
                 writes: ["WRITE 1", "WRITE 2"],
                 failed: null,
-                capped: null,
+                // Asked for its outcome, the call says why it delivered nothing.
+                capped: {
+                  ok: false,
+                  reason: "limit",
+                  message: "This run reached its limit of 6 agents.",
+                },
               });
               expect(note).toBe(
-                "this run reached its limit of 6 agents, so 1 agent() call returned null without running; 1 agent failed, stopped or returned no valid result, so agent() returned null for it.",
+                [
+                  "Note: agent() returned null for 2 calls:",
+                  "- fail please: failed (the provider gave up)",
+                  "- one too many: limit (This run reached its limit of 6 agents.)",
+                ].join("\n"),
               );
               expect(yield* concurrency.peak("reader")).toBe(2);
               expect(yield* concurrency.peak("writer")).toBe(1);
@@ -1067,8 +1076,8 @@ return { reads, writes, failed, capped }`,
             const started = yield* harness.runWorkflow({
               // Three calls under a limit of three agents: retries are not new agents.
               source: String.raw`export const meta = { t3: 1, name: "provider-retry", limits: { agents: 3 } }
-const busy = await agent("busy")
-const always = await agent("always busy")
+const busy = await agent("busy", { detailed: true })
+const always = await agent("always busy", { detailed: true })
 const broken = await agent("broken")
 return { busy, always, broken }`,
             });
@@ -1078,8 +1087,12 @@ return { busy, always, broken }`,
             const coordinator = parent.subagents.find((task) => task.id === started.taskId)!;
             expect(coordinator.status).toBe("completed");
             expect(workflowValue(coordinator.result)).toEqual({
-              busy: "done at last",
-              always: null,
+              busy: { ok: true, value: "done at last" },
+              always: {
+                ok: false,
+                reason: "provider-unavailable",
+                message: "Claude API is overloaded (529).",
+              },
               broken: null,
             });
             // Two retries for "busy", all three for "always busy", none for a request the
@@ -1993,7 +2006,8 @@ return { reviews, tampered, late, refused }`,
                 late: null,
                 refused: expect.stringContaining("already asked for it with other options"),
               });
-              expect(note).toContain("2 agents failed, stopped or returned no valid result");
+              expect(note).toContain("agent() returned null for 2 calls:");
+              expect(note).toContain('read-only workspace "snapshot" has changes');
               // The late agent never started: the workspace had changed already.
               const agents = yield* harness.coordinatorChildren(started.childThreadId);
               expect(agents.map((task) => task.prompt.split(/\s/)[0]).toSorted()).toEqual([
@@ -2008,7 +2022,9 @@ return { reviews, tampered, late, refused }`,
               );
               const changed = log.turnItems.flatMap((item) =>
                 item.type === "assistant_message" &&
-                item.text.includes('read-only workspace "snapshot" has changes')
+                item.text.includes('read-only workspace "snapshot" has changes') &&
+                // The run's result lists them too; these are the log lines.
+                !item.text.includes("agent() returned null for")
                   ? [item.text]
                   : [],
               );
