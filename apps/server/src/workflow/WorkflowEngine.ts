@@ -264,9 +264,21 @@ interface WorkspaceCall {
   readonly name: string;
   /** A ref or commit SHA, or the name of a workspace whose branch it starts from. */
   readonly from: string | { readonly workspace: string } | undefined;
+  readonly readOnly: boolean;
 }
 
-const WORKSPACE_OPTIONS = new Set(["from"]);
+/** A workspace this turn has ready. */
+interface Workspace {
+  readonly branch: string;
+  readonly worktreePath: string;
+  readonly readOnly: boolean;
+}
+
+const WORKSPACE_OPTIONS = new Set(["from", "readOnly"]);
+
+/** What an agent in a read-only workspace is told; the engine checks the workspace afterwards. */
+const READ_ONLY_NOTE =
+  "Your working directory is a read-only workspace: do not create, edit or delete files in it, and do not commit or switch branches there. If anything in it changes, your result is discarded.";
 
 /** Reads a `workspace()` call's name and options. */
 function decodeWorkspaceCall(request: unknown): Result.Result<WorkspaceCall, string> {
@@ -288,14 +300,18 @@ function decodeWorkspaceCall(request: unknown): Result.Result<WorkspaceCall, str
       return Result.fail(`workspace(): option "${key}" is not supported.`);
     }
   }
+  if (options.readOnly !== undefined && typeof options.readOnly !== "boolean") {
+    return Result.fail("workspace(): readOnly must be true or false.");
+  }
+  const readOnly = options.readOnly === true;
   const from = options.from as unknown;
-  if (from === undefined) return Result.succeed({ name, from: undefined });
+  if (from === undefined) return Result.succeed({ name, from: undefined, readOnly });
   if (typeof from === "string" && WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)) {
-    return Result.succeed({ name, from });
+    return Result.succeed({ name, from, readOnly });
   }
   const source = (from as { readonly name?: unknown } | null)?.name;
   if (typeof from === "object" && typeof source === "string") {
-    return Result.succeed({ name, from: { workspace: source } });
+    return Result.succeed({ name, from: { workspace: source }, readOnly });
   }
   return Result.fail(
     "workspace(): from must be a branch name, a commit SHA, or a value returned by workspace().",
@@ -581,7 +597,7 @@ const make = Effect.gen(function* () {
       const startedAt = yield* DateTime.now;
       const out = makeTurnOutput(turn, startedAt);
       const cwd = input.runtimePolicy.cwd;
-      const created = new Map<string, { readonly branch: string; readonly worktreePath: string }>();
+      const created = new Map<string, Workspace>();
       // agent() calls the run's agent limit turned into null. The result says
       // so, or a script that carried on past them would read as a clean run.
       let capped = 0;
@@ -735,10 +751,7 @@ const make = Effect.gen(function* () {
           string,
           {
             readonly options: string;
-            readonly ready: Deferred.Deferred<
-              { readonly branch: string; readonly worktreePath: string },
-              WorkflowSandbox.WorkflowScriptError
-            >;
+            readonly ready: Deferred.Deferred<Workspace, WorkflowSandbox.WorkflowScriptError>;
           }
         >();
         const phaseStates = new Map<string, OrchestrationV2PlanStep["status"]>(
@@ -782,7 +795,7 @@ const make = Effect.gen(function* () {
         const ensureWorkspace = (call: WorkspaceCall) =>
           Effect.gen(function* () {
             const { name } = call;
-            const options = toJsonText({ from: call.from ?? null });
+            const options = toJsonText({ from: call.from ?? null, readOnly: call.readOnly });
             const existing = workspaceCalls.get(name);
             if (existing !== undefined) {
               if (existing.options !== options) {
@@ -792,10 +805,7 @@ const make = Effect.gen(function* () {
               }
               return yield* Deferred.await(existing.ready);
             }
-            const ready = yield* Deferred.make<
-              { readonly branch: string; readonly worktreePath: string },
-              WorkflowSandbox.WorkflowScriptError
-            >();
+            const ready = yield* Deferred.make<Workspace, WorkflowSandbox.WorkflowScriptError>();
             workspaceCalls.set(name, { options, ready });
             const ensured = yield* Effect.gen(function* () {
               if (cwd === null) {
@@ -824,7 +834,11 @@ const make = Effect.gen(function* () {
                   from,
                 })
                 .pipe(
-                  Effect.map(({ worktreePath }) => ({ branch, worktreePath })),
+                  Effect.map(({ worktreePath }) => ({
+                    branch,
+                    worktreePath,
+                    readOnly: call.readOnly,
+                  })),
                   Effect.mapError((error) => scriptError(`workspace("${name}"): ${error.message}`)),
                 );
             }).pipe(Effect.exit);
@@ -927,8 +941,30 @@ const make = Effect.gen(function* () {
                   ? yield* ensureWorkspace({
                       name: `agent-${callKey.slice(0, 8)}-${occurrence}`,
                       from: undefined,
+                      readOnly: false,
                     })
                   : undefined;
+
+            // A read-only workspace is checked before an agent starts in it and whenever an
+            // agent's result is read: a change there discards the result and is left in place.
+            const readOnlyChanged = Effect.gen(function* () {
+              if (workspace?.readOnly !== true || cwd === null) return false;
+              const change = yield* workspaces
+                .changes({ cwd, worktreePath: workspace.worktreePath, branch: workspace.branch })
+                .pipe(Effect.catch((error) => Effect.succeed(error.message)));
+              if (change === null) return false;
+              nulls += 1;
+              unfinished += 1;
+              yield* log(
+                `${label}: read-only workspace "${call.workspace}" has changes (${change}). agent() returned null.`,
+              );
+              return true;
+            });
+            const deliver = (task: OrchestrationV2Subagent) =>
+              Effect.gen(function* () {
+                if (task.status === "completed" && (yield* readOnlyChanged)) return null;
+                return yield* resultOf(task, call, label);
+              });
 
             const callId = `${callKey}:${occurrence}`;
             const commandIdFor = (attempt: number) =>
@@ -950,13 +986,20 @@ const make = Effect.gen(function* () {
               );
             if (prior?.status === "completed") {
               reused += 1;
-              return yield* resultOf(prior, call, label);
+              return yield* deliver(prior);
             }
             // A live child from an earlier turn is awaited, not restarted.
             const attached = prior !== undefined && !isTerminal(prior.status) ? prior : undefined;
+            if (attached === undefined && (yield* readOnlyChanged)) return null;
             const firstAttempt = prior === undefined ? 1 : attemptOf(prior) + 1;
             const checkout = workspace?.branch ?? "";
-            const lock = binding.writer ? yield* writerLock(checkout) : undefined;
+            // Agents in a read-only workspace run side by side whatever their role: none may write.
+            const lock =
+              binding.writer && workspace?.readOnly !== true
+                ? yield* writerLock(checkout)
+                : undefined;
+            const brief =
+              workspace?.readOnly === true ? `${call.prompt}\n\n${READ_ONLY_NOTE}` : call.prompt;
             // The call's identity keeps the binding the run started with, so
             // narrowing the thread never discards finished agents.
             const narrowed = clampWorkflowRoleBinding(binding, input.runtimePolicy);
@@ -977,9 +1020,7 @@ const make = Effect.gen(function* () {
                   parentRunId: input.runId,
                   parentNodeId: input.rootNodeId,
                   task:
-                    call.schema === undefined
-                      ? call.prompt
-                      : structuredTaskPrompt(call.prompt, call.schema),
+                    call.schema === undefined ? brief : structuredTaskPrompt(brief, call.schema),
                   ...(call.label === undefined
                     ? {}
                     : { title: truncate(call.label, MAX_LABEL_CHARS) }),
@@ -1059,7 +1100,7 @@ const make = Effect.gen(function* () {
               yield* log(`${label} could not start. agent() returned null.`);
               return null;
             }
-            return yield* resultOf(finished, call, label);
+            return yield* deliver(finished);
           }).pipe(
             Effect.mapError((error) =>
               WorkflowSandbox.isWorkflowScriptError(error)
@@ -1123,7 +1164,8 @@ const make = Effect.gen(function* () {
                 const result = yield* execs.run({
                   command: call.command,
                   cwd: execCwd,
-                  workspace: workspace !== undefined,
+                  // A read-only workspace is read-only to commands too, as to its agents.
+                  workspace: workspace !== undefined && workspace.readOnly !== true,
                   runtimeMode: input.runtimePolicy.runtimeMode,
                   interactionMode: input.runtimePolicy.interactionMode,
                   timeoutMs: call.timeoutMs,
