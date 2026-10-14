@@ -406,6 +406,100 @@ describe("WorkflowWorkspaces", () => {
     ),
   );
 
+  it.live(
+    "deletes a finished workspace's branch only when it holds nothing new, or when told",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const repo = yield* checkpointWorkspace("workflow-workspaces-settle");
+          const setups = yield* Ref.make<ReadonlyArray<string>>([]);
+          const failNext = yield* Ref.make(false);
+          const workspaceRoot = yield* Ref.make<string | null>(repo);
+          yield* Effect.gen(function* () {
+            const workspaces = yield* WorkflowWorkspaces.WorkflowWorkspaces;
+            const driver = yield* GitVcsDriver.GitVcsDriver;
+            const fs = yield* FileSystem.FileSystem;
+            const branchOf = (name: string) =>
+              WorkflowWorkspaces.workflowWorkspaceBranch(coordinatorThreadId, name);
+            const refs = () =>
+              git(repo, "for-each-ref", "--format=%(refname)", "refs/t3/workflow-bases")
+                .toString()
+                .trim();
+            /** A workspace, with a commit of its own when `commits`, its worktree removed. */
+            const finished = (name: string, commits: boolean) =>
+              Effect.gen(function* () {
+                const branch = branchOf(name);
+                const { worktreePath } = yield* workspaces.ensure({
+                  projectId,
+                  ownerThreadId: coordinatorThreadId,
+                  cwd: repo,
+                  branch,
+                });
+                if (commits) {
+                  yield* fs.writeFileString(`${worktreePath}/${name}.txt`, `${name}\n`);
+                  git(worktreePath, "add", `${name}.txt`);
+                  git(
+                    worktreePath,
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-qm",
+                    name,
+                  );
+                }
+                yield* workspaces.remove({ cwd: repo, worktreePath, branch });
+                return branch;
+              });
+            const branches = () => driver.listLocalBranchNames(repo);
+
+            // Nothing new: gone, start record and all.
+            const empty = yield* finished("empty", false);
+            expect(
+              yield* workspaces.settle({ cwd: repo, branch: empty, cleanup: "unchanged" }),
+            ).toEqual({ deleted: true });
+            expect(yield* branches()).not.toContain(empty);
+            // Commits of its own are the run's output and stay, whatever their merge state.
+            const output = yield* finished("output", true);
+            expect(
+              yield* workspaces.settle({ cwd: repo, branch: output, cleanup: "unchanged" }),
+            ).toEqual({ deleted: false });
+            expect(yield* branches()).toContain(output);
+            // Unless the script asked for "always"; "keep" keeps even an empty one.
+            const scratch = yield* finished("scratch", true);
+            expect(
+              yield* workspaces.settle({ cwd: repo, branch: scratch, cleanup: "always" }),
+            ).toEqual({ deleted: true });
+            expect(yield* branches()).not.toContain(scratch);
+            const kept = yield* finished("kept", false);
+            expect(yield* workspaces.settle({ cwd: repo, branch: kept, cleanup: "keep" })).toEqual({
+              deleted: false,
+            });
+            expect(yield* branches()).toContain(kept);
+            expect(refs()).toBe("");
+
+            // A branch whose start was never recorded may hold anything, so only "always" drops it.
+            const unknown = branchOf("unknown");
+            git(repo, "branch", unknown);
+            expect(
+              yield* workspaces.settle({ cwd: repo, branch: unknown, cleanup: "unchanged" }),
+            ).toEqual({ deleted: false });
+            // Git refuses to delete a branch a user has checked out, even when told.
+            const inspected = yield* finished("inspected", true);
+            const elsewhere = `${yield* fs.makeTempDirectoryScoped()}/inspecting`;
+            git(repo, "worktree", "add", "-q", elsewhere, inspected);
+            const refused = yield* workspaces
+              .settle({ cwd: repo, branch: inspected, cleanup: "always" })
+              .pipe(Effect.flip);
+            expect(refused.operation).toBe("settle");
+            expect(yield* branches()).toContain(inspected);
+            yield* driver.removeWorktree({ cwd: repo, path: elsewhere, force: true });
+          }).pipe(Effect.provide(makeLayer(repo, { setups, failNext, workspaceRoot })));
+        }),
+      ),
+  );
+
   it("keeps a from to a plain branch, tag or commit name", () => {
     for (const from of ["main", "HEAD", "origin/feature-x", "v1.2.0", "a1b2c3d", "_wip"]) {
       expect(WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)).toBe(true);

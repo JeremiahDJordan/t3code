@@ -265,6 +265,7 @@ interface WorkspaceCall {
   /** A ref or commit SHA, or the name of a workspace whose branch it starts from. */
   readonly from: string | { readonly workspace: string } | undefined;
   readonly readOnly: boolean;
+  readonly cleanup: WorkflowWorkspaces.WorkflowWorkspaceCleanup;
 }
 
 /** A workspace this turn has ready. */
@@ -272,9 +273,10 @@ interface Workspace {
   readonly branch: string;
   readonly worktreePath: string;
   readonly readOnly: boolean;
+  readonly cleanup: WorkflowWorkspaces.WorkflowWorkspaceCleanup;
 }
 
-const WORKSPACE_OPTIONS = new Set(["from", "readOnly"]);
+const WORKSPACE_OPTIONS = new Set(["from", "readOnly", "cleanup"]);
 
 /** What an agent in a read-only workspace is told; the engine checks the workspace afterwards. */
 const READ_ONLY_NOTE =
@@ -303,15 +305,21 @@ function decodeWorkspaceCall(request: unknown): Result.Result<WorkspaceCall, str
   if (options.readOnly !== undefined && typeof options.readOnly !== "boolean") {
     return Result.fail("workspace(): readOnly must be true or false.");
   }
-  const readOnly = options.readOnly === true;
+  const cleanup = WorkflowWorkspaces.WORKFLOW_WORKSPACE_CLEANUPS.find(
+    (value) => value === (options.cleanup ?? "unchanged"),
+  );
+  if (cleanup === undefined) {
+    return Result.fail('workspace(): cleanup must be "unchanged", "keep" or "always".');
+  }
+  const settings = { readOnly: options.readOnly === true, cleanup };
   const from = options.from as unknown;
-  if (from === undefined) return Result.succeed({ name, from: undefined, readOnly });
+  if (from === undefined) return Result.succeed({ name, from: undefined, ...settings });
   if (typeof from === "string" && WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)) {
-    return Result.succeed({ name, from, readOnly });
+    return Result.succeed({ name, from, ...settings });
   }
   const source = (from as { readonly name?: unknown } | null)?.name;
   if (typeof from === "object" && typeof source === "string") {
-    return Result.succeed({ name, from: { workspace: source }, readOnly });
+    return Result.succeed({ name, from: { workspace: source }, ...settings });
   }
   return Result.fail(
     "workspace(): from must be a branch name, a commit SHA, or a value returned by workspace().",
@@ -613,28 +621,51 @@ const make = Effect.gen(function* () {
         });
 
       /**
-       * Removes the run's worktrees once it finished. Git keeps a worktree with
-       * changes nobody committed, and so does the run, with its branch.
+       * Removes the run's worktrees once it finished, then settles their branches as each
+       * workspace's `cleanup` says. Git keeps a worktree with changes nobody committed, and so
+       * does the run, with its branch.
        */
       const removeWorkspaces = Effect.suspend(() =>
         Effect.forEach(
-          [...created.values()],
-          (workspace) =>
-            cwd === null
-              ? Effect.void
-              : workspaces
-                  .remove({ cwd, worktreePath: workspace.worktreePath, branch: workspace.branch })
-                  .pipe(
-                    Effect.catch((error) =>
-                      Effect.logWarning("Kept a workflow worktree", { error }).pipe(
-                        Effect.andThen(
-                          out.message(
-                            `Kept the worktree at ${workspace.worktreePath} (branch ${workspace.branch}): it has changes that are not committed.`,
-                          ),
-                        ),
+          [...created.entries()],
+          ([name, workspace]) =>
+            Effect.gen(function* () {
+              if (cwd === null) return;
+              const { branch, worktreePath } = workspace;
+              const removed = yield* workspaces.remove({ cwd, worktreePath, branch }).pipe(
+                Effect.as(true),
+                Effect.catch((error) =>
+                  Effect.logWarning("Kept a workflow worktree", { error }).pipe(
+                    Effect.andThen(
+                      out.message(
+                        `Kept the worktree at ${worktreePath} (branch ${branch}): it has changes that are not committed.`,
                       ),
                     ),
+                    Effect.as(false),
                   ),
+                ),
+              );
+              const settled = yield* workspaces
+                .settle({ cwd, branch, cleanup: removed ? workspace.cleanup : "keep" })
+                .pipe(
+                  Effect.catch((error) =>
+                    Effect.logWarning("Kept a workflow branch", { error }).pipe(
+                      Effect.as(undefined),
+                    ),
+                  ),
+                );
+              // A reviewer's commits are evidence, not output, so they are named rather than lost.
+              if (
+                removed &&
+                workspace.readOnly &&
+                workspace.cleanup !== "keep" &&
+                settled?.deleted === false
+              ) {
+                yield* out.message(
+                  `Kept branch ${branch} of read-only workspace "${name}": it is no longer where it started.`,
+                );
+              }
+            }),
           { discard: true },
         ),
       );
@@ -795,7 +826,11 @@ const make = Effect.gen(function* () {
         const ensureWorkspace = (call: WorkspaceCall) =>
           Effect.gen(function* () {
             const { name } = call;
-            const options = toJsonText({ from: call.from ?? null, readOnly: call.readOnly });
+            const options = toJsonText({
+              from: call.from ?? null,
+              readOnly: call.readOnly,
+              cleanup: call.cleanup,
+            });
             const existing = workspaceCalls.get(name);
             if (existing !== undefined) {
               if (existing.options !== options) {
@@ -838,6 +873,7 @@ const make = Effect.gen(function* () {
                     branch,
                     worktreePath,
                     readOnly: call.readOnly,
+                    cleanup: call.cleanup,
                   })),
                   Effect.mapError((error) => scriptError(`workspace("${name}"): ${error.message}`)),
                 );
@@ -942,6 +978,7 @@ const make = Effect.gen(function* () {
                       name: `agent-${callKey.slice(0, 8)}-${occurrence}`,
                       from: undefined,
                       readOnly: false,
+                      cleanup: "unchanged",
                     })
                   : undefined;
 

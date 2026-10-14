@@ -558,6 +558,11 @@ const withHarness = <A, E>(
           changes: ({ branch }) =>
             Ref.get(workspaceChanges).pipe(Effect.map((all) => all.get(branch) ?? null)),
           remove: ({ branch }) => Ref.update(workspaceLog, (all) => [...all, `remove ${branch}`]),
+          // Settles as if every branch had commits of its own: only "always" deletes it.
+          settle: ({ branch, cleanup }) =>
+            Ref.update(workspaceLog, (all) => [...all, `settle ${branch} ${cleanup}`]).pipe(
+              Effect.as({ deleted: cleanup === "always" }),
+            ),
         }),
       );
       const layerDatabase = SqlitePersistence.layerMemory;
@@ -1720,7 +1725,7 @@ return await parallel(["one", "two"].map((name) => async () => {
               expect(branches).toEqual(expected);
               expect(yield* Ref.get(harness.workspaceLog)).toEqual([
                 ...expected.map((branch) => `ensure ${branch}`),
-                ...expected.map((branch) => `remove ${branch}`),
+                ...expected.flatMap((branch) => [`remove ${branch}`, `settle ${branch} unchanged`]),
               ]);
               for (const task of yield* harness.coordinatorChildren(started.childThreadId)) {
                 const shell = yield* harness.threads.getThreadShell(task.childThreadId!);
@@ -1783,9 +1788,10 @@ return { review: review.branch, refused }`,
             `ensure ${branchOf("impl")}`,
             `ensure ${branchOf("review")} from refs/heads/${branchOf("impl")}`,
             `ensure ${branchOf("pinned")} from feature/base`,
-            `remove ${branchOf("impl")}`,
-            `remove ${branchOf("review")}`,
-            `remove ${branchOf("pinned")}`,
+            ...["impl", "review", "pinned"].flatMap((name) => [
+              `remove ${branchOf(name)}`,
+              `settle ${branchOf(name)} unchanged`,
+            ]),
           ]);
         }),
     ),
@@ -1875,6 +1881,75 @@ return { reviews, tampered, late, refused }`,
       }),
   );
 
+  it.live(
+    "settles each workspace's branch as it asks once the run finishes, never on failure",
+    () =>
+      withHarness(
+        {
+          name: "workflow-cleanup",
+          behave: () => Effect.succeed({ text: "noted" }),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const finished = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "cleanup" }
+const asked = [["out", {}], ["scratch", { cleanup: "always" }], ["kept", { cleanup: "keep" }], ["look", { readOnly: true }]]
+for (const [name, opts] of asked) await workspace(name, opts)
+try { await workspace("bad", { cleanup: "never" }) } catch (error) { return error.message }`,
+            });
+            if (finished.status !== "started") return yield* Effect.die("not started");
+            yield* harness.parentWoken;
+            const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+            expect(parent.subagents.find((task) => task.id === finished.taskId)!.result).toBe(
+              'workspace(): cleanup must be "unchanged", "keep" or "always".',
+            );
+            const branchOf = (name: string) =>
+              WorkflowWorkspaces.workflowWorkspaceBranch(finished.childThreadId, name);
+            const asked = [
+              ["out", "unchanged"],
+              ["scratch", "always"],
+              ["kept", "keep"],
+              ["look", "unchanged"],
+            ] as const;
+            expect(yield* Ref.get(harness.workspaceLog)).toEqual([
+              ...asked.map(([name]) => `ensure ${branchOf(name)}`),
+              ...asked.flatMap(([name, cleanup]) => [
+                `remove ${branchOf(name)}`,
+                `settle ${branchOf(name)} ${cleanup}`,
+              ]),
+            ]);
+            // The read-only branch moved, as the stand-in settles it, so the log names it.
+            const log = yield* harness.threads.getThreadRecords(
+              finished.childThreadId,
+              ["turnItems"],
+              { turnItemTypes: ["assistant_message"] },
+            );
+            const kept = log.turnItems.flatMap((item) =>
+              item.type === "assistant_message" && item.text.startsWith("Kept branch")
+                ? [item.text]
+                : [],
+            );
+            expect(kept).toEqual([
+              `Kept branch ${branchOf("look")} of read-only workspace "look": it is no longer where it started.`,
+            ]);
+
+            // A run that fails keeps its worktrees and branches for Retry.
+            yield* Ref.set(harness.workspaceLog, []);
+            const failed = yield* harness.runWorkflow({
+              source: String.raw`export const meta = { t3: 1, name: "fails" }
+await workspace("left")
+throw new Error("boom")`,
+            });
+            if (failed.status !== "started") return yield* Effect.die("not started");
+            yield* harness.parentWoken;
+            expect(yield* Ref.get(harness.workspaceLog)).toEqual([
+              `ensure ${WorkflowWorkspaces.workflowWorkspaceBranch(failed.childThreadId, "left")}`,
+            ]);
+          }),
+      ),
+  );
+
   it.live("runs a Claude workflow: model tiers become roles and isolation gets a worktree", () =>
     withHarness(
       {
@@ -1900,9 +1975,11 @@ return [judged, edited]`,
             workflowValue(parent.subagents.find((task) => task.id === started.taskId)!.result),
           ).toEqual(["claudeAgent: judge it", "codex: edit it"]);
           const log = yield* Ref.get(harness.workspaceLog);
-          expect(log).toHaveLength(2);
+          expect(log).toHaveLength(3);
           expect(log[0]).toMatch(/^ensure t3\/wf\/[0-9a-f]{10}\/agent-[0-9a-f]{8}-1$/);
           expect(log[1]).toBe(log[0]!.replace("ensure", "remove"));
+          // A Claude agent's worktree branch goes when the agent made no commits.
+          expect(log[2]).toBe(`${log[0]!.replace("ensure", "settle")} unchanged`);
           // Claude features T3 cannot honor are refused before anything starts.
           const refused = yield* harness
             .runWorkflow({
