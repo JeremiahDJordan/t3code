@@ -25,7 +25,8 @@ the workflow's phases in order. Each phase shows how many agents are working, do
 stopped, and opens to list its agents with their role, provider and model. Select an agent to open
 its thread. When an agent asks for approval or a question, the card shows **Waiting for you** and
 badges that agent's phase. Agents in a workflow do not send notifications, so check the card during
-a long run.
+a long run. The agent that started the workflow can tell you how it is going too: asked, it reads
+the running phases, how many agents are done, any waiting for you, and the latest log line.
 
 - **Stop** on the card stops every agent the workflow started.
 - **Retry** appears after a workflow fails or stops. It reruns the script from the top: agents that

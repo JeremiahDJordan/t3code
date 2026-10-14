@@ -239,6 +239,10 @@
       "types": "./src/threadPullRequests.ts",
       "import": "./src/threadPullRequests.ts"
     },
+    "./workflowCard": {
+      "types": "./src/workflowCard.ts",
+      "import": "./src/workflowCard.ts"
+    },
     "./changeRequestUrl": {
       "types": "./src/changeRequestUrl.ts",
       "import": "./src/changeRequestUrl.ts"

@@ -1,6 +1,7 @@
 import {
   CommandId,
   type RunId,
+  isOrchestrationV2WorkActive,
   isProviderAvailable,
   MessageId,
   type ModelSelection,
@@ -62,6 +63,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { deriveWorkflowCard, latestWorkflowLogLine } from "@t3tools/shared/workflowCard";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -123,6 +125,8 @@ const DEFAULT_THREAD_LIST_LIMIT = 50;
 const DEFAULT_THREAD_READ_LIMIT = 50;
 const DEFAULT_THREAD_RUN_LIMIT = 10;
 const DEFAULT_THREAD_ITEM_MAX_CHARS = 20_000;
+/** A running workflow's latest log line, as task_status reports it. */
+const WORKFLOW_LOG_LINE_MAX_CHARS = 200;
 
 interface ResolvedTarget {
   readonly modelSelection: ModelSelection;
@@ -1386,6 +1390,64 @@ const make = Effect.gen(function* () {
       ? crypto.randomUUIDv4().pipe(Effect.orDie)
       : Effect.succeed(clientRequestId);
 
+  /**
+   * A running workflow's progress as its card shows it: the coordinator
+   * thread's agents, those waiting on the user, and its latest log line.
+   * Undefined when it cannot be read; the task's status still is.
+   */
+  const workflowProgressOf = (
+    coordinator: OrchestrationV2Subagent,
+    coordinatorThread: Pick<OrchestrationV2ThreadProjection, "runs" | "subagents">,
+  ) =>
+    Effect.gen(function* () {
+      if (coordinator.childThreadId === null) return undefined;
+      const waitingThreadIds = new Set<ThreadId>();
+      for (const agent of coordinatorThread.subagents) {
+        if (agent.childThreadId === null || !isOrchestrationV2WorkActive(agent.status)) continue;
+        const { runtimeRequests } = yield* threadManagement.getThreadRecords(agent.childThreadId, [
+          "runtimeRequests",
+        ]);
+        if (runtimeRequests.some((request) => request.status === "pending")) {
+          waitingThreadIds.add(agent.childThreadId);
+        }
+      }
+      const card = deriveWorkflowCard({
+        coordinator,
+        coordinatorRuns: coordinatorThread.runs,
+        agents: coordinatorThread.subagents,
+        waitingThreadIds,
+      });
+      if (card === null) return undefined;
+      const latestRun = coordinatorThread.runs.toSorted(
+        (left, right) => right.ordinal - left.ordinal,
+      )[0];
+      const { turnItems } =
+        latestRun === undefined
+          ? { turnItems: [] }
+          : yield* threadManagement.getThreadRecords(coordinator.childThreadId, ["turnItems"], {
+              turnItemRunId: latestRun.id,
+              turnItemTypes: ["assistant_message"],
+            });
+      const latestLog = latestWorkflowLogLine(
+        turnItems.toSorted((left, right) => left.ordinal - right.ordinal).map((item) => ({ item })),
+        coordinatorThread.runs,
+      );
+      return {
+        runningPhases: card.phases
+          .filter((phase) => phase.status === "running")
+          .map((phase) => phase.title),
+        agentsDone: card.counts.done,
+        agentsStarted: card.counts.started,
+        waitingForUser: card.waitingForUser,
+        latestLog:
+          latestLog === null
+            ? null
+            : latestLog.length > WORKFLOW_LOG_LINE_MAX_CHARS
+              ? `${latestLog.slice(0, WORKFLOW_LOG_LINE_MAX_CHARS - 1)}…`
+              : latestLog,
+      };
+    }).pipe(Effect.orElseSucceed(() => undefined));
+
   const readTask = (
     scope: McpThreadInvocationScope,
     taskId: NodeId,
@@ -1510,6 +1572,10 @@ const make = Effect.gen(function* () {
             : status === "completed" && derivedResult !== null
               ? Result.getOrNull(structuredResultFromText(task.resultSchema, derivedResult))
               : null;
+      const workflowProgress =
+        task.t3Workflow?.kind === "run" && !isTerminalTaskStatus(status)
+          ? yield* workflowProgressOf(task, childControls)
+          : undefined;
       const response = {
         taskId: task.id,
         childThreadId: task.childThreadId,
@@ -1540,6 +1606,7 @@ const make = Effect.gen(function* () {
               request.status === "pending" &&
               request.responseCapability.type === "live",
           ),
+        ...(workflowProgress === undefined ? {} : { workflowProgress }),
         waitTimedOut,
       } satisfies OrchestratorMcpDelegateTaskResult;
       if (

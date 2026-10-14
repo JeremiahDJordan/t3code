@@ -241,6 +241,19 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description:
       "Blocking question ends mode=wait. Pass threadId=childThreadId to t3_pending_request_list, t3_pending_request_read (with requestId) and t3_pending_request_respond, or ask the user; the task's completion still wakes this thread.",
   }),
+  /** A workflow run's progress, while the task runs one. */
+  workflowProgress: Schema.optional(
+    Schema.Struct({
+      runningPhases: Schema.Array(Schema.String),
+      agentsDone: NonNegativeInt,
+      agentsStarted: NonNegativeInt,
+      waitingForUser: NonNegativeInt,
+      latestLog: Schema.NullOr(Schema.String),
+    }),
+  ).annotate({
+    description:
+      "For a running workflow: its running phases, agents done and started, agents waiting for the user, and its latest log line.",
+  }),
   waitTimedOut: Schema.Boolean.annotate({
     description:
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
