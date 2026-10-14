@@ -436,6 +436,8 @@ interface Harness {
   readonly workflowMcp: WorkflowMcpService.WorkflowMcpService["Service"];
   readonly orchestratorMcp: OrchestratorMcpService.OrchestratorMcpService["Service"];
   readonly workspaceLog: Ref.Ref<ReadonlyArray<string>>;
+  /** What a workspace check reports for a branch; a branch not listed has no changes. */
+  readonly workspaceChanges: Ref.Ref<ReadonlyMap<string, string>>;
 }
 
 const parentScope: McpInvocationScope = {
@@ -544,6 +546,7 @@ const withHarness = <A, E>(
         }),
       ];
       const workspaceLog = yield* Ref.make<ReadonlyArray<string>>([]);
+      const workspaceChanges = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
       const layerWorkspaces = Layer.succeed(
         WorkflowWorkspaces.WorkflowWorkspaces,
         WorkflowWorkspaces.WorkflowWorkspaces.of({
@@ -552,6 +555,8 @@ const withHarness = <A, E>(
               ...all,
               `ensure ${branch}${from === undefined ? "" : ` from ${from}`}`,
             ]).pipe(Effect.as({ worktreePath: `${cwd}-worktrees/${branch.replaceAll("/", "-")}` })),
+          changes: ({ branch }) =>
+            Ref.get(workspaceChanges).pipe(Effect.map((all) => all.get(branch) ?? null)),
           remove: ({ branch }) => Ref.update(workspaceLog, (all) => [...all, `remove ${branch}`]),
         }),
       );
@@ -750,6 +755,7 @@ const withHarness = <A, E>(
           workflowMcp,
           orchestratorMcp,
           workspaceLog,
+          workspaceChanges,
         };
         return yield* body(current);
       }).pipe(Effect.provide(layerAll));
@@ -1783,6 +1789,90 @@ return { review: review.branch, refused }`,
           ]);
         }),
     ),
+  );
+
+  it.live(
+    "runs writers side by side in a read-only workspace and discards results once it changed",
+    () =>
+      Effect.gen(function* () {
+        const both = yield* Deferred.make<void>();
+        const live = yield* Ref.make(0);
+        return yield* withHarness(
+          {
+            name: "workflow-read-only",
+            behave: (turn, harness) =>
+              Effect.gen(function* () {
+                if (turn.text.startsWith("review")) {
+                  // Writers in one read-only workspace overlap; if they took turns this would hang.
+                  if ((yield* Ref.updateAndGet(live, (count) => count + 1)) === 2) {
+                    yield* Deferred.succeed(both, undefined);
+                  }
+                  yield* Deferred.await(both);
+                  return { text: turn.text.includes("read-only workspace") ? "told" : "untold" };
+                }
+                if (turn.text.startsWith("tamper")) {
+                  const shell = yield* harness()
+                    .threads.getThreadShell(turn.threadId)
+                    .pipe(Effect.orDie);
+                  yield* Ref.set(
+                    harness().workspaceChanges,
+                    new Map([[shell!.branch!, "files changed: draft.txt"]]),
+                  );
+                  return { text: "tampered" };
+                }
+                return { text: "noted" };
+              }),
+          },
+          (harness) =>
+            Effect.gen(function* () {
+              yield* harness.startParent;
+              const started = yield* harness.runWorkflow({
+                source: String.raw`export const meta = { t3: 1, name: "read-only" }
+const snapshot = await workspace("snapshot", { from: "feature/x", readOnly: true })
+const reviews = await parallel(["a", "b"].map((n) => () => agent("review " + n, { workspace: snapshot })))
+const tampered = await agent("tamper", { workspace: snapshot })
+const late = await agent("late look", { workspace: snapshot })
+let refused = null
+try { await workspace("snapshot", { from: "feature/x" }) } catch (error) { refused = error.message }
+return { reviews, tampered, late, refused }`,
+              });
+              if (started.status !== "started") return yield* Effect.die("not started");
+              yield* harness.parentWoken;
+              const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+              const coordinator = parent.subagents.find((task) => task.id === started.taskId)!;
+              const [result, note] = coordinator.result!.split("\n\nNote: ");
+              expect(workflowValue(result)).toEqual({
+                reviews: ["told", "told"],
+                tampered: null,
+                late: null,
+                refused: expect.stringContaining("already asked for it with other options"),
+              });
+              expect(note).toContain("2 agents failed, stopped or returned no valid result");
+              // The late agent never started: the workspace had changed already.
+              const agents = yield* harness.coordinatorChildren(started.childThreadId);
+              expect(agents.map((task) => task.prompt.split(/\s/)[0]).toSorted()).toEqual([
+                "review",
+                "review",
+                "tamper",
+              ]);
+              const log = yield* harness.threads.getThreadRecords(
+                started.childThreadId,
+                ["turnItems"],
+                { turnItemTypes: ["assistant_message"] },
+              );
+              const changed = log.turnItems.flatMap((item) =>
+                item.type === "assistant_message" &&
+                item.text.includes('read-only workspace "snapshot" has changes')
+                  ? [item.text]
+                  : [],
+              );
+              expect(changed).toEqual([
+                expect.stringMatching(/^tamper: .*\(files changed: draft\.txt\)/),
+                expect.stringMatching(/^late look: /),
+              ]);
+            }),
+        );
+      }),
   );
 
   it.live("runs a Claude workflow: model tiers become roles and isolation gets a worktree", () =>

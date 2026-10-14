@@ -25,7 +25,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 export class WorkflowWorkspaceError extends Schema.TaggedError<WorkflowWorkspaceError>()(
   "WorkflowWorkspaceError",
   {
-    operation: Schema.Literals(["create", "setup", "remove", "resolve"]),
+    operation: Schema.Literals(["create", "setup", "remove", "resolve", "check"]),
     branch: Schema.String,
     /** What a `resolve` could not find. */
     from: Schema.optional(Schema.String),
@@ -94,6 +94,15 @@ export class WorkflowWorkspaces extends Context.Service<
       /** A ref or commit SHA, read only when the branch is first created. */
       readonly from?: string | undefined;
     }) => Effect.Effect<{ readonly worktreePath: string }, WorkflowWorkspaceError>;
+    /**
+     * How a workspace differs from where it started, or null when it does not: files changed,
+     * added or deleted (ignored files aside), or commits on its branch or checkout.
+     */
+    readonly changes: (input: {
+      readonly cwd: string;
+      readonly worktreePath: string;
+      readonly branch: string;
+    }) => Effect.Effect<string | null, WorkflowWorkspaceError>;
     readonly remove: (input: {
       readonly cwd: string;
       readonly worktreePath: string;
@@ -382,7 +391,43 @@ const make = Effect.gen(function* () {
       Effect.withSpan("WorkflowWorkspaces.remove"),
     );
 
-  return WorkflowWorkspaces.of({ ensure, remove });
+  const changes: WorkflowWorkspaces["Service"]["changes"] = (input) =>
+    Effect.gen(function* () {
+      const found: Array<string> = [];
+      const status = yield* git.execute({
+        operation: "WorkflowWorkspaces.changes",
+        cwd: input.worktreePath,
+        args: ["status", "--porcelain", "--untracked-files=normal"],
+      });
+      const files = status.stdout
+        .split("\n")
+        .filter((line) => line.length > 3)
+        .map((line) => line.slice(3));
+      if (files.length > 0) {
+        const shown = files.slice(0, 3).join(", ");
+        found.push(
+          `files changed: ${shown}${files.length > 3 ? ` and ${files.length - 3} more` : ""}`,
+        );
+      }
+      // A branch made before starts were recorded has no known start; only its files are checked.
+      const start = yield* commitOf(input.cwd, workflowWorkspaceBaseRef(input.branch));
+      if (start !== null) {
+        const head = yield* commitOf(input.worktreePath, "HEAD");
+        const tip = yield* commitOf(input.cwd, `refs/heads/${input.branch}`);
+        if (head !== start || tip !== start) {
+          found.push(`its branch or checkout moved off ${start.slice(0, 12)}, where it started`);
+        }
+      }
+      return found.length === 0 ? null : found.join("; ");
+    }).pipe(
+      Effect.catchTags({
+        GitCommandError: (cause) =>
+          new WorkflowWorkspaceError({ operation: "check", branch: input.branch, cause }),
+      }),
+      Effect.withSpan("WorkflowWorkspaces.changes"),
+    );
+
+  return WorkflowWorkspaces.of({ ensure, changes, remove });
 });
 
 export const layer = Layer.effect(WorkflowWorkspaces, make);

@@ -369,6 +369,43 @@ describe("WorkflowWorkspaces", () => {
     ),
   );
 
+  it.live("reports a workspace's files and commits that differ from where it started", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const repo = yield* checkpointWorkspace("workflow-workspaces-changes");
+        const setups = yield* Ref.make<ReadonlyArray<string>>([]);
+        const failNext = yield* Ref.make(false);
+        const workspaceRoot = yield* Ref.make<string | null>(repo);
+        yield* Effect.gen(function* () {
+          const workspaces = yield* WorkflowWorkspaces.WorkflowWorkspaces;
+          const fs = yield* FileSystem.FileSystem;
+          const branch = WorkflowWorkspaces.workflowWorkspaceBranch(coordinatorThreadId, "look");
+          const { worktreePath } = yield* workspaces.ensure({
+            projectId,
+            ownerThreadId: coordinatorThreadId,
+            cwd: repo,
+            branch,
+          });
+          const check = { cwd: repo, worktreePath, branch };
+          expect(yield* workspaces.changes(check)).toBeNull();
+
+          yield* fs.writeFileString(`${worktreePath}/draft.txt`, "draft\n");
+          expect(yield* workspaces.changes(check)).toBe("files changed: draft.txt");
+
+          // A commit is a change, also once the checkout is moved back to where it started.
+          const start = git(worktreePath, "rev-parse", "HEAD").toString().trim();
+          git(worktreePath, "add", "draft.txt");
+          git(worktreePath, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x");
+          expect(yield* workspaces.changes(check)).toBe(
+            `its branch or checkout moved off ${start.slice(0, 12)}, where it started`,
+          );
+          git(worktreePath, "checkout", "-q", "--detach", start);
+          expect(yield* workspaces.changes(check)).toContain("moved off");
+        }).pipe(Effect.provide(makeLayer(repo, { setups, failNext, workspaceRoot })));
+      }),
+    ),
+  );
+
   it("keeps a from to a plain branch, tag or commit name", () => {
     for (const from of ["main", "HEAD", "origin/feature-x", "v1.2.0", "a1b2c3d", "_wip"]) {
       expect(WorkflowWorkspaces.isWorkflowWorkspaceFrom(from)).toBe(true);

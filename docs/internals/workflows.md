@@ -56,6 +56,16 @@ cleanup removes a kept worktree that is clean, and Retry must still find it. It 
 `t3/wf/...` branch it records. A script's `from` must be a plain ref name or SHA, with no revision
 syntax, so it can name nothing outside the coordinator's repository.
 
+A read-only workspace is checked, not enforced: agents run on providers with their own sandboxes,
+and a provider in full access can write anywhere, so T3 cannot block every write. Its agents are
+told in their prompt, skip the writer lock, and the engine compares the worktree with its recorded
+start before each agent starts and whenever a result is read, a reused one on Retry included. A
+change makes that result `null` and is never cleaned, so it also fails every later agent there and
+stays as evidence. With agents side by side the writer cannot be told apart, so each one that ends
+after the change fails. Read-only workspaces at the same `from` do not share a worktree: one per
+name keeps branches, cleanup and the check uniform, and a script that wants sharing passes one
+workspace to several agents.
+
 A coordinator row that ended unfinished is the one delegated task whose later runs publish their
 result again (`finalizeAppOwnedSubagent`), so a successful Retry wakes the starting agent with the
 real result. A coordinator interrupted while its agents still run stays "waiting for children" and
