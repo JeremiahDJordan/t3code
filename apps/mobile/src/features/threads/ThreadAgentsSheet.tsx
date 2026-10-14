@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
 import type { ThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   isOrchestrationV2WorkActive,
@@ -26,8 +27,8 @@ import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../n
 import { SubagentRow } from "./SubagentRow";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
-import { groupWorkflowAgentsByPhase } from "./threadAgentsPresentation";
-import { useWorkflowCoordinatorForThread } from "./WorkflowCard";
+import { groupWorkflowAgentsByPhase, sheetWorkflowRuns } from "./threadAgentsPresentation";
+import { WorkflowCard, useWorkflowCoordinatorForThread } from "./WorkflowCard";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -36,12 +37,34 @@ type AgentsTarget = { readonly environmentId: EnvironmentId; readonly threadId: 
 const EMPTY_TURN_SUBAGENTS_ATOM = Atom.make<ThreadTurnSubagents | null>(null).pipe(
   Atom.withLabel("mobile-thread-turn-subagents:empty"),
 );
+const EMPTY_THREAD_ATOM = Atom.make<EnvironmentThread | null>(null).pipe(
+  Atom.withLabel("mobile-thread-agents-thread:empty"),
+);
+
+/** A thread's subagent rows, every turn's, as the sheet and the agents pill read them. */
+export const selectThreadSubagents = (
+  thread: {
+    readonly projection: { readonly subagents: ReadonlyArray<OrchestrationV2Subagent> };
+  } | null,
+): ReadonlyArray<OrchestrationV2Subagent> | undefined => thread?.projection.subagents;
 
 export function useThreadTurnSubagents(target: AgentsTarget | null): ThreadTurnSubagents | null {
   return useAtomValue(
     target === null
       ? EMPTY_TURN_SUBAGENTS_ATOM
       : environmentThreadDetails.turnSubagentsAtom(target),
+  );
+}
+
+/** Every turn's subagent rows; none until a queued thread reaches the server. */
+export function useThreadSubagents(
+  target: AgentsTarget | null,
+): ReadonlyArray<OrchestrationV2Subagent> | undefined {
+  return useAtomValue(
+    target === null
+      ? EMPTY_THREAD_ATOM
+      : environmentThreadDetails.threadAtom(scopeThreadRef(target.environmentId, target.threadId)),
+    selectThreadSubagents,
   );
 }
 
@@ -52,7 +75,19 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const insets = useSafeAreaInsets();
   const theme = useUniwindTheme();
   const turn = useThreadTurnSubagents(target);
-  const subagents = turn?.subagents ?? [];
+  const threadSubagents = useAtomValue(
+    environmentThreadDetails.threadAtom(scopeThreadRef(target.environmentId, target.threadId)),
+    selectThreadSubagents,
+  );
+  const workflowRuns = useMemo(
+    () => sheetWorkflowRuns(threadSubagents ?? [], turn?.subagents ?? []),
+    [threadSubagents, turn?.subagents],
+  );
+  // A workflow run reads as its card above the other agents, not as a row among them.
+  const subagents = useMemo(
+    () => (turn?.subagents ?? []).filter((subagent) => subagent.t3Workflow?.kind !== "run"),
+    [turn?.subagents],
+  );
   const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
   const shell = useThreadShell(scopeThreadRef(target.environmentId, target.threadId));
   const coordinator = useWorkflowCoordinatorForThread(target.environmentId, shell);
@@ -84,10 +119,24 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
       contentContainerClassName="px-5 pb-6"
       contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 16) + 8 }}
     >
+      {workflowRuns.length > 0 ? (
+        <View className="gap-2 pt-4">
+          {workflowRuns.map((run) => (
+            <WorkflowCard
+              key={run.id}
+              environmentId={target.environmentId}
+              coordinator={run}
+              onOpenThread={openChildThread}
+            />
+          ))}
+        </View>
+      ) : null}
       {subagents.length === 0 ? (
-        <Text className="pt-6 text-center text-sm text-foreground-muted">
-          No agents in this turn.
-        </Text>
+        workflowRuns.length === 0 ? (
+          <Text className="pt-6 text-center text-sm text-foreground-muted">
+            No agents in this turn.
+          </Text>
+        ) : null
       ) : phases !== null ? (
         phases.map((phase) => (
           <View key={phase.title}>

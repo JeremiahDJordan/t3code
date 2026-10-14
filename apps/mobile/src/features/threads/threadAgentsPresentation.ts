@@ -3,8 +3,10 @@ import {
   subagentDetailPreview,
 } from "@t3tools/client-runtime/state/subagent-display";
 import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
+import type { SubagentPillSegment } from "@t3tools/client-runtime/state/thread-subagents";
 import { deriveWorkflowCard } from "@t3tools/client-runtime/state/workflowCard";
-import type { OrchestrationV2Subagent } from "@t3tools/contracts";
+import { isOrchestrationV2WorkActive, type OrchestrationV2Subagent } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 
 const PROMPT_TITLE_LIMIT = 80;
 
@@ -111,4 +113,47 @@ export function resolveSubagentRowPresentation(
     live,
     canOpenThread: subagent.childThreadId !== null,
   };
+}
+
+const workflowRunIsLive = (subagent: OrchestrationV2Subagent) =>
+  subagent.t3Workflow?.kind === "run" && isOrchestrationV2WorkActive(subagent.status);
+
+/**
+ * The workflow runs a thread started that its agents sheet shows as cards: every one still
+ * running, whichever turn started it, and any in the turn the sheet lists. Live ones first,
+ * then newest.
+ */
+export function sheetWorkflowRuns(
+  threadSubagents: ReadonlyArray<OrchestrationV2Subagent>,
+  turnSubagents: ReadonlyArray<OrchestrationV2Subagent>,
+): ReadonlyArray<OrchestrationV2Subagent> {
+  const inTurn = new Set(turnSubagents.map((subagent) => subagent.id));
+  return threadSubagents
+    .filter(
+      (subagent) =>
+        subagent.t3Workflow?.kind === "run" &&
+        (workflowRunIsLive(subagent) || inTurn.has(subagent.id)),
+    )
+    .sort(
+      (left, right) =>
+        Number(workflowRunIsLive(right)) - Number(workflowRunIsLive(left)) ||
+        DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
+    );
+}
+
+/**
+ * The pill's agents segment when the turn's own has none: a workflow still running from an
+ * earlier turn keeps the sheet one tap away while the thread does other work.
+ */
+export function workflowPillSegment(
+  threadSubagents: ReadonlyArray<OrchestrationV2Subagent>,
+  turnSubagents: ReadonlyArray<OrchestrationV2Subagent>,
+): SubagentPillSegment | null {
+  const inTurn = new Set(turnSubagents.map((subagent) => subagent.id));
+  const running = threadSubagents.filter(
+    (subagent) => workflowRunIsLive(subagent) && !inTurn.has(subagent.id),
+  ).length;
+  if (running === 0) return null;
+  const noun = running === 1 ? "workflow" : "workflows";
+  return { label: `${running} ${noun}`, accessibilityLabel: `${running} ${noun} running` };
 }

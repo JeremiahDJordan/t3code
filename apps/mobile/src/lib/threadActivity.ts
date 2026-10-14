@@ -6,6 +6,7 @@ import type {
 import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
+import { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/client-runtime/state/workflowCard";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
   turnItemDetailRevision,
@@ -1757,6 +1758,11 @@ export function buildThreadFeed(
     if (turnItemIsWorkspacePreparation(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
+    // A workflow run's card opens from the agents pill above the composer rather than sitting
+    // in the agent's reply, so its run folds like any other work.
+    if (item.type === "subagent" && item.providerInstanceId === WORKFLOW_PROVIDER_INSTANCE_ID) {
+      continue;
+    }
     if (item.type === "run_interrupt_request") {
       continue;
     }
