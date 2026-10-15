@@ -1103,6 +1103,14 @@ const T3_MCP_TITLE_SUFFIX_CALL =
 const T3_MCP_BARE_TITLE_CALL = /^(?<tool>[A-Za-z0-9_]+)(?::\s|$)/;
 
 /**
+ * Bob titles an MCP call "Running <Tool Name> (<server>)" with the tool's
+ * name title-cased and its underscores spaced, and sends no _meta, so the
+ * name is rebuilt from the words. Safe only because the match is gated on
+ * the known T3 tool inventory.
+ */
+const T3_MCP_BOB_TITLE_CALL = /^Running (?<words>[A-Za-z0-9][A-Za-z0-9 _-]*) \(t3[-_ ]?code\)$/i;
+
+/**
  * Best-effort recovery of MCP identity from a generic ACP tool call.
  *
  * ACP has no typed MCP tool-call item, so agents surface MCP calls in
@@ -1186,7 +1194,12 @@ export function extractMcpToolCallIdentity(
       T3_MCP_TITLE_CALL.exec(trimmed) ??
       T3_MCP_TITLE_SUFFIX_CALL.exec(trimmed) ??
       T3_MCP_BARE_TITLE_CALL.exec(trimmed);
-    const candidateTool = match?.groups?.tool;
+    const candidateTool =
+      match?.groups?.tool ??
+      T3_MCP_BOB_TITLE_CALL.exec(trimmed)
+        ?.groups?.words?.trim()
+        .toLowerCase()
+        .replace(/[\s_-]+/g, "_");
     if (candidateTool !== undefined && T3_MCP_TOOL_NAMES.has(candidateTool)) {
       return { server: "t3-code", tool: candidateTool };
     }
