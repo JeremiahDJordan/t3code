@@ -1656,6 +1656,54 @@ describe("extractMcpToolCallIdentity", () => {
 
     expect(extractMcpToolCallIdentity(toolCall)).toBeUndefined();
   });
+
+  it("recovers T3 identity from Bob's title-cased MCP call titles", () => {
+    // Captured verbatim from Bob 2.0.6: an MCP call is kind "other" with no
+    // _meta, titled "Running <Tool Name> (<server>)", and a later update
+    // without a title leaves the merged presentation title at "Tool".
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "tooluse_8ZBHR2T14mX2UNQGC8KKhU",
+      kind: "other",
+      title: "Running Html Render (t3-code)",
+      status: "pending",
+      locations: [],
+      rawInput: { html: "<p>hi</p>", title: "Hi" },
+    } as const;
+    const created = toolCallFromUpdate(update);
+    const completed = toolCallFromUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tooluse_8ZBHR2T14mX2UNQGC8KKhU",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "Rendered" } }],
+    });
+
+    expect(extractMcpToolCallIdentity(mergeToolCallState(created, completed))).toEqual({
+      server: "t3-code",
+      tool: "html_render",
+    });
+    for (const title of [
+      "Running T3 Thread Read (t3-code)",
+      "Running Update Scheduled Task (T3 Code)",
+      "running html render (t3_code)",
+    ]) {
+      expect(
+        extractMcpToolCallIdentity(toolCallFromUpdate({ ...update, title })),
+        title,
+      ).toBeDefined();
+    }
+    // Another server's tool, and words T3 has no tool for, stay unbranded.
+    for (const title of [
+      "Running Html Render (docs)",
+      "Running Delete Everything (t3-code)",
+      "Running subagent: render the page",
+    ]) {
+      expect(
+        extractMcpToolCallIdentity(toolCallFromUpdate({ ...update, title })),
+        title,
+      ).toBeUndefined();
+    }
+  });
 });
 
 describe("embeddedTerminalIdsFromSessionUpdate", () => {
