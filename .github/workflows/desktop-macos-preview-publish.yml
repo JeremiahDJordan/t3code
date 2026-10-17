@@ -30,7 +30,10 @@ permissions:
 jobs:
   resolve:
     name: Verify preview eligibility
+    # Fork: off, and build and publish with it (FORK.md, "Release channels the fork does
+    # not use"); drop `false &&` to turn it on.
     if: >-
+      false &&
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'

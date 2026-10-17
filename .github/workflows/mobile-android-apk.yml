@@ -15,12 +15,15 @@ concurrency:
 jobs:
   mirror:
     name: Mirror beta APK
+    # Fork: off (FORK.md, "Release channels the fork does not use"); drop `if: false` to turn it on.
+    if: false
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write
     env:
-      PACKAGE_NAME: com.t3tools.t3code
+      # Fork: APP_ID in packages/shared/src/forkIdentity.ts.
+      PACKAGE_NAME: org.zanson.z6code
     steps:
       - id: credentials
         name: Check for Play credentials

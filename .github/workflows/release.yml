@@ -758,11 +758,13 @@ jobs:
           path: release-assets
 
       - name: Download internal Android APK for Nightly
-        if: needs.preflight.outputs.release_channel == 'nightly'
+        # Fork: off (FORK.md, "Release channels the fork does not use"); drop `false &&` to turn it on.
+        if: false && needs.preflight.outputs.release_channel == 'nightly'
         continue-on-error: true
         env:
           GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          PACKAGE_NAME: com.t3tools.t3code
+          # Fork: APP_ID in packages/shared/src/forkIdentity.ts.
+          PACKAGE_NAME: org.zanson.z6code
           APK_OUTPUT_DIR: release-assets
         run: |
           if [ -n "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" ]; then
@@ -838,12 +840,21 @@ jobs:
         name: Resolve release asset list
         shell: bash
         run: |
+          # Fork: no Linux desktop app (FORK.md, "Release channels the fork does not
+          # use"), so its installers and their updater manifests stay off the release; the
+          # Linux CLI archives still ship. Set this to true to publish them.
+          linux_desktop_packages=false
+          if [[ "$linux_desktop_packages" != "true" ]]; then
+            rm -f release-assets/*.AppImage release-assets/*.AppImage.blockmap release-assets/*.deb release-assets/*-linux*.yml
+          fi
           {
             echo 'files<<EOF'
             echo 'release-assets/*.dmg'
             echo 'release-assets/*.zip'
-            echo 'release-assets/*.AppImage'
-            echo 'release-assets/*.deb'
+            if [[ "$linux_desktop_packages" == "true" ]]; then
+              echo 'release-assets/*.AppImage'
+              echo 'release-assets/*.deb'
+            fi
             echo 'release-assets/*.exe'
             if [[ "${{ needs.preflight.outputs.release_channel }}" != "preview" ]]; then
               echo 'release-assets/*.blockmap'
@@ -871,7 +882,7 @@ jobs:
           > [!WARNING]
           > **This is a preview build. Do not install it unless you know exactly why you are here.**
           >
-          > Preview builds are cut by maintainers from unreleased branches to exercise the release pipeline. They can be broken, receive no fixes, are never offered as updates, and are not supported. If you want T3 Code, install the [latest release](https://github.com/pingdotgg/t3code/releases/latest) or a nightly instead.
+          > Preview builds are cut by maintainers from unreleased branches to exercise the release pipeline. They can be broken, receive no fixes, are never offered as updates, and are not supported. If you want this app, install the [latest release](https://github.com/${{ github.repository }}/releases/latest) or a nightly instead.
 
           Built from `${{ needs.preflight.outputs.ref }}`.
           EOF
@@ -914,7 +925,8 @@ jobs:
   publish_cli:
     name: Publish CLI to npm
     needs: [preflight, release]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.release.result == 'success' }}
+    # Fork: off (FORK.md, "Release channels the fork does not use"); drop `false &&` to turn it on.
+    if: ${{ false && !failure() && !cancelled() && needs.preflight.result == 'success' && needs.release.result == 'success' }}
     runs-on: ubuntu-24.04 # blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
@@ -953,7 +965,8 @@ jobs:
   publish_aur:
     name: Publish AUR package
     needs: [preflight, release]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.release.result == 'success' && needs.preflight.outputs.release_channel != 'preview' }}
+    # Fork: off (FORK.md, "Release channels the fork does not use"); drop `false &&` to turn it on.
+    if: ${{ false && !failure() && !cancelled() && needs.preflight.result == 'success' && needs.release.result == 'success' && needs.preflight.outputs.release_channel != 'preview' }}
     uses: ./.github/workflows/publish-aur.yml
     with:
       release_tag: ${{ needs.preflight.outputs.tag }}
@@ -969,7 +982,9 @@ jobs:
   build_web:
     name: Build hosted web app
     needs: [preflight, relay_public_config]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' && needs.preflight.outputs.release_channel != 'preview' }}
+    # Fork: off with deploy_web and the Discord announcement, which wait on it (FORK.md,
+    # "Release channels the fork does not use"); drop `false &&` to turn it on.
+    if: ${{ false && !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' && needs.preflight.outputs.release_channel != 'preview' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
@@ -1142,7 +1157,9 @@ jobs:
   build_marketing:
     name: Build marketing site
     needs: [preflight]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.release_channel == 'nightly' }}
+    # Fork: off with deploy_marketing, which waits on it (FORK.md, "Release channels the
+    # fork does not use"); drop `false &&` to turn it on.
+    if: ${{ false && !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.release_channel == 'nightly' }}
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:

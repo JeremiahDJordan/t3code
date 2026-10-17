@@ -857,6 +857,38 @@ pipeline of its own costs a certificate and a package name for a few users. Ever
 builds from this branch, as [Install from source](#install-from-source) describes.
 Revisit when people outside the owner's team use the fork.
 
+### Release channels the fork does not use (2026-10-17)
+
+Upstream's workflows still build and publish to upstream's channels, so each one the fork does
+not use is turned off where it starts, with a `Fork:` comment naming this section, rather than
+retargeted: retargeting needs accounts, names and keys the owner has not chosen. Each comes back
+by removing its `false &&` (or `if: false`), after pointing it at the owner's own channel:
+
+- **npm** (`publish_cli` in `release.yml`): the package is upstream's `t3`.
+  `scripts/build-npm-launcher.ts` and its trusted publisher need an owned name first.
+- **AUR** (`publish_aur`): `packaging/aur/scripts/release.sh` names upstream's repository and
+  packages.
+- **Android APKs**: the hourly mirror (`mobile-android-apk.yml`) and the APK the release attaches
+  to a nightly. Both read the owner's Play account (`GOOGLE_PLAY_SERVICE_ACCOUNT_JSON`); their
+  `PACKAGE_NAME` already names the fork's app id.
+- **Linux desktop packages**: the release leaves out the AppImage, `.deb` and their updater
+  manifests (`linux_desktop_packages=false` in its asset list), since the fork builds no Linux
+  desktop app and its Linux identity is upstream's. The Linux jobs still run: they build the
+  Linux CLI archives, which ship and which the Windows builds embed for WSL.
+- **Hosted web app and marketing site** (`build_web`, `build_marketing`; `deploy_web`,
+  `deploy_marketing` and the Discord announcement wait on them): their domains and Vercel
+  projects are upstream's.
+- **Signed macOS PR previews** (`desktop-macos-preview-publish.yml`): turned off rather than
+  made to work without T3 Connect. It signs a PR's bundle with a Developer ID certificate and
+  upstream's provisioning profile, whose passkey entitlement must match the Clerk values it reads
+  from `.env.example`; without Clerk the entitlement has nothing to match, and the fork has no
+  signing secrets in CI. Making its four inputs optional means changing what gets signed, which
+  is more than a gate.
+
+Not changed: every job runs on upstream's Blacksmith runners, the release is named "T3 Code",
+and the schedule cuts nightlies; the fork's own CI needs its runners and naming chosen before it
+can release.
+
 ### A Cinder theme beside upstream's built-ins (owner, 2026-10-16)
 
 Cinder is the owner's mobile-branch-review Ember palette as a T3 theme: Ember's burnt-orange accent
