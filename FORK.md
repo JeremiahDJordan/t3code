@@ -1,6 +1,6 @@
 # Bob Shell fork of T3 Code
 
-This branch (`bob-shell` on `JeremiahDJordan/t3code`) is upstream T3 Code
+This branch (`bob-shell-v2` on `JeremiahDJordan/t3code`) is upstream T3 Code
 (`pingdotgg/t3code`) plus IBM Bob Shell as a provider, driven over ACP with
 `bob acp`, and check-ins and background commands for every provider. It is kept as a
 fork and rebased onto upstream `main`; the user guide is
@@ -97,7 +97,7 @@ rust@stable` and prefix the build with `mise exec rust@stable --`). Background
 commands need tmux 3.2 or later.
 
 ```bash
-git clone -b bob-shell https://github.com/JeremiahDJordan/t3code.git
+git clone -b bob-shell-v2 https://github.com/JeremiahDJordan/t3code.git
 cd t3code
 vp i
 ```
