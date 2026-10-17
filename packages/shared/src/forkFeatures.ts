@@ -20,3 +20,11 @@ export const T3_CONNECT_OFF_NOTE = "T3 Connect is turned off in this build.";
 /** What the server and CLI refuse with: the note plus how to turn it on. */
 export const T3_CONNECT_DISABLED_MESSAGE =
   "T3 Connect is turned off in this build. Set T3_CONNECT_ENABLED to true in packages/shared/src/forkFeatures.ts and rebuild to use it.";
+
+/**
+ * The hosted web app's Latest/Nightly switch. `apps/web/vercel.ts` routes channels only for
+ * upstream's own router and channel domains, and the fork hosts no channels, so on any other host
+ * the switch would set a cookie and reload the same build. Turning it on needs an owned router
+ * and channel origins in `vercel.ts` too.
+ */
+export const HOSTED_CHANNEL_SWITCHING_ENABLED: boolean = false;

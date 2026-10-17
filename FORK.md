@@ -1104,7 +1104,9 @@ Expo variables for mobile). `.env.example` lists every variable, commented out.
   pairing links use the server's own address (`resolveHostedPairingUrl` returns null).
   `providerAuthReturnUrl.ts` no longer trusts upstream's hosted app as a Codex sign-in return;
   a hosted app of the owner's own would need adding there. The hosted prompt-link landing drops
-  its download button. The server's `T3CODE_HOSTED_APP_URL` (T3 Connect's CLI sign-in) has no
+  its download button. Settings shows no Latest/Nightly switch on a hosted app
+  (`HOSTED_CHANNEL_SWITCHING_ENABLED` in `forkFeatures.ts`): `apps/web/vercel.ts` routes channels
+  only for upstream's domains, so on any other host the switch reloaded the same build. The server's `T3CODE_HOSTED_APP_URL` (T3 Connect's CLI sign-in) has no
   default.
 - **T3 Connect leftovers.** `.env.example` no longer carries upstream's Clerk publishable key,
   JWT template, CLI OAuth client or relay URL, and no code falls back to them.

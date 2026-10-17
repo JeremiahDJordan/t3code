@@ -50,6 +50,7 @@ import {
   SidebarProjectSortOrder,
 } from "@t3tools/contracts/settings";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
+import { HOSTED_CHANNEL_SWITCHING_ENABLED } from "@t3tools/shared/forkFeatures";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
@@ -286,7 +287,9 @@ function AboutVersionSection() {
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
-  const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
+  // Fork: no owned hosted channels to switch between (`HOSTED_CHANNEL_SWITCHING_ENABLED`).
+  const selectedHostedAppChannel =
+    hasDesktopBridge || !HOSTED_CHANNEL_SWITCHING_ENABLED ? null : HOSTED_APP_CHANNEL;
 
   const handleUpdateChannelChange = useCallback(
     (channel: DesktopUpdateChannel) => {
