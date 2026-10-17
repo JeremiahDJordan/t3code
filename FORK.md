@@ -73,6 +73,17 @@ rebuilding its features on the new base rather than porting them. Tag
   `cli/pair.ts`, `cli/auth.ts`), client-runtime's connection routes, resolver, supervisor and
   registry, the `secureChannel` setting in contracts, and the connection screens on web, desktop
   and mobile, beside the Cloudflare Access service token.
+- **Push through the owner's gateway** (see its decision below). Its own files:
+  `apps/server/src/push/`, `infra/push-gateway/`, contracts `pushGateway.ts`, shared
+  `agentActivityPush.ts` (moved out of `infra/relay`, whose four modules now re-export it),
+  client-runtime `state/pushDevices.ts`, and mobile `pushGatewayRegistration.ts`,
+  `pushGatewayTransport.ts`, `PushGatewayCoordinator.tsx` and
+  `PushGatewayNotificationsSettings.tsx`. Upstream files carry the sink that
+  `relay/AgentAwarenessRelay.ts`'s publisher now takes, the three RPCs (contracts `rpc.ts`,
+  `clientRpcPermissions.ts`, `ws.ts`, `RpcInstrumentation.ts`), the `pushGateway` capability,
+  the publisher's mount in `server.ts`, and `isPushGatewayMode` branches in mobile
+  `remoteRegistration.ts`, `SettingsNotificationsRouteScreen.tsx`,
+  `useConnectionController.ts` and `App.tsx`.
 - **Clients.** A V2 server answers HTTP 426 to a client without orchestration protocol 2:
   the App Store app before 2.0.0, older app.t3.codes builds, and every build of this fork
   from before the move. Rebuild the desktop and mobile apps from this branch.
@@ -1065,8 +1076,10 @@ code and tests stay as they are (those tests mock the flag on):
 - **Server.** `t3 connect` and every subcommand refuse naming the flag (`binCli.ts`).
   `server.ts` mounts `cloud/t3ConnectTurnedOff.ts` in place of the `connect` HTTP group
   (link, relay config, unlink, preferences, health and mint refuse with 403;
-  `linkState` still reads), a no-op agent activity publisher, no held-webhook waker, no
-  relay webhook URL, and a descriptor without `agentActivityPublishing`, and skips
+  `linkState` still reads), the push gateway's agent activity publisher when one is
+  configured and a no-op one otherwise, no held-webhook waker, no relay webhook URL, and a
+  descriptor whose `agentActivityPublishing` says only whether a push gateway is configured
+  (see "Push through the owner's own gateway"), and skips
   boot-time link startup, so no stored tunnel starts or is released. `ws.ts` refuses
   `cloud.installRelayClient`. Stored link data is untouched, so turning the flag on
   brings a link back.
@@ -1190,13 +1203,13 @@ or an EAS environment. `app.config.test.ts` evaluates the config both ways.
   updates on, set `T3CODE_EAS_PROJECT_ID`, plus `T3CODE_EAS_OWNER`, for an EAS project (this also
   sets `extra.eas.projectId` and `owner`). For a self-hosted expo-updates server, set
   `T3CODE_MOBILE_UPDATES_URL`. `T3CODE_MOBILE_UPDATES_ENABLED=0` still forces updates off.
-- **Push notifications and Live Activities** go only through T3 Connect's relay. Without a relay
-  URL, device registration stops before it asks APNs or FCM for a token (`registerDevice` in
-  `remoteRegistration.ts`). Settings → Notifications says push is off. The app sends native
-  device tokens, not Expo push tokens, so push needs no EAS project. To turn it on, set
-  `T3_CONNECT_ENABLED`, the owner's Clerk values and `T3CODE_RELAY_URL` for their own relay
-  (`infra/relay`, which holds the APNs and FCM keys), plus `T3CODE_ANDROID_GOOGLE_SERVICES_FILE`
-  on Android.
+- **Push notifications and Live Activities** go through each server's own push gateway, on
+  the owner's Cloudflare account (the decision below), and through T3 Connect's relay only in
+  builds with `T3_CONNECT_ENABLED`. With no connected server advertising `pushGateway` (or, with
+  T3 Connect on, no relay URL), device registration stops before it asks APNs or FCM for a token
+  (`registerDevice` in `remoteRegistration.ts`). The app sends native device tokens, not Expo
+  push tokens, so push needs no EAS project. Android needs `T3CODE_ANDROID_GOOGLE_SERVICES_FILE`
+  either way.
 - **Tracing** has no default endpoint. Spans export only when `T3CODE_MOBILE_OTLP_TRACES_URL`,
   `_DATASET` and `_TOKEN` are all set. The mobile app has no other analytics or crash reporting.
 - **Legal pages** have no default site, so Settings → About has no Legal row. To bring it back,
@@ -1220,6 +1233,52 @@ or an EAS environment. `app.config.test.ts` evaluates the config both ways.
   the Expo `slug` (`t3-code`, which an owner's EAS project must match), and the sample hosts in
   showcase screenshots. These are names that are never contacted. `pingdotgg/t3code` appears only
   in test fixtures.
+
+### Push through the owner's own gateway (owner, 2026-10-17)
+
+With T3 Connect off, phones got no push at all. The fork's replacement keeps the decisions on
+each server and puts only the Apple and Firebase keys in the cloud:
+
+- **The phone registers with each server.** `pushDevices.register` (and
+  `registerLiveActivity`, `unregister`) go over the server's own authenticated connection,
+  guarded by `orchestration:read`, since a session that may read threads may hear about them.
+  The phone registers with every connected server whose descriptor has `pushGateway`, on the
+  relay path's triggers, and unregisters before the user removes or disables the server.
+- **A device belongs to the session that registered it.** `push/PushDevices.ts` keeps one row
+  per device id in the fork's `push_devices` table (created by its repository, not a numbered
+  migration), joined to `auth_sessions` at delivery: a revoked or expired session's device gets
+  nothing, and is deleted at the next start. Registering again under a new session moves it.
+- **The server decides.** `push/PushGatewayPublisher.ts` is the sink of upstream's agent
+  activity publisher, so the relay's per-thread de-duplication, confirmation, retry and catch-up
+  rules apply unchanged. It keeps the server's thread states as the relay keeps its rows, and
+  `push/pushDeliveryPlan.ts` builds each phone's APNs alert, Live Activity update or end, or
+  Android data message with the relay's own builders, moved to shared `agentActivityPush.ts`.
+  An alert rings once per thread per phase a phone has not yet been told (kept in memory, so a
+  server restart can repeat a pending approval's alert). APNs 410 or 400 BadDeviceToken,
+  DeviceTokenNotForTopic or Unregistered, and FCM UNREGISTERED, clear the token; a 5xx, 429 or
+  unreachable service retries the publish; another refusal is dropped.
+- **Live Activities.** As with the relay, the phone starts the card itself, in the foreground,
+  for a server that has a gateway (`agentActivityPublishing` is set with `pushGateway`), and
+  registers the card's update token with each such server; servers update and end it with
+  `liveactivity` pushes, throttled to one unchanged-count update per 15 seconds.
+- **The gateway only signs and forwards.** `infra/push-gateway` is a plain Cloudflare Worker,
+  deployed with `npx wrangler deploy` (Wrangler is not in the lockfile, so nothing new is
+  downloaded for the repository; alchemy, which `infra/relay` uses, needs a state store this
+  Worker has no use for). Server credentials are minted by `scripts/mint-credential.ts` and kept
+  only as SHA-256 hashes in the `PUSH_GATEWAY_CREDENTIALS` secret, a JSON list, so adding or
+  revoking a server is a `wrangler secret put` with no code change and no KV namespace. Topics
+  and packages are limited to `ALLOWED_BUNDLE_IDS`. A Workers rate-limit binding allows each
+  credential 120 requests a minute. The README has the setup.
+- **Turning it on.** Set `T3CODE_PUSH_GATEWAY_URL` and `T3CODE_PUSH_GATEWAY_CREDENTIAL` in the
+  server's environment (`push/PushGatewayConfig.ts`, read through `Config`). Unset, the server
+  sends nothing, contacts nothing and advertises no `pushGateway`; an invalid value logs an
+  error and leaves push off.
+- **Privacy.** The gateway sees what it forwards, including thread and project titles in alert
+  text and Live Activity content, and stores none of it.
+- **Android identity.** The native handler drops data messages whose `device_id` or `user_id`
+  differ from what the app configured. With no relay account, the app configures and the server
+  sends a fixed `user_id`, `PUSH_GATEWAY_ANDROID_USER_ID`, beside the real device id, so the
+  Kotlin handler is unchanged.
 
 ### License: upstream's MIT, with the fork's changes copyright Jeremiah Jordan (owner, 2026-10-16)
 
@@ -1422,6 +1481,17 @@ included, since commands may not be idempotent; one cut short runs again. Design
   replays a failed command's result too, so a run that failed on one cannot pass it by Retry.
 - A restored steer's text is not re-read by Auto's reviewer, and each queued steer's resources
   are capped on their own, so a prompt that drains several steers carries several caps.
+- Push gateway: the phone has one Live Activity and one Android card, and every server it
+  registers with paints its own threads there, so two busy servers take turns overwriting it.
+  An idle server leaves a card it never painted alone. Merging them would need the phone's card
+  to be per server or the servers to share state.
+- Push gateway on iOS needs a paid Apple team owning the `org.zanson.z6code*` app ids the
+  builds use (`forkIdentity.ts`), since APNs takes only that team's key for those topics.
+  Personal Team builds have no push, as before.
+- Push gateway: builds with T3 Connect on use the relay only; the gateway's publisher is not
+  mounted there. A server's first publish after a restart has no Live Activity baseline, so it
+  repaints without the relay's grouped transition alert; the changed thread's own alert rides on
+  it instead.
 
 ## Rebase checklist
 
@@ -1540,6 +1610,17 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   are covered by `publicConfig.t3ConnectOff.test.ts`, and `binCli.ts` by
   `connectTurnedOff.test.ts`. A new upstream T3 Connect entry point that bypasses
   `resolveCloudPublicConfig`, the `connect` HTTP group or the boot layer needs its own gate.
+- Push gateway: in `server.ts`, `PushGatewayPublisher.layer` in place of the no-op publisher and
+  `PushDevices.layer`; the `pushGateway` and `agentActivityPublishing` lines in
+  `t3ConnectTurnedOff.withoutAgentActivityPublishing`; the sink parameter of
+  `makeAgentAwarenessPublisher` (an upstream change to the relay's publish step belongs in the
+  relay's sink); the re-exports in `infra/relay/src/agentActivity/agentActivity*.ts`,
+  `fcmPayloads.ts`, `FcmDeliveries.ts`, `ApnsClient.ts` and `ApnsDeliveries.ts` (an upstream
+  change to a moved rule must be ported into shared `agentActivityPush.ts`); and in mobile,
+  `PushGatewayCoordinator` in `App.tsx`, the `isPushGatewayMode` branches in
+  `remoteRegistration.ts` and the unregister calls in `useConnectionController.ts`. Losing the
+  coordinator or a branch silently stops registration; `pushGatewayRegistration.test.ts` and
+  `t3ConnectTurnedOff.test.ts` cover the rest.
 - No T3 web service: `scripts/upstream-services.test.ts` catches a returning address, but not a
   lost gate whose address is already gone. Keep the empty defaults in `AnalyticsService.ts`,
   `ModelManifest.ts` (`ModelManifestUrlConfig`), `cliRelease.ts`, `connectAuth.ts`,
@@ -1586,6 +1667,11 @@ cd ../../packages/shared && vp test run src/secureChannel src/remote
 cd ../client-runtime && vp test run src/connection src/state/workflowCard
 cd ../../apps/web && vp test run src/hostedPairing src/components/settings/pairingUrls src/cloud
 cd ../mobile && vp test run src/features/cloud src/features/agent-awareness
+cd ../server && vp test run src/push src/relay
+cd ../../packages/shared && vp test run src/agentActivityPush
+cd ../../infra/relay && vp test run --config ../../vite.config.ts --dir . src/agentActivity
+cd ../push-gateway && vp test run --config ../../vite.config.ts --dir .
+cd ../../apps/mobile
 cd ../desktop && vp test run src/app/DesktopSecureChannelKeys
 cd ../../scripts && vp test run --config ../vite.config.ts --dir . upstream-services
 ```

@@ -5,8 +5,9 @@
   "compatibility_date": "2026-06-01",
   "workers_dev": true,
   "vars": {
-    // Your app's bundle ids and Android package names, comma-separated.
-    "ALLOWED_BUNDLE_IDS": "",
+    // Your app's bundle ids and Android package names, comma-separated: the fork's builds
+    // (packages/shared/src/forkIdentity.ts).
+    "ALLOWED_BUNDLE_IDS": "org.zanson.z6code,org.zanson.z6code.dev,org.zanson.z6code.preview",
     "APNS_TEAM_ID": "",
     "APNS_KEY_ID": "",
   },
