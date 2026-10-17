@@ -877,9 +877,15 @@ or `--base-dir`, dev state (`--dev-url`, a worktree's `.t3`) and `t3 app` never 
   (`z6`, at `~/.z6/bin/z6`, with its own marker so it never takes over T3's `t3` link), and the
   background service (`z6code.service`, `org.zanson.z6code.service`). The desktop's backend port
   is scanned from 3773 and `serve` takes the next free one, so ports do not collide.
-- Left shared, on purpose: the `t3code://` scheme, which is also the renderer's origin and the
-  sign-in callback upstream's Clerk instance allows (each app registers itself as the handler when
-  it starts, so a sign-in link goes to the one started last); Tailscale Serve's default port 443
+- The link scheme the operating system routes to the app is `z6code://` (`z6code-dev://` in
+  development; `packages/shared/src/forkIdentity.ts`): the bundle's URL types, the Linux handler,
+  prompt links and Codex sign-in returns, so T3's links never open Z6 and Z6's never open T3.
+  Upstream's T3 Connect sign-in callbacks are not supported, as T3 Connect is off. The renderer's
+  own origin stays `t3code://app`: it never leaves the app, and a new origin would drop the
+  desktop's saved browser storage. A provider sign-in that returns to a desktop page goes out as
+  `z6code://app/...` (`desktopPageToLink`) and loads back at `t3code://app/...`
+  (`desktopLinkToPage`).
+- Left shared, on purpose: Tailscale Serve's default port 443
   (set another in one app's Settings when both serve); the in-app name; Linux's desktop entry and
   WM class (the fork builds no Linux desktop app); and `~/.t3` on SSH and WSL hosts, where the
   desktop runs upstream's server.

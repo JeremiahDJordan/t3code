@@ -11,6 +11,7 @@ import * as Scope from "effect/Scope";
 import { codexAuthDeliveryUrl, readCodexAuthHandoff } from "@t3tools/shared/codexAuthHandoff";
 import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCallback.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
+import { desktopLinkToPage } from "@t3tools/shared/forkIdentity";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -171,7 +172,9 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const resumeProviderAuth = (value: string | undefined) => {
-        const destination = providerAuthReturnUrl(value);
+        const returned = providerAuthReturnUrl(value);
+        // Links come back on the fork's link scheme; the page loads at its own origin.
+        const destination = returned === undefined ? undefined : desktopLinkToPage(returned);
         const expectedOrigin = `${ElectronProtocol.getDesktopScheme(environment.isDevelopment)}://app`;
         if (!destination?.startsWith(`${expectedOrigin}/`)) return false;
         void runPromise(

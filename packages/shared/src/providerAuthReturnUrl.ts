@@ -4,7 +4,10 @@ export function providerAuthReturnUrl(value: string | undefined): string | undef
   if (!value) return undefined;
   try {
     const url = new URL(value);
-    const desktop = ["t3code:", "t3code-dev:"].includes(url.protocol) && url.host === "app";
+    // The desktop page's own origin, or the fork's link scheme that routes back to it.
+    const desktop =
+      ["t3code:", "t3code-dev:", "z6code:", "z6code-dev:"].includes(url.protocol) &&
+      url.host === "app";
     const web =
       ["http:", "https:"].includes(url.protocol) &&
       (isLoopbackHost(url.hostname) || url.origin === "https://app.t3.codes");
