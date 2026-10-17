@@ -868,6 +868,17 @@ pipeline of its own costs a certificate and a package name for a few users. Ever
 builds from this branch, as [Install from source](#install-from-source) describes.
 Revisit when people outside the owner's team use the fork.
 
+### No workflow runs on its own until each is audited (owner, 2026-10-17)
+
+Every workflow in `.github/workflows/` has its automatic triggers (push, pull request, schedule,
+issue, comment, `workflow_run` and similar) commented out under `on:`, marked `Fork:`, leaving
+only `workflow_dispatch` (the manual "Run workflow" button) and `workflow_call`. GitHub rejects a
+workflow with no trigger, so manual dispatch is what stays. Workflows that already had no
+automatic trigger (`publish-aur`, `release-desktop`, `windows-tests`,
+`mobile-showcase-screenshots`) are unchanged. Turn a trigger back on by uncommenting it once that
+workflow is audited. A rebase that brings upstream trigger changes conflicts at these `on:`
+blocks: keep the triggers commented and take upstream's other edits.
+
 ### Release channels the fork does not use (2026-10-17)
 
 Upstream's workflows still build and publish to upstream's channels, so each one the fork does

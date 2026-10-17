@@ -11,11 +11,15 @@ name: Mobile Fingerprint Check
 # The check is advisory: it always passes, the label is the signal. Both
 # fingerprints are computed in this one job (same OS, same corepack-pinned
 # pnpm), so the comparison is self-consistent; no EXPO_TOKEN needed.
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  pull_request:
-    # Run even when a rebase or base change removes every native input from the
-    # diff, so the label can be cleared without installing Expo dependencies.
-    types: [opened, synchronize, reopened, edited]
+  workflow_dispatch:
+  # Off for the fork:
+  # pull_request:
+  #   # Run even when a rebase or base change removes every native input from the
+  #   # diff, so the label can be cleared without installing Expo dependencies.
+  #   types: [opened, synchronize, reopened, edited]
 
 concurrency:
   group: mobile-fingerprint-check-${{ github.event.pull_request.number }}

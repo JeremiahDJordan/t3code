@@ -1,10 +1,14 @@
 name: CI
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+  # Off for the fork:
+  # pull_request:
+  # push:
+  #   branches:
+  #     - main
 
 permissions:
   contents: read

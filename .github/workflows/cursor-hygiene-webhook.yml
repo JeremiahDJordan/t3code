@@ -1,14 +1,18 @@
 name: Forward to Cursor hygiene
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, reopened, ready_for_review]
-  issues:
-    types: [opened, closed, reopened]
-  discussion:
-    types: [created, closed, reopened]
+  workflow_dispatch:
+  # Off for the fork:
+  # push:
+  #   branches: [main]
+  # pull_request:
+  #   types: [opened, reopened, ready_for_review]
+  # issues:
+  #   types: [opened, closed, reopened]
+  # discussion:
+  #   types: [created, closed, reopened]
 
 permissions:
   contents: read

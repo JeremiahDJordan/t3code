@@ -1,14 +1,8 @@
 name: Release
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "!v*-nightly.*"
-      - "!v*-preview.*"
-  schedule:
-    # Avoid minute zero, when GitHub scheduled jobs are busiest.
-    - cron: "8,38 * * * *"
   workflow_dispatch:
     inputs:
       channel:
@@ -24,6 +18,15 @@ on:
         description: "Stable version override (for example 1.2.3). Defaults to the version the latest nightly previewed."
         required: false
         type: string
+  # Off for the fork:
+  # push:
+  #   tags:
+  #     - "v*.*.*"
+  #     - "!v*-nightly.*"
+  #     - "!v*-preview.*"
+  # schedule:
+  #   # Avoid minute zero, when GitHub scheduled jobs are busiest.
+  #   - cron: "8,38 * * * *"
 
 # Serialize nightlies (scheduled and manual) so overlapping runs cannot build
 # the same commit twice or publish out of order. Stable tag releases get their

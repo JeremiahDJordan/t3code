@@ -1,9 +1,13 @@
 name: Thread Transfer Report
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  workflow_dispatch:
+  # Off for the fork:
+  # workflow_run:
+  #   workflows: [CI]
+  #   types: [completed]
 
 permissions:
   actions: read

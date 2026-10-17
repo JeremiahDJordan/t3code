@@ -15,6 +15,8 @@ name: Mobile EAS Production
 # batch to avoid a store build per PR.
 # workflow_dispatch remains as a manual override for both modes (e.g. to
 # retry an errored build or force an OTA).
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
   workflow_dispatch:
     inputs:
@@ -51,19 +53,20 @@ on:
         description: "OTA update message (mode=update only)"
         required: false
         type: string
-  push:
-    branches: [main]
-    paths:
-      - apps/mobile/**
-      - packages/client-runtime/**
-      - packages/contracts/**
-      - packages/shared/**
-      - assets/**
-      - scripts/**
-      - patches/**
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/workflows/mobile-eas-production.yml
+  # Off for the fork:
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - apps/mobile/**
+  #     - packages/client-runtime/**
+  #     - packages/contracts/**
+  #     - packages/shared/**
+  #     - assets/**
+  #     - scripts/**
+  #     - patches/**
+  #     - pnpm-lock.yaml
+  #     - pnpm-workspace.yaml
+  #     - .github/workflows/mobile-eas-production.yml
 
 # Serialize runs so OTAs publish in merge order. GitHub keeps at most one
 # queued run per group, so a burst of merges collapses into one run of the

@@ -1,16 +1,20 @@
 name: PR Vouch
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
-  issue_comment:
-    types: [created]
-  push:
-    branches:
-      - main
-    paths:
-      - .github/VOUCHED.td
-      - .github/workflows/pr-vouch.yml
+  workflow_dispatch:
+  # Off for the fork:
+  # pull_request_target:
+  #   types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  # issue_comment:
+  #   types: [created]
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - .github/VOUCHED.td
+  #     - .github/workflows/pr-vouch.yml
 
 permissions:
   contents: read

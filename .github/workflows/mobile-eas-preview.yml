@@ -1,8 +1,12 @@
 name: Mobile EAS Preview
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, labeled]
+  workflow_dispatch:
+  # Off for the fork:
+  # pull_request:
+  #   types: [opened, reopened, synchronize, labeled]
 
 jobs:
   preview:

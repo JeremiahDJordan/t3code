@@ -14,15 +14,19 @@ name: Desktop macOS Preview Publish
 # one commit a maintainer applied it to. A later push builds nothing until the
 # label is applied again.
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  workflow_run:
-    workflows: [Desktop macOS Preview]
-    types: [completed]
-  # The way out: closing the PR deletes its download, and removing the label
-  # before it is consumed cancels the preview. pull_request_target gives this a
-  # write token for fork PRs; it never checks out PR code.
-  pull_request_target:
-    types: [closed, unlabeled]
+  workflow_dispatch:
+  # Off for the fork:
+  # workflow_run:
+  #   workflows: [Desktop macOS Preview]
+  #   types: [completed]
+  # # The way out: closing the PR deletes its download, and removing the label
+  # # before it is consumed cancels the preview. pull_request_target gives this a
+  # # write token for fork PRs; it never checks out PR code.
+  # pull_request_target:
+  #   types: [closed, unlabeled]
 
 permissions:
   contents: read

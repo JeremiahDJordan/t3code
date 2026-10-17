@@ -1,13 +1,16 @@
 name: Issue Labels
 
+# Fork: automatic triggers are off until every workflow is audited (owner, 2026-10-17).
+# Only manual runs and calls from another workflow remain; the originals are commented below.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/ISSUE_TEMPLATE/**
-      - .github/workflows/issue-labels.yml
   workflow_dispatch:
+  # Off for the fork:
+  # push:
+  #   branches:
+  #     - main
+  #   paths:
+  #     - .github/ISSUE_TEMPLATE/**
+  #     - .github/workflows/issue-labels.yml
 
 permissions:
   issues: write
