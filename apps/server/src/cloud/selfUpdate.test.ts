@@ -2,11 +2,14 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { CLI_RELEASES_OFF_MESSAGE } from "@t3tools/shared/cliRelease";
 import * as Cause from "effect/Cause";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -24,6 +27,8 @@ interface HarnessOptions {
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
+  /** Null leaves the release source unconfigured, the fork's default. */
+  readonly releaseBaseUrl?: string | null;
 }
 
 const archiveBytes = new TextEncoder().encode("not really a tarball");
@@ -119,7 +124,18 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
     Effect.provideService(HostProcess.Platform, "linux"),
     Effect.provideService(HostProcess.Architecture, "x64"),
-    Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
+    Effect.provide(
+      Layer.mergeAll(
+        ServerConfig.layer({ ...config, mode: options.mode ?? "web" }),
+        ConfigProvider.layer(
+          ConfigProvider.fromUnknown(
+            options.releaseBaseUrl === null
+              ? {}
+              : { T3CODE_RELEASE_BASE_URL: options.releaseBaseUrl ?? "https://releases.example" },
+          ),
+        ),
+      ),
+    ),
   );
   return { selfUpdate, order };
 });
@@ -349,6 +365,23 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         updateId: "launcher-id",
       });
       expect(order).toEqual(["download", "extract", "preflight", "accept"]);
+    }),
+  );
+
+  it.effect("downloads nothing when no release source is configured", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ releaseBaseUrl: null });
+      expect((yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason).toBe(
+        CLI_RELEASES_OFF_MESSAGE,
+      );
+      expect(order).toEqual([]);
+      expect(
+        ServerSelfUpdate.resolveServerSelfUpdateCapability({
+          desktopManaged: false,
+          launcherManaged: true,
+          releaseSourceConfigured: false,
+        }),
+      ).toBeNull();
     }),
   );
 

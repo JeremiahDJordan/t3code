@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ProviderDriverKind } from "@t3tools/contracts";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -233,9 +234,41 @@ const layerService = (input: {
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(ServerSettings.layerTest(input.settings ?? {})),
     Layer.provideMerge(layerHttpClient(input.response)),
+    Layer.provideMerge(
+      ConfigProvider.layer(
+        ConfigProvider.fromUnknown({
+          T3CODE_MODEL_MANIFEST_URL: "https://manifest.example.test/model-manifest.json",
+        }),
+      ),
+    ),
   );
 
 describe("ModelManifest service", () => {
+  it.live("uses only the bundled manifest when no manifest URL is configured", () => {
+    let fetchCount = 0;
+    return Effect.gen(function* () {
+      const service = yield* ModelManifest.make;
+      assert.deepStrictEqual(yield* service.forceRefresh, ModelManifest.BUNDLED_MODEL_MANIFEST);
+      assert.deepStrictEqual(yield* service.refresh, ModelManifest.BUNDLED_MODEL_MANIFEST);
+      assert.strictEqual(fetchCount, 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "model-manifest-unconfigured-test" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(ServerSettings.layerTest({})),
+          Layer.provideMerge(
+            layerHttpClient(() => {
+              fetchCount++;
+              return Response.json(REMOTE_MANIFEST);
+            }),
+          ),
+          Layer.provideMerge(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+        ),
+      ),
+    );
+  });
+
   it.live("explicit refresh bypasses fresh memory and disk caches", () => {
     let fetchCount = 0;
     const updated: ModelManifest.ModelManifestData = {

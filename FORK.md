@@ -131,11 +131,12 @@ On a machine where Bob has never run, the first turn reports Bob's license. Run 
 once in a terminal, or `bob --accept-license -p "hi"` on a headless machine.
 
 **Updating.** `git pull --rebase` (the branch is force-pushed after each upstream
-rebase), `vp i`, and rebuild. Don't use upstream's updaters: `t3 update`, the
-background service that `t3 connect` and `t3 service install` offer, and a server
-update started from a client all download upstream's release, which has no Bob. Run
-`serve` yourself, for example from your own systemd unit or launchd agent. A
-source-built desktop app has no update feed, so it never replaces itself.
+rebase), `vp i`, and rebuild. Upstream's updaters (`t3 update`, the background
+service `t3 service install` sets up, and a server update started from a client)
+download releases only from a source you configure, and refuse without one (see
+[Talk to no T3 web service](#talk-to-no-t3-web-service-owner-2026-10-16)): upstream's
+releases have no Bob. Run `serve` yourself, for example from your own systemd unit or
+launchd agent. A source-built desktop app has no update feed, so it never replaces itself.
 
 The first start on V2 copies `state.sqlite` to `statev2.sqlite` and imports its threads;
 the old file is kept. A migrated Bob thread continues its Bob task.
@@ -845,7 +846,13 @@ server and CLI built from this branch) use `~/.z6` for the server home and `z6co
 desktop's Electron profile, against T3's `~/.t3` and `t3code-v2`; the names live in
 `packages/shared/src/t3DataMigration.ts`. The first start that finds a Z6 location missing copies
 T3's into it (`migrateHomeFromT3`, `migrateDesktopUserDataFromT3`), then neither app reads the
-other's folders, except the work folders below. The server copies in `resolveBaseDir`'s default
+other's folders, except the work folders below. A `~/.z6` holding only downloads (`runtime`,
+`tools`, `caches`, `source`, `bin`) still counts as missing: the npm launcher and installers
+default to `~/.z6` too, and download a runtime there before the server first starts. That copy
+moves in entry by entry, `userdata` last, under a `.t3-copy-in-progress` mark; a start that finds
+the mark without `userdata` copies again. Moving in holds `~/.z6.t3-merge-lock` (taken over when
+its process is gone) and checks for `userdata` again first, so a second start never touches a
+home the first one finished. The server copies in `resolveBaseDir`'s default
 branch (`os-jank.ts`), so `serve` and every CLI command get it; the desktop passes its home to its
 server explicitly, so it copies itself, first thing in `main.ts`
 (`DesktopT3Data.migrateOnFirstStart`). An explicit `T3CODE_HOME` or `--base-dir`, dev state
@@ -987,6 +994,92 @@ an agent to suggest T3 Connect when a task has no webhook URL; the desktop Clerk
 is still created, since it also owns deep links and the single-instance lock.
 
 ### Talk to no T3 web service (owner, 2026-10-16)
+
+The owner's instruction: turn off everything that talks to T3's web services, remove T3's
+addresses so nothing can reach them by accident, and let each one come back only pointed at a
+server of the owner's own. Upstream's hosts (`t3.codes` and its subdomains), keys (PostHog,
+Clerk, its Clerk CLI OAuth client), repository (`pingdotgg/t3code` releases, raw files and
+issues), npm package and mobile accounts are gone from shipped code. Each service is off by
+default and makes no request: an empty default at the entry point, upstream's code path kept
+behind it, so a rebase meets small diffs. Configuration uses the path each service already had
+(server environment variables read through `Config`, Vite build variables for web and desktop,
+Expo variables for mobile). `.env.example` lists every variable, commented out.
+
+#### Server, CLI, web and desktop
+
+- **Analytics** (`telemetry/AnalyticsService.ts`). No built-in PostHog key or host. Without
+  `T3CODE_POSTHOG_KEY` and `T3CODE_POSTHOG_HOST` the service is a no-op from construction: no
+  identifier is read or written (`anonymous-id`), nothing is buffered or sent.
+  `T3CODE_TELEMETRY_ENABLED=false` still turns a configured one off. Web and desktop have no
+  client-side analytics. Clients cannot see whether the server reports, so the welcome wizard
+  makes no claim either way; the privacy policy row and the wizard's link appear only with
+  `VITE_PRIVACY_POLICY_URL` (`legalLinks.ts`).
+- **Model manifest** (`provider/ModelManifest.ts`). Only the bundled `model-manifest.json`
+  (which carries Bob; upstream's copy does not) unless `T3CODE_MODEL_MANIFEST_URL` names one.
+  Unconfigured, the disk cache is ignored too, so a manifest fetched by an older build or copied
+  from `~/.t3` cannot outrank the bundle.
+- **Release downloads** (`packages/shared/src/cliRelease.ts`). No release repository is built
+  in. `cliReleaseBaseUrl` reads `T3CODE_RELEASE_BASE_URL`, else `T3CODE_RELEASE_REPOSITORY`
+  (`owner/name`, whose GitHub releases use upstream's archive layout), else nothing. Every
+  updater refuses without one, saying updates come from rebuilding the fork
+  (`CLI_RELEASES_OFF_MESSAGE`): `t3 update` before any request, `ensurePinnedRuntimeInstalled`
+  (so `t3 service install` and the boot service), and the client-triggered update, whose
+  `boot-service` capability is withheld (`resolveServerSelfUpdateCapability`), so clients offer a
+  copied rebuild command instead of a remote update (`manualServerUpdateCommand`). A runtime
+  already pinned on disk still runs. `scripts/install.sh`, `install.ps1` and the npm launcher
+  (`scripts/npm-launcher/t3.mjs`) take the same two variables and stop without them, and keep
+  their runtime under `~/.z6`, so an upstream runtime cached in `~/.t3` at the same version is
+  never picked.
+- **SSH hosts** (`packages/ssh/src/tunnel.ts`). The desktop passes `cliReleaseBaseUrl` of its
+  own environment; without one the runner script exits before taking its install lock, so a
+  remote host is never provisioned with upstream's server. A runtime already installed there,
+  or a server already running, is still used.
+- **Version checks.** The sidebar's "is it on npm yet" check (`state/npmRelease.ts`) asks only
+  the registry URL in `VITE_T3CODE_NPM_PACKAGE_URL`; unset, every version counts as published,
+  and a server's own download reports a missing release. Mobile's **Check for updates**
+  (`environment-maintenance.ts`) asks only `EXPO_PUBLIC_T3CODE_RELEASE_REPOSITORY`'s releases and
+  otherwise says the build checks none.
+- **Desktop updater.** The feed already comes only from `T3CODE_DESKTOP_UPDATE_REPOSITORY` or
+  `GITHUB_REPOSITORY` at build time, and a build without either has none. Release-note links
+  (`desktopUpdate.logic.ts`) point at `VITE_T3CODE_RELEASE_REPOSITORY`'s releases, or are hidden.
+- **Hosted app.** `DEFAULT_HOSTED_APP_URL` (`connectAuth.ts`) is empty, its name kept for
+  mobile. With no `VITE_HOSTED_APP_URL`, prompt links are `z6code://new?…` (`buildNewThreadLink`),
+  `promptLinkAppPath` trusts only the app scheme, the web app is never a hosted static app, and
+  pairing links use the server's own address (`resolveHostedPairingUrl` returns null).
+  `providerAuthReturnUrl.ts` no longer trusts upstream's hosted app as a Codex sign-in return;
+  a hosted app of the owner's own would need adding there. The hosted prompt-link landing drops
+  its download button. The server's `T3CODE_HOSTED_APP_URL` (T3 Connect's CLI sign-in) has no
+  default.
+- **T3 Connect leftovers.** `.env.example` no longer carries upstream's Clerk publishable key,
+  JWT template, CLI OAuth client or relay URL, and no code falls back to them.
+- **`t3 triage`** refuses (`TriageDisabledError`) unless `T3CODE_TRIAGE_REPOSITORY` names the
+  owner's fork; then the playbook and context name that repository for the newer-playbook fetch,
+  the clone and filed issues (`forTriageRepository`). The playbook text stays byte-identical to
+  `.github/triage/PLAYBOOK.md`.
+- **Links.** Settings drops the App Store and Google Play row (`MobileAppSettingsRow.tsx` is
+  removed; the fork has no store apps), and the scratch-project README no longer links T3's
+  site. The fork's `apps/server/package.json` repository and the GNOME extension's URL name the
+  fork. No web or desktop surface links Discord, upstream's docs or its issue tracker.
+
+#### The guard
+
+`scripts/upstream-services.test.ts` lists every tracked file (`git ls-files`) and fails on any of
+upstream's hosts, keys, repository, npm package, Discord invites or mobile account ids outside its
+allow list: Markdown and docs, `.github`, `.agents`, `.repos`, `apps/marketing`, `infra/relay`,
+`packaging`, tests and fixtures, a few named files whose text contacts nothing (the triage
+playbook, `apps/web/vercel.ts`, the repository's own `t3.json`, the t3.json schema's `$id`, the
+desktop's Linux metadata) and named strings in a file (the GNOME extension's uuid, the stack
+rebase's committer email, the Linux package's maintainer and homepage). A second test fails on an
+allowed string that no longer occurs. A hit means: gate the new code path behind configuration,
+or allow it with its reason.
+
+#### Left as they are
+
+`apps/marketing` (upstream's site) and `infra/relay` (upstream's relay service) are not part of
+the shipped apps and keep upstream's addresses. User docs and CLI help still show `npx t3`
+commands (`t3 pair`, `t3 serve`, the welcome wizard), which run upstream's npm package if a user
+types them; they contact nothing themselves. The preview tool's `t3.chat` example URL is
+upstream's chat product, not a T3 Code service.
 
 #### Mobile
 
@@ -1316,6 +1409,14 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   are covered by `publicConfig.t3ConnectOff.test.ts`, and `binCli.ts` by
   `connectTurnedOff.test.ts`. A new upstream T3 Connect entry point that bypasses
   `resolveCloudPublicConfig`, the `connect` HTTP group or the boot layer needs its own gate.
+- No T3 web service: `scripts/upstream-services.test.ts` catches a returning address, but not a
+  lost gate whose address is already gone. Keep the empty defaults in `AnalyticsService.ts`,
+  `ModelManifest.ts` (`ModelManifestUrlConfig`), `cliRelease.ts`, `connectAuth.ts`,
+  `providerAuthReturnUrl.ts`, `npmRelease.ts`, `desktopUpdate.logic.ts` and `legalLinks.ts`; the
+  `releaseBaseUrlConfig` reads in `bootService.ts`, `selfUpdate.ts` and `ServerEnvironment.ts`;
+  the refusals in `update.ts`, `pinnedRuntime.ts`, `triage.ts` and the SSH runner script; and
+  `releaseBaseUrl` in desktop `main.ts`. Each has a test that its default makes no request. A
+  new upstream service needs the same treatment and a guard entry.
 
 **Conflict hazards:** `ws.ts` around `makeWsRpcLayer`'s parameters; the scanner's
 already-imported/duplicate helpers, which both the transcript and Bob paths use (port
@@ -1355,6 +1456,7 @@ cd ../client-runtime && vp test run src/connection src/state/workflowCard
 cd ../../apps/web && vp test run src/hostedPairing src/components/settings/pairingUrls src/cloud
 cd ../mobile && vp test run src/features/cloud src/features/agent-awareness
 cd ../desktop && vp test run src/app/DesktopSecureChannelKeys
+cd ../../scripts && vp test run --config ../vite.config.ts --dir . upstream-services
 ```
 
 Run them from each package: from the root, a path filter also matches agent worktrees

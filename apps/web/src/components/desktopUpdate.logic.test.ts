@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 
 import {
@@ -200,15 +200,28 @@ describe("getDesktopUpdateActionError", () => {
 });
 
 describe("desktop update UI helpers", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_T3CODE_RELEASE_REPOSITORY", "owner/fork");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("links to no release page when no release repository is configured", () => {
+    vi.stubEnv("VITE_T3CODE_RELEASE_REPOSITORY", "");
+    expect(getDesktopUpdateReleaseUrl("0.0.30")).toBeNull();
+    expect(getDesktopUpdateReleaseHistoryUrl()).toBeNull();
+  });
+
   it("builds the stable release URL for a downloaded version", () => {
     expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
+      "https://github.com/owner/fork/releases/tag/v0.0.30",
     );
   });
 
   it("builds the nightly release URL without dropping its version suffix", () => {
     expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30-nightly.20260728.931",
+      "https://github.com/owner/fork/releases/tag/v0.0.30-nightly.20260728.931",
     );
   });
 
@@ -218,9 +231,7 @@ describe("desktop update UI helpers", () => {
   });
 
   it("builds the release history URL", () => {
-    expect(getDesktopUpdateReleaseHistoryUrl()).toBe(
-      "https://github.com/pingdotgg/t3code/releases",
-    );
+    expect(getDesktopUpdateReleaseHistoryUrl()).toBe("https://github.com/owner/fork/releases");
   });
 
   it("toasts only for actionable updater errors", () => {

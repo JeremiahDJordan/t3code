@@ -101,17 +101,16 @@ export function supportsServerUpdateThreadContinuation(
   return serverConfig?.environment.capabilities.serverUpdateThreadContinuation === true;
 }
 
+/**
+ * Upstream copies an npm command for its published `t3` package. The fork publishes none, so a
+ * server without self-update is updated by pulling and rebuilding the fork where it runs (FORK.md,
+ * "Talk to no T3 web service").
+ */
 export function manualServerUpdateCommand(
-  targetVersion: string,
-  installation?: ServerInstallation,
+  _targetVersion: string,
+  _installation?: ServerInstallation,
 ): string {
-  if (installation?.kind === "npm-global") {
-    const prefix = `'${installation.prefix.replaceAll("'", "'\\''")}'`;
-    return `npm install --global --prefix ${prefix} t3@${targetVersion}`;
-  }
-  const runner =
-    installation?.kind === "pnpm-dlx" ? "pnpm dlx" : installation?.kind === "bunx" ? "bunx" : "npx";
-  return `${runner} t3@${targetVersion}`;
+  return "git pull --rebase && vp i && vp run --filter t3 build";
 }
 
 export function serverUpdateGuidance(capability: ServerSelfUpdateCapability): string {

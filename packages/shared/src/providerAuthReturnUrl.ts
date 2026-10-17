@@ -10,7 +10,8 @@ export function providerAuthReturnUrl(value: string | undefined): string | undef
       [`${APP_SCHEME}:`, `${APP_DEV_SCHEME}:`].includes(url.protocol) && url.host === "app";
     const web =
       ["http:", "https:"].includes(url.protocol) &&
-      (isLoopbackHost(url.hostname) || url.origin === "https://app.t3.codes");
+      // Upstream also trusts its hosted app; the fork has none (FORK.md).
+      isLoopbackHost(url.hostname);
     if (
       url.username ||
       url.password ||

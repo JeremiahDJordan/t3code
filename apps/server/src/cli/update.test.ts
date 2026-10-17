@@ -5,8 +5,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { CLI_RELEASES_OFF_MESSAGE } from "@t3tools/shared/cliRelease";
+import * as Layer from "effect/Layer";
+import { HttpClient } from "effect/http";
 
-import { repointLauncher, resolveLauncherPath } from "./update.ts";
+import * as BootService from "../cloud/bootService.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import { repointLauncher, resolveLauncherPath, runUpdate } from "./update.ts";
 
 it.layer(NodeServices.layer)("t3 update launcher", (it) => {
   it.effect("repoints a symlink that lives in a runtime versions tree", () =>
@@ -99,5 +104,41 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       assert.equal(relative, launcher);
       assert.equal(absent, undefined);
     }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+  );
+});
+
+it.layer(NodeServices.layer)("t3 update without a release source", (it) => {
+  it.effect("refuses before any request when no release source is configured", () =>
+    Effect.gen(function* () {
+      const requests: string[] = [];
+      const error = yield* runUpdate({
+        baseDir: "/nonexistent/t3-home",
+        logsDir: "/nonexistent/t3-home/logs",
+        serverRuntimeStatePath: "/nonexistent/t3-home/server-runtime.json",
+        channel: undefined,
+        requestedVersion: undefined,
+        allowDowngrade: false,
+        assumeYes: true,
+      }).pipe(
+        Effect.flip,
+        Effect.provideService(HostProcess.Environment, {}),
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.mock(BootService.BootService)({}),
+            Layer.mock(ProcessRunner.ProcessRunner)({}),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.sync(() => requests.push(request.url)).pipe(
+                  Effect.andThen(Effect.die("unexpected request")),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      assert.equal(error.message, CLI_RELEASES_OFF_MESSAGE);
+      assert.deepEqual(requests, []);
+    }),
   );
 });

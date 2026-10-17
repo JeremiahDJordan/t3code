@@ -23,8 +23,10 @@ restart from the update button when you are ready. A server still restarting
 finishes on its own, and the button keeps showing it after the desktop app
 restarts.
 
-Server updates appear only after that version is published to npm. Remote
-desktop apps do not wait for npm. The confirmation lists each machine it skips
+A server updates itself only when its environment names a release source of your own
+(`T3CODE_RELEASE_REPOSITORY` or `T3CODE_RELEASE_BASE_URL`); otherwise it needs a manual update.
+A web or desktop app built with `VITE_T3CODE_NPM_PACKAGE_URL` also waits until that package
+publishes the version. The confirmation lists each machine it skips
 and why, such as a machine that is offline or needs a manual update. Use the
 notice or **Settings → Connections** for those.
 
@@ -79,10 +81,9 @@ The offered action depends on how the server runs:
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Update server**          | Keep the client open while it installs and reconnects. Supported background services update remotely. For a desktop-hosted server, this also closes and relaunches the desktop app on the host. |
 | **Update the desktop app** | Update the desktop app on the machine running the server, then reopen it if needed.                                                                                                             |
-| **Copy update command**    | Run the command on the named host to update the detected global npm install, then restart the server with your usual options.                                                                   |
-| **Copy relaunch command**  | Stop the command-line server on its host and relaunch with the copied command, keeping your usual subcommand and options. This does not update an installed `t3` command.                       |
+| **Copy update command**    | Run the copied rebuild command in the fork's checkout on the named host, then restart the server with your usual options.                                                                       |
 
-On the host, run:
+On a host with a release source configured, run:
 
 ```sh
 t3 update <client-version>
@@ -94,9 +95,8 @@ asks before restarting the background service; if you decline, run
 stop it and start it again afterwards with your usual options such as `--host`
 or `--tailscale-serve`.
 
-If you run the server with `npx` rather than an installed `t3`, there is
-nothing to update on the host: stop the server and relaunch it as
-`npx t3@<client-version>` with the same subcommand and options.
+Without a release source, `t3 update` downloads nothing. Pull and rebuild the fork on the host,
+then restart the server.
 
 ## If an update fails
 
@@ -122,7 +122,8 @@ offer a manual update command are not included.
 
 To update an environment from your phone, open **Settings → Environments** and
 select it. **Check for updates** finds the latest release on that environment's
-current release channel. Keep the app open while the environment updates and
+current release channel, in the GitHub repository the mobile build names with
+`EXPO_PUBLIC_T3CODE_RELEASE_REPOSITORY`; a build without one checks nothing. Keep the app open while the environment updates and
 reconnects. Hosts that cannot update remotely show instructions for updating on
 the machine instead.
 

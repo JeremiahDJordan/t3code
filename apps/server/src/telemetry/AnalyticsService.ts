@@ -52,13 +52,14 @@ export function retryDelayMs(failures: number, random: number): number {
   return Math.round(ceiling / 2 + (ceiling / 2) * random);
 }
 
+/**
+ * The fork sends no analytics unless the owner points it at a PostHog project of their own: with
+ * no `T3CODE_POSTHOG_KEY` and `T3CODE_POSTHOG_HOST`, nothing is recorded and no request is made.
+ * Upstream's key and host are deliberately not here (FORK.md, "Talk to no T3 web service").
+ */
 const TelemetryEnvConfig = Config.all({
-  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
-  ),
-  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
-    Config.withDefault("https://us.i.posthog.com"),
-  ),
+  posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(Config.withDefault("")),
+  posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(Config.withDefault("")),
   enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(true)),
   flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
   maxBufferedEvents: Config.Number("T3CODE_TELEMETRY_MAX_BUFFERED_EVENTS").pipe(
@@ -105,7 +106,19 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 /** @public */
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
-  const telemetryConfig = yield* TelemetryEnvConfig;
+  const envConfig = yield* TelemetryEnvConfig;
+  const telemetryConfig = {
+    ...envConfig,
+    posthogKey: envConfig.posthogKey.trim(),
+    posthogHost: envConfig.posthogHost.trim().replace(/\/+$/, ""),
+  };
+  if (
+    !telemetryConfig.enabled ||
+    telemetryConfig.posthogKey.length === 0 ||
+    telemetryConfig.posthogHost.length === 0
+  ) {
+    return AnalyticsService.of({ record: () => Effect.void, flush: Effect.void });
+  }
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const identifier = yield* getTelemetryIdentifier;

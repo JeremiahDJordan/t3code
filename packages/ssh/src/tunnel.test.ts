@@ -106,10 +106,13 @@ describe("ssh tunnel scripts", () => {
 
     assert.include(script, "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'");
     assert.include(script, "T3_NODE_SCRIPT_PATH=''");
-    assert.include(
-      script,
-      "T3_RELEASE_BASE_URL='https://github.com/pingdotgg/t3code/releases/download'",
+    // No release source is configured, so the runner refuses to download before taking the lock.
+    assert.include(script, "T3_RELEASE_BASE_URL=''");
+    assert.isBelow(
+      script.indexOf('if [ -z "$T3_RELEASE_BASE_URL" ]; then'),
+      script.indexOf('mkdir -p "$HOME/.t3/runtime/versions"'),
     );
+    assert.include(script, "This build installs no T3 Code server on the remote host");
     assert.include(script, 'T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"');
     assert.include(script, 'T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"');
     assert.include(script, "SHA256SUMS");
@@ -922,6 +925,22 @@ describe("archive runner script", () => {
         assert.isFalse(yield* fs.exists(lock));
       }).pipe(Effect.provide(NodeServices.layer)),
     60_000,
+  );
+
+  it.effect.skipIf(windowsHost)("downloads nothing without a configured release source", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-archive-runner-off-" });
+      const runner = `${root}/run-t3.sh`;
+      yield* fs.writeFileString(runner, SshTunnel.buildRemoteT3RunnerScript({ archiveVersion }));
+      const home = `${root}/home`;
+      yield* fs.makeDirectory(home, { recursive: true });
+
+      const result = yield* runRunner(home, runner);
+      assert.equal(result.exitCode, 1);
+      assert.include(result.stderr, "This build installs no T3 Code server on the remote host");
+      assert.isFalse(yield* fs.exists(`${home}/.t3/runtime`));
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
 

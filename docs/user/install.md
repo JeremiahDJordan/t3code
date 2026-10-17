@@ -3,6 +3,11 @@
 T3 Code runs coding agents on your computer and lets you control them from its
 desktop, web, or mobile app. Set up the machine where the agents will work first.
 
+Z6 Code publishes no releases. The installers and `t3 update` below download only from a release
+source you name, as `T3CODE_RELEASE_REPOSITORY` (a GitHub `owner/name`) or
+`T3CODE_RELEASE_BASE_URL`; without one they stop and say so. Otherwise build from source and
+update by pulling and rebuilding.
+
 ## Requirements
 
 You need an installed, authenticated provider before starting a thread. You can

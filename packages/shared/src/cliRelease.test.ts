@@ -4,8 +4,10 @@ import {
   cliArchiveFileName,
   cliArchivePlatformKey,
   cliArchiveTarCommand,
+  cliReleaseBaseUrl,
   cliReleaseDownloadBaseUrl,
   cliReleaseChannelOf,
+  cliReleaseRepository,
   cliReleaseIndexPageUrl,
   newestCliReleaseVersion,
   parseChecksums,
@@ -31,12 +33,26 @@ describe("cliRelease", () => {
   });
 
   it("resolves download URLs under the tagged release, honoring a mirror", () => {
-    expect(cliReleaseDownloadBaseUrl("1.2.3")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/download/v1.2.3",
-    );
+    expect(cliReleaseDownloadBaseUrl("1.2.3", undefined)).toBeUndefined();
+    expect(cliReleaseDownloadBaseUrl("1.2.3", "  ")).toBeUndefined();
     expect(cliReleaseDownloadBaseUrl("1.2.3", "https://mirror.example/t3/")).toBe(
       "https://mirror.example/t3/v1.2.3",
     );
+  });
+
+  it("has no release source unless one is configured", () => {
+    expect(cliReleaseBaseUrl({})).toBeUndefined();
+    expect(cliReleaseRepository({})).toBeUndefined();
+    expect(cliReleaseRepository({ T3CODE_RELEASE_REPOSITORY: "not a repo" })).toBeUndefined();
+    expect(cliReleaseBaseUrl({ T3CODE_RELEASE_REPOSITORY: "owner/fork" })).toBe(
+      "https://github.com/owner/fork/releases/download",
+    );
+    expect(
+      cliReleaseBaseUrl({
+        T3CODE_RELEASE_REPOSITORY: "owner/fork",
+        T3CODE_RELEASE_BASE_URL: "https://mirror.example/t3",
+      }),
+    ).toBe("https://mirror.example/t3");
   });
 
   it("parses sha256sum output including binary-mode markers", () => {
@@ -84,9 +100,9 @@ describe("cliRelease", () => {
   });
 
   it("pages through the release index at the largest page GitHub allows", () => {
-    expect(cliReleaseIndexPageUrl(1)).toBe(
-      "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100&page=1",
+    expect(cliReleaseIndexPageUrl("owner/fork", 1)).toBe(
+      "https://api.github.com/repos/owner/fork/releases?per_page=100&page=1",
     );
-    expect(cliReleaseIndexPageUrl(3)).toContain("page=3");
+    expect(cliReleaseIndexPageUrl("owner/fork", 3)).toContain("page=3");
   });
 });

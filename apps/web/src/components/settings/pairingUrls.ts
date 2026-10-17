@@ -1,4 +1,4 @@
-import { buildHostedPairingUrl } from "../../hostedPairing";
+import { buildHostedPairingUrl, configuredHostedAppUrl } from "../../hostedPairing";
 import { setPairingTokenOnUrl } from "../../pairingUrl";
 
 export function resolveDesktopPairingUrl(endpointUrl: string, credential: string): string {
@@ -9,7 +9,8 @@ export function resolveDesktopPairingUrl(endpointUrl: string, credential: string
 
 export function resolveHostedPairingUrl(endpointUrl: string, credential: string): string | null {
   const url = new URL(endpointUrl);
-  if (url.protocol !== "https:") {
+  // No hosted app is configured by default; pairing then uses the server's own address.
+  if (url.protocol !== "https:" || configuredHostedAppUrl() === "") {
     return null;
   }
 

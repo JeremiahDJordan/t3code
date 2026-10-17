@@ -215,7 +215,8 @@ server, then remove the environment on each device and pair it again.
 
 ### Hosted web app
 
-[app.t3.codes](https://app.t3.codes) needs an HTTPS endpoint. It connects directly
+Z6 Code has no hosted web app; pairing links use your server's own address. A hosted app of your
+own (`VITE_HOSTED_APP_URL` at build time) needs an HTTPS endpoint. It connects directly
 to your server; a hosted pairing link does not make an unreachable backend
 reachable or convert HTTP to HTTPS.
 
@@ -232,8 +233,11 @@ credentials, and agent work stay on the remote machine.
 
 The remote host must be Linux or an Apple Silicon Mac with `curl` or `wget`,
 `tar`, `sha256sum` or `shasum`, and [provider setup](./install.md#providers).
-The first launch downloads T3 Code's server to `~/.t3/runtime` on the host, so
-it takes longer than later ones.
+Z6 Code installs no server there by default: run one on the host yourself, built from
+the fork, or start the desktop app with `T3CODE_RELEASE_REPOSITORY` or
+`T3CODE_RELEASE_BASE_URL` naming a release source of your own. With one, the first
+launch downloads the server to `~/.t3/runtime` on the host, so it takes longer than
+later ones.
 Provider CLIs must be on the `PATH` of a non-interactive login shell there;
 check with:
 

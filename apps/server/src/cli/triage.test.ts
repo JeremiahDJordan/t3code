@@ -9,7 +9,26 @@ import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "../serverRuntimeState.ts";
-import { describeServerProcess } from "./triage.ts";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Layer from "effect/Layer";
+import { Command } from "effect/cli";
+import { describeServerProcess, triageCommand } from "./triage.ts";
+import { TRIAGE_DISABLED_MESSAGE } from "./triagePrompt.ts";
+
+it.effect("refuses without a configured triage repository, before writing anything", () =>
+  Effect.gen(function* () {
+    const error = yield* Command.runWith(triageCommand, { version: "0.0.0" })([
+      "--base-dir",
+      "/nonexistent/t3-triage-home",
+    ]).pipe(
+      Effect.provide(
+        Layer.mergeAll(ConfigProvider.layer(ConfigProvider.fromUnknown({})), NodeServices.layer),
+      ),
+      Effect.flip,
+    );
+    assert.equal(error.message, TRIAGE_DISABLED_MESSAGE);
+  }),
+);
 
 it.effect("reports the version the running server recorded, not the CLI's", () =>
   Effect.gen(function* () {

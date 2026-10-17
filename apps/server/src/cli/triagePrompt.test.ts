@@ -8,8 +8,23 @@ import {
   buildTriageContext,
   buildTriageLaunchPrompt,
   buildTriageSeedPrompt,
+  forTriageRepository,
   TRIAGE_PLAYBOOK,
+  triageRepository,
 } from "./triagePrompt.ts";
+
+it("points every repository link at the configured repository", () => {
+  assert.equal(triageRepository(undefined), undefined);
+  assert.equal(triageRepository("not a repo"), undefined);
+  assert.equal(triageRepository(" owner/fork "), "owner/fork");
+  const prompt = forTriageRepository(buildTriageSeedPrompt("/tmp/context.md"), "owner/fork");
+  assert.notInclude(prompt, "pingdotgg");
+  assert.include(prompt, "https://github.com/owner/fork/issues/new");
+  assert.include(
+    prompt,
+    "https://raw.githubusercontent.com/owner/fork/main/.github/triage/PLAYBOOK.md",
+  );
+});
 
 it("stays byte-identical to .github/triage/PLAYBOOK.md", () => {
   // Old releases fetch the repo copy from `main` and follow it when it differs

@@ -7,7 +7,12 @@ const CONNECT_LOOPBACK_CALLBACK_PATH = "/callback";
 
 const CONNECT_AUTHORIZE_PATH = "/connect";
 
-export const DEFAULT_HOSTED_APP_URL = "https://app.t3.codes";
+/**
+ * Upstream's hosted web app. The fork has none, so the default is empty: nothing links to,
+ * pairs through or trusts a hosted app unless the build configures one of the owner's own
+ * (`VITE_HOSTED_APP_URL`, `T3CODE_HOSTED_APP_URL`). FORK.md, "Talk to no T3 web service".
+ */
+export const DEFAULT_HOSTED_APP_URL = "";
 
 export const CONNECT_OAUTH_SCOPES = ["openid", "profile", "email", "offline_access"] as const;
 

@@ -98,8 +98,10 @@ describe("link round trips", () => {
       provider: "claudeAgent",
       model: "opus",
     });
+    // With no hosted app configured, a prompt link opens the fork's own app.
+    expect(link.startsWith("z6code://new?")).toBe(true);
     const path = promptLinkAppPath(link);
-    expect(path).toBe(new URL(link).pathname + new URL(link).search);
+    expect(path).toBe("/new" + new URL(link).search);
     const parsed = parseNewThreadLink(new URL(link).search);
     expect(parsed.ok && parsed.value.kind === "new" && parsed.value.prompt.text).toBe(
       "Swear count & rating?",
@@ -109,10 +111,13 @@ describe("link round trips", () => {
   it("maps app scheme and hosted links to in-app paths, and nothing else", () => {
     expect(promptLinkAppPath("z6code://new?prompt=hi")).toBe("/new?prompt=hi");
     expect(promptLinkAppPath("z6code-dev://threads/env-1/thread-1")).toBe("/env-1/thread-1");
-    expect(promptLinkAppPath("https://app.t3.codes/env-1/thread-1?prompt=go")).toBe(
+    const hosted = "https://app.example.test";
+    expect(promptLinkAppPath(`${hosted}/env-1/thread-1?prompt=go`, hosted)).toBe(
       "/env-1/thread-1?prompt=go",
     );
-    expect(promptLinkAppPath("https://app.t3.codes/settings/general")).toBeNull();
+    expect(promptLinkAppPath(`${hosted}/settings/general`, hosted)).toBeNull();
+    // Upstream's hosted app is not trusted by default.
+    expect(promptLinkAppPath("https://app.t3.codes/new?prompt=hi")).toBeNull();
     expect(promptLinkAppPath("https://evil.test/new?prompt=hi")).toBeNull();
     expect(promptLinkAppPath("z6code://app/index.html")).toBeNull();
   });

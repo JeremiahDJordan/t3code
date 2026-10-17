@@ -1,6 +1,6 @@
 import { AuthOrchestrationOperateScope, ServerProvider } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   canMaintainEnvironment,
@@ -30,7 +30,10 @@ const provider = Schema.decodeUnknownSync(ServerProvider)({
   },
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+});
 
 describe("environment maintenance access", () => {
   it("requires a connected authenticated session with operate permission", () => {
@@ -159,6 +162,17 @@ describe("environment maintenance access", () => {
 
 describe("environment release checks", () => {
   const signal = new AbortController().signal;
+  beforeEach(() => {
+    vi.stubEnv("EXPO_PUBLIC_T3CODE_RELEASE_REPOSITORY", "owner/fork");
+  });
+
+  it("checks no releases unless the build names a repository", async () => {
+    vi.stubEnv("EXPO_PUBLIC_T3CODE_RELEASE_REPOSITORY", "");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(findEnvironmentUpdate("1.0.0", signal)).rejects.toThrow("checks no releases");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
   it("keeps stable hosts on stable releases and ignores drafts", async () => {
     vi.stubGlobal(

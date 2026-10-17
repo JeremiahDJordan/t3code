@@ -62,6 +62,8 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
 describe("showDesktopUpdateDownloadedToast", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+    // The fork links release pages only for a configured release repository.
+    vi.stubEnv("VITE_T3CODE_RELEASE_REPOSITORY", "pingdotgg/t3code");
   });
 
   it("opens the downloaded version's release notes", async () => {

@@ -27,6 +27,10 @@ import {
   buildTriageContext,
   buildTriageLaunchPrompt,
   buildTriageSeedPrompt,
+  forTriageRepository,
+  TRIAGE_DISABLED_MESSAGE,
+  TRIAGE_REPOSITORY_ENV,
+  triageRepository,
 } from "./triagePrompt.ts";
 
 interface TriageAgent {
@@ -55,6 +59,15 @@ export class TriageAgentChoiceRequiredError extends Schema.TaggedError<TriageAge
 ) {
   override get message(): string {
     return "Both claude and codex are installed and there is no terminal to ask which to use. Re-run with --agent claude or --agent codex.";
+  }
+}
+
+export class TriageDisabledError extends Schema.TaggedError<TriageDisabledError>()(
+  "TriageDisabledError",
+  {},
+) {
+  override get message(): string {
+    return TRIAGE_DISABLED_MESSAGE;
   }
 }
 
@@ -151,6 +164,10 @@ export const triageCommand = Command.make("triage", {
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      const repository = triageRepository(
+        Option.getOrUndefined(yield* Config.String(TRIAGE_REPOSITORY_ENV).pipe(Config.option)),
+      );
+      if (repository === undefined) return yield* new TriageDisabledError();
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
 
@@ -171,28 +188,31 @@ export const triageCommand = Command.make("triage", {
       const contextFilePath = path.join(scratchDir, "context.md");
       yield* fs.writeFileString(
         contextFilePath,
-        buildTriageContext({
-          generatedAt: DateTime.formatIso(now),
-          cliVersion: packageJson.version,
-          os: `${yield* HostProcess.Platform} ${yield* HostProcess.Architecture} (${NodeOS.release()})`,
-          nodeVersion: process.version,
-          launchedAs: yield* resolveCliCommand("triage"),
-          server: yield* describeServerProcess(paths.serverRuntimeStatePath),
-          paths: {
-            stateDir: paths.stateDir,
-            dbPath: paths.dbPath,
-            settingsPath: paths.settingsPath,
-            logsDir: paths.logsDir,
-            serviceLogPath: path.join(paths.logsDir, BootService.BOOT_SERVICE_LOG_FILE),
-            desktopBackendLogGlob: path.join(paths.logsDir, "server-child*.log*"),
-            serverTracePath: paths.serverTracePath,
-            providerEventLogPath: paths.providerEventLogPath,
-            terminalLogsDir: paths.terminalLogsDir,
-            providerStatusCacheDir: paths.providerStatusCacheDir,
-            secretsDir: paths.secretsDir,
-            sourceCacheDir: path.join(baseDir, "source"),
-          },
-        }),
+        forTriageRepository(
+          buildTriageContext({
+            generatedAt: DateTime.formatIso(now),
+            cliVersion: packageJson.version,
+            os: `${yield* HostProcess.Platform} ${yield* HostProcess.Architecture} (${NodeOS.release()})`,
+            nodeVersion: process.version,
+            launchedAs: yield* resolveCliCommand("triage"),
+            server: yield* describeServerProcess(paths.serverRuntimeStatePath),
+            paths: {
+              stateDir: paths.stateDir,
+              dbPath: paths.dbPath,
+              settingsPath: paths.settingsPath,
+              logsDir: paths.logsDir,
+              serviceLogPath: path.join(paths.logsDir, BootService.BOOT_SERVICE_LOG_FILE),
+              desktopBackendLogGlob: path.join(paths.logsDir, "server-child*.log*"),
+              serverTracePath: paths.serverTracePath,
+              providerEventLogPath: paths.providerEventLogPath,
+              terminalLogsDir: paths.terminalLogsDir,
+              providerStatusCacheDir: paths.providerStatusCacheDir,
+              secretsDir: paths.secretsDir,
+              sourceCacheDir: path.join(baseDir, "source"),
+            },
+          }),
+          repository,
+        ),
       );
 
       const installed: Array<TriageAgent> = [];
@@ -225,7 +245,10 @@ export const triageCommand = Command.make("triage", {
       // an argv string, and with no agent installed the same file is the
       // paste-anywhere fallback.
       const promptFilePath = path.join(scratchDir, "prompt.md");
-      yield* fs.writeFileString(promptFilePath, buildTriageSeedPrompt(contextFilePath));
+      yield* fs.writeFileString(
+        promptFilePath,
+        forTriageRepository(buildTriageSeedPrompt(contextFilePath), repository),
+      );
 
       if (selected === undefined) {
         yield* Console.log(

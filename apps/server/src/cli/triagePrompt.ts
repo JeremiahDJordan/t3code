@@ -3,6 +3,27 @@
  * (only backticks and backslashes are escaped here).
  */
 
+/** The repository the playbook names; `forTriageRepository` swaps in the configured one. */
+const UPSTREAM_TRIAGE_REPOSITORY = "pingdotgg/t3code";
+
+export const TRIAGE_REPOSITORY_ENV = "T3CODE_TRIAGE_REPOSITORY";
+
+/**
+ * The playbook fetches upstream's newest copy, clones upstream and files issues there, so the fork
+ * runs triage only against a repository its owner names (FORK.md, "Talk to no T3 web service").
+ */
+export const TRIAGE_DISABLED_MESSAGE = `t3 triage is turned off in this build: its playbook reads and files issues on upstream T3 Code's repository. Set ${TRIAGE_REPOSITORY_ENV} to owner/name of your own fork on GitHub to turn it on.`;
+
+/** The configured repository, when it is a plain `owner/name`. */
+export function triageRepository(value: string | undefined): string | undefined {
+  const repository = value?.trim() ?? "";
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ? repository : undefined;
+}
+
+/** Points the playbook's and context's repository links at the configured repository. */
+export const forTriageRepository = (text: string, repository: string) =>
+  text.replaceAll(UPSTREAM_TRIAGE_REPOSITORY, repository);
+
 export const TRIAGE_PLAYBOOK = `# T3 Code triage playbook
 
 You are a support engineer for T3 Code (https://github.com/pingdotgg/t3code), working

@@ -162,25 +162,11 @@ describe("ServerUpdateAction", () => {
     expect(testState.updateServer).not.toHaveBeenCalled();
   });
 
+  const rebuild = "git pull --rebase && vp i && vp run --filter t3 build";
   it.each([
-    [
-      { kind: "npm-global", prefix: "/opt/node" },
-      "npm install --global --prefix '/opt/node' t3@0.0.45",
-      "Update command copied",
-      "then restart t3",
-    ],
-    [
-      { kind: "npx" },
-      "npx t3@0.0.45",
-      "Relaunch command copied",
-      "This does not update an installed t3 command.",
-    ],
-    [
-      undefined,
-      "npx t3@0.0.45",
-      "Relaunch command copied",
-      "This does not update an installed t3 command.",
-    ],
+    [{ kind: "npm-global", prefix: "/opt/node" }, rebuild, "Update command copied", "checkout"],
+    [{ kind: "npx" }, rebuild, "Update command copied", "checkout"],
+    [undefined, rebuild, "Update command copied", "checkout"],
   ] satisfies ReadonlyArray<readonly [ServerInstallation | undefined, string, string, string]>)(
     "copies an honest manual command for %j without invoking remote update",
     (installation, command, title, guidance) => {

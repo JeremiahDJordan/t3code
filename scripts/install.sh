@@ -2,30 +2,33 @@
 # Installs the T3 Code CLI from a GitHub Release archive. Needs only sh, tar,
 # sha256sum or shasum, and curl or wget; no Node, npm, or compiler.
 #
-#   curl -fsSL https://t3.codes/install.sh | sh
+# The fork publishes no releases, so this installs only from a release source
+# you name: T3CODE_RELEASE_REPOSITORY or T3CODE_RELEASE_BASE_URL.
 #
 # Environment:
 #   T3CODE_CHANNEL           release train to follow: stable, nightly, or preview
 #                            (default: stable; preview is a maintainers' test train)
 #   T3CODE_VERSION           exact version to install (overrides T3CODE_CHANNEL)
-#   T3CODE_HOME              T3 home directory (default: ~/.t3)
+#   T3CODE_HOME              Z6 home directory (default: ~/.z6)
 #   T3CODE_INSTALL_BIN_DIR   where the `t3` symlink goes (default: ~/.local/bin)
-#   T3CODE_RELEASE_BASE_URL  mirror for releases/download (default: GitHub)
+#   T3CODE_RELEASE_REPOSITORY  GitHub owner/name whose releases to install (no default)
+#   T3CODE_RELEASE_BASE_URL  base URL for releases/download (default: the repository's)
 #
 # The archive is unpacked into $T3CODE_HOME/runtime/versions/<version>, the
 # same layout `t3 service install` uses, so the service reuses this download
 # instead of fetching the release again.
 set -eu
 
-repo="pingdotgg/t3code"
-base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
-t3_home="${T3CODE_HOME:-$HOME/.t3}"
+repo="${T3CODE_RELEASE_REPOSITORY:-}"
+base_url="${T3CODE_RELEASE_BASE_URL:-${repo:+https://github.com/${repo}/releases/download}}"
+t3_home="${T3CODE_HOME:-$HOME/.z6}"
 bin_dir="${T3CODE_INSTALL_BIN_DIR:-$HOME/.local/bin}"
 
 fail() {
   printf '\nt3 install: %s\n' "$1" >&2
   exit 1
 }
+[ -n "$base_url" ] || fail "no release source: set T3CODE_RELEASE_REPOSITORY (owner/name on GitHub) or T3CODE_RELEASE_BASE_URL. Z6 Code is built from source."
 
 # ANSI stays on stderr, so `curl ... | sh` still gets progress.
 interactive=false
@@ -153,6 +156,7 @@ if [ -z "$version" ]; then
     nightly | preview) tag_pattern="v\([0-9][^\"]*-${channel}\.[0-9]*\.[0-9]*\)" ;;
     *) fail "T3CODE_CHANNEL must be stable, nightly, or preview" ;;
   esac
+  [ -n "$repo" ] || fail "set T3CODE_RELEASE_REPOSITORY to find the newest release, or T3CODE_VERSION"
   tmp_index="$(mktemp)"
   fetch "https://api.github.com/repos/${repo}/releases?per_page=100" "$tmp_index"
   version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" | head -n 1)"

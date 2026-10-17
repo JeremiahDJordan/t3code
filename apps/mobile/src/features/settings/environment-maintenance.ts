@@ -54,9 +54,15 @@ const Releases = Schema.Array(
 const decodeReleases = Schema.decodeUnknownSync(Releases);
 
 export async function findEnvironmentUpdate(currentVersion: string, signal: AbortSignal) {
+  // Fork: checks the releases only of a GitHub repository (owner/name) the build names; upstream's
+  // are not a default (FORK.md, "Talk to no T3 web service").
+  const repository = process.env.EXPO_PUBLIC_T3CODE_RELEASE_REPOSITORY?.trim();
+  if (!repository) {
+    throw new Error("This build checks no releases. Update the server by rebuilding the fork.");
+  }
   const channel = cliReleaseChannelOf(currentVersion);
   for (let page = 1; ; page++) {
-    const response = await fetch(cliReleaseIndexPageUrl(page), { signal });
+    const response = await fetch(cliReleaseIndexPageUrl(repository, page), { signal });
     if (!response.ok) throw new Error(`Could not check releases (${response.status}). Try again.`);
     const releases = decodeReleases(await response.json());
     const version = newestCliReleaseVersion(releases, channel);

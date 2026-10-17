@@ -1,5 +1,6 @@
 import { HOSTED_APP_CHANNEL } from "~/branding";
 import { isElectron } from "~/env";
+import { PRIVACY_POLICY_URL } from "~/legalLinks";
 import { isMacPlatform, isWindowsPlatform, normalizeSearchText } from "~/lib/utils";
 import { STATIC_KEYBINDING_COMMANDS, type KeybindingCommand } from "@t3tools/contracts";
 import type { EnvironmentId } from "@t3tools/contracts";
@@ -556,18 +557,17 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["t3 code migrate migration copy folder remove trash cleanup ~/.t3"],
     desktopOnly: true,
   },
-  {
-    id: "mobile-app",
-    title: "Mobile app",
-    to: "/settings/general",
-    searchTerms: ["phone tablet iPhone iPad iOS Android App Store Google Play QR"],
-  },
-  {
-    id: "privacy-policy",
-    title: "Privacy policy",
-    to: "/settings/general",
-    searchTerms: ["telemetry analytics usage data tracking legal opt out"],
-  },
+  // The fork lists no store apps, and a policy row only when one is configured (FORK.md).
+  ...(PRIVACY_POLICY_URL === null
+    ? []
+    : [
+        {
+          id: "privacy-policy",
+          title: "Privacy policy",
+          to: "/settings/general",
+          searchTerms: ["telemetry analytics usage data tracking legal opt out"],
+        } as const,
+      ]),
   {
     id: "telemetry-export",
     title: "OpenTelemetry export",

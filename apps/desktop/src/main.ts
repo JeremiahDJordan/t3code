@@ -19,6 +19,7 @@ import * as Electron from "electron";
 
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { cliReleaseBaseUrl } from "@t3tools/shared/cliRelease";
 import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
@@ -118,7 +119,11 @@ const resolveDesktopSshCliRunner = (
       nodeEngineRange: serverPackageJson.engines.node,
     };
   }
-  return { archiveVersion: environment.appVersion };
+  // The remote host downloads only from a release source of the owner's own; none by default.
+  return {
+    archiveVersion: environment.appVersion,
+    releaseBaseUrl: cliReleaseBaseUrl(process.env) ?? null,
+  };
 };
 
 const layerDesktopSshEnvironment = Layer.unwrap(

@@ -1,6 +1,38 @@
-const CLI_RELEASE_REPOSITORY = "pingdotgg/t3code";
 export const CLI_RELEASE_CHECKSUMS_FILE = "SHA256SUMS";
 export const CLI_RELEASE_BASE_URL_ENV = "T3CODE_RELEASE_BASE_URL";
+/**
+ * The fork downloads no release unless its owner names a source of their own: a GitHub
+ * repository (`owner/name`, whose releases carry upstream's archive layout) or a download base
+ * URL. Upstream's repository is deliberately not a default (FORK.md, "Talk to no T3 web service").
+ */
+export const CLI_RELEASE_REPOSITORY_ENV = "T3CODE_RELEASE_REPOSITORY";
+
+/** What every updater says when no release source is configured. */
+export const CLI_RELEASES_OFF_MESSAGE =
+  "This build downloads no releases: Z6 Code updates by pulling and rebuilding the fork from source. To download releases of your own, set T3CODE_RELEASE_REPOSITORY (owner/name on GitHub) or T3CODE_RELEASE_BASE_URL.";
+
+/** The configured GitHub repository, when it is a plain `owner/name`. */
+export function cliReleaseRepository(
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const repository = env[CLI_RELEASE_REPOSITORY_ENV]?.trim() ?? "";
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ? repository : undefined;
+}
+
+/**
+ * Where release archives download from: the configured base URL, else the configured
+ * repository's GitHub releases, else nothing (downloads are off).
+ */
+export function cliReleaseBaseUrl(
+  env: Readonly<Record<string, string | undefined>>,
+): string | undefined {
+  const baseUrl = env[CLI_RELEASE_BASE_URL_ENV]?.trim();
+  if (baseUrl) return baseUrl;
+  const repository = cliReleaseRepository(env);
+  return repository === undefined
+    ? undefined
+    : `https://github.com/${repository}/releases/download`;
+}
 
 /**
  * Kept in step with the build_linux_cli matrix, build_windows_arm64_cli, and
@@ -45,13 +77,13 @@ export function cliArchiveFileName(version: string, platformKey: CliArchivePlatf
   return `t3-${version}-${platformKey}.${platformKey.startsWith("win32") ? "zip" : "tar.gz"}`;
 }
 
-const CLI_RELEASE_DEFAULT_BASE_URL = `https://github.com/${CLI_RELEASE_REPOSITORY}/releases/download`;
-
+/** Undefined when no release source is configured, so nothing is downloaded. */
 export function cliReleaseDownloadBaseUrl(
   version: string,
-  baseUrl: string | undefined = CLI_RELEASE_DEFAULT_BASE_URL,
-): string {
-  return `${(baseUrl?.trim() || CLI_RELEASE_DEFAULT_BASE_URL).replace(/\/+$/, "")}/v${version}`;
+  baseUrl: string | undefined,
+): string | undefined {
+  const base = baseUrl?.trim().replace(/\/+$/, "");
+  return base ? `${base}/v${version}` : undefined;
 }
 
 export function parseChecksums(text: string): ReadonlyMap<string, string> {
@@ -81,8 +113,8 @@ export function cliReleaseChannelOf(version: string): CliReleaseChannel {
  * Callers walk pages until a channel match turns up; a busy nightly train can push the newest
  * preview or stable release past any single page.
  */
-export function cliReleaseIndexPageUrl(page: number): string {
-  return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases?per_page=100&page=${page}`;
+export function cliReleaseIndexPageUrl(repository: string, page: number): string {
+  return `https://api.github.com/repos/${repository}/releases?per_page=100&page=${page}`;
 }
 
 /**

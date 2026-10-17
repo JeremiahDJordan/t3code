@@ -182,7 +182,8 @@ function namedProjectReadme(name: string): string {
     "",
     `# ${name}`,
     "",
-    "Created in [T3 Code](https://t3.codes).",
+    // Upstream links its site here; the fork links to none of T3's (FORK.md).
+    "Created in T3 Code.",
     "",
   ].join("\n");
 }

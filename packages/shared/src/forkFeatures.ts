@@ -5,7 +5,7 @@
  */
 
 /**
- * Upstream's hosted relay and tunnel service (accounts.t3.codes, `t3 connect`,
+ * Upstream's hosted relay and tunnel service (its accounts site, `t3 connect`,
  * Settings → Connections → T3 Connect). Off in this fork: no surface offers it,
  * the server neither links nor starts a stored tunnel, and `t3 connect` refuses.
  * Stored link data is kept, so setting this to `true` and rebuilding brings an

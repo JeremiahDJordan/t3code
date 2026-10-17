@@ -72,6 +72,8 @@ function renderNotes(state: DesktopUpdateState, openExternal = vi.fn().mockResol
 describe("SidebarUpdateReleaseNotes", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+    // The fork links release pages only for a configured release repository.
+    vi.stubEnv("VITE_T3CODE_RELEASE_REPOSITORY", "pingdotgg/t3code");
   });
 
   it("links each preview to its exact release and labels hidden changes", () => {

@@ -1,17 +1,19 @@
 # Product usage data
 
-The T3 Code server sends product usage events to PostHog, associated with a hashed account or
-installation identifier. Events include the provider, model, reasoning effort, permission mode,
-turn result, duration, and main-agent token totals when available.
+Z6 Code sends no product usage events unless the server is pointed at a PostHog project of your
+own: set `T3CODE_POSTHOG_HOST` and `T3CODE_POSTHOG_KEY` in the server's environment. Then it sends
+events associated with a hashed account or installation identifier. Events include the provider,
+model, reasoning effort, permission mode, turn result, duration, and main-agent token totals when
+available.
 
 Events do not include prompts, responses, file contents, authentication tokens, conversation IDs,
 raw provider events, or child-agent output. Child-agent token use is excluded from the totals.
 
-To disable collection, set `T3CODE_TELEMETRY_ENABLED=false` in the server's environment before
-starting it. This stops product events from being recorded or sent.
+To disable collection again, remove those variables or set `T3CODE_TELEMETRY_ENABLED=false` in the
+server's environment before starting it. This stops product events from being recorded or sent.
 
-The desktop app reads the variable from your shell profile (for example `~/.zshrc`) on macOS and
-Linux, so export it there and restart the app. On Windows, set it as a user environment variable.
+The desktop app reads these variables from your shell profile (for example `~/.zshrc`) on macOS and
+Linux, so export them there and restart the app. On Windows, set them as user environment variables.
 
 ## Export diagnostics to your own receiver
 

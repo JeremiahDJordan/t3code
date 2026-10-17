@@ -1,6 +1,6 @@
 import { AtomRegistry } from "effect/reactivity";
 import * as AsyncResult from "effect/reactivity/AsyncResult";
-import { afterAll, afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { npmReleasePublishedAtom } from "./npmRelease";
 
@@ -27,8 +27,22 @@ async function settledCheck() {
 }
 
 describe("npmReleasePublishedAtom", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_T3CODE_NPM_PACKAGE_URL", "https://registry.example.test/t3");
+  });
+
   afterEach(() => {
     fetchMock.mockReset();
+    vi.unstubAllEnvs();
+  });
+
+  it("checks no registry when none is configured", async () => {
+    vi.stubEnv("VITE_T3CODE_NPM_PACKAGE_URL", "");
+
+    const result = await settledCheck();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(AsyncResult.getOrElse(result, () => false)).toBe(true);
   });
 
   afterAll(() => {
@@ -42,7 +56,7 @@ describe("npmReleasePublishedAtom", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const request = new Request(fetchMock.mock.calls[0]?.[0] ?? "", fetchMock.mock.calls[0]?.[1]);
-    expect(request.url).toBe(`https://registry.npmjs.org/t3/${version}`);
+    expect(request.url).toBe(`https://registry.example.test/t3/${version}`);
     expect(request.headers.get("traceparent")).toBeNull();
     expect(request.headers.get("b3")).toBeNull();
     expect(AsyncResult.getOrElse(result, () => false)).toBe(true);

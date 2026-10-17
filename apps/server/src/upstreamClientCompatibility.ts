@@ -1,6 +1,6 @@
 /**
  * What this server sends T3 Code clients built without Bob support, such as the App Store
- * app and app.t3.codes, and what it keeps when they write settings. This fork's clients
+ * app and upstream's hosted web app, and what it keeps when they write settings. This fork's clients
  * announce Bob support on their connection (`clientBobSupport=1`) and get every response
  * unchanged.
  *

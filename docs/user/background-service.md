@@ -29,6 +29,11 @@ to pick up the new version. Wait for any remote update already in progress
 before updating; to match a remote client's version, follow
 [Updating T3 Code](./updating.md).
 
+In Z6 Code, `t3 update`, `t3 service install` and remote server updates download only from a
+release source you set in the server's environment: `T3CODE_RELEASE_REPOSITORY` (a GitHub
+`owner/name`) or `T3CODE_RELEASE_BASE_URL`. Without one they download nothing and say so, and a
+client does not offer to update the server remotely.
+
 Pass an exact version (`t3 update 0.0.42`) to pin one, `--channel nightly` to
 switch trains, or `--allow-downgrade` to move backwards. `preview` is a
 maintainers' test train: its builds can be broken and are never offered as

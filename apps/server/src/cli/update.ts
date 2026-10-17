@@ -1,8 +1,10 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
-  CLI_RELEASE_BASE_URL_ENV,
   CLI_RELEASE_CHANNELS,
+  CLI_RELEASES_OFF_MESSAGE,
+  cliReleaseBaseUrl,
   cliReleaseIndexPageUrl,
+  cliReleaseRepository,
   cliReleaseChannelOf,
   newestCliReleaseVersion,
   type CliReleaseChannel,
@@ -54,12 +56,19 @@ const RELEASE_INDEX_MAX_PAGES = 10;
 
 const resolveNewestVersion = Effect.fn("cli.update.resolve_newest")(function* (
   channel: CliReleaseChannel,
+  repository: string | undefined,
 ) {
+  if (repository === undefined) {
+    return yield* new CliUpdateError({
+      reason:
+        "No release index is configured: set T3CODE_RELEASE_REPOSITORY (owner/name on GitHub), or name the exact version to install.",
+    });
+  }
   const httpClient = yield* HttpClient.HttpClient;
   for (let page = 1; page <= RELEASE_INDEX_MAX_PAGES; page += 1) {
     const body = yield* httpClient
       .execute(
-        HttpClientRequest.get(cliReleaseIndexPageUrl(page)).pipe(
+        HttpClientRequest.get(cliReleaseIndexPageUrl(repository, page)).pipe(
           HttpClientRequest.setHeader("Accept", "application/vnd.github+json"),
         ),
       )
@@ -296,7 +305,7 @@ const belongsToBootService = Effect.fn("cli.update.belongs_to_boot_service")(fun
   return false;
 });
 
-const runUpdate = Effect.fn("cli.update.run")(function* (input: {
+export const runUpdate = Effect.fn("cli.update.run")(function* (input: {
   readonly baseDir: string;
   readonly logsDir: string;
   readonly serverRuntimeStatePath: string;
@@ -314,6 +323,11 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
   const httpClient = yield* HttpClient.HttpClient;
   const service = yield* BootService.BootService;
 
+  // The fork downloads no release unless its owner configured a source (FORK.md).
+  const releaseBaseUrl = cliReleaseBaseUrl(environment);
+  if (releaseBaseUrl === undefined) {
+    return yield* new CliUpdateError({ reason: CLI_RELEASES_OFF_MESSAGE });
+  }
   const currentVersion = packageJson.version;
   const channel = input.channel ?? cliReleaseChannelOf(currentVersion);
   if (input.requestedVersion !== undefined && !isExactServiceVersion(input.requestedVersion)) {
@@ -325,7 +339,7 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
   progress.status("Checking for updates...");
   const targetVersion = yield* (
     input.requestedVersion === undefined
-      ? resolveNewestVersion(channel)
+      ? resolveNewestVersion(channel, cliReleaseRepository(environment))
       : Effect.succeed(input.requestedVersion)
   ).pipe(Effect.ensuring(Effect.sync(progress.finish)));
   const targetChannel = cliReleaseChannelOf(targetVersion);
@@ -443,7 +457,7 @@ const runUpdate = Effect.fn("cli.update.run")(function* (input: {
     httpClient,
     platform,
     arch,
-    releaseBaseUrl: environment[CLI_RELEASE_BASE_URL_ENV]?.trim() || undefined,
+    releaseBaseUrl,
     validate: (paths) =>
       runner
         .run({

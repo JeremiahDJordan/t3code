@@ -4,6 +4,7 @@ import {
   type ProviderDriverKind,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -21,8 +22,15 @@ import bundledManifestJson from "./model-manifest.json" with { type: "json" };
 import { ProviderCompatibilityPolicy } from "./providerCompatibility.ts";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 
-const MODEL_MANIFEST_URL =
-  "https://raw.githubusercontent.com/pingdotgg/t3code/main/apps/server/src/provider/model-manifest.json";
+/**
+ * Where a newer manifest is fetched from. Upstream fetches its own repository's copy; the fork uses
+ * only the manifest it bundles unless `T3CODE_MODEL_MANIFEST_URL` names the owner's own (FORK.md,
+ * "Talk to no T3 web service").
+ */
+const ModelManifestUrlConfig = Config.String("T3CODE_MODEL_MANIFEST_URL").pipe(
+  Config.withDefault(""),
+  Config.map((url) => url.trim()),
+);
 
 const MANIFEST_TTL_MS = 60 * 60 * 1000;
 
@@ -186,6 +194,8 @@ const BundledOnlyModelManifest: ModelManifest["Service"] = {
 const layerBundledOnly = Layer.succeed(ModelManifest, BundledOnlyModelManifest);
 
 export const make = Effect.gen(function* () {
+  const manifestUrl = yield* ModelManifestUrlConfig;
+  if (manifestUrl.length === 0) return BundledOnlyModelManifest;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
@@ -236,7 +246,7 @@ export const make = Effect.gen(function* () {
     if (settings !== null && !settings.enableProviderUpdateChecks) return manifest;
 
     lastAttemptMs = now;
-    const fetched = yield* httpClient.get(MODEL_MANIFEST_URL).pipe(
+    const fetched = yield* httpClient.get(manifestUrl).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap((response) => response.json),
       Effect.flatMap((json) => decodeManifest(json)),

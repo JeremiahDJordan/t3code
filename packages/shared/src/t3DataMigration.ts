@@ -231,6 +231,8 @@ const RUNTIME_FILES = "belongs to the running T3 server";
 const WORK_FOLDER_REASON =
   "a folder T3 Code made for your work; it stays where it is and Z6's projects and threads keep using it there";
 
+const HOME_DOWNLOAD_FOLDERS = ["runtime", "tools", "caches", "source", "bin"];
+
 /** What a T3 home holds that is not the user's, or must not be shared by two servers. */
 const homeSkipRule: SkipRule = (segments) => {
   const [top, second, third] = segments;
@@ -577,6 +579,93 @@ function removeAbandonedStaging(destination: string) {
   }
 }
 
+/**
+ * Beside the Z6 home while one start merges its copy in. Its name must not contain
+ * `STAGING_INFIX`, or another start would clear it as an abandoned copy.
+ */
+const MERGE_LOCK_SUFFIX = ".t3-merge-lock";
+const MERGE_LOCK_POLL_MS = 200;
+/** About two minutes of waiting for another start's merge. */
+const MERGE_LOCK_POLLS = 600;
+
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Runs `merge` while holding the merge lock, so two first starts never move entries into the same
+ * home at once. A lock whose process is gone is taken over; one held past the wait refuses.
+ */
+function withMergeLock<A>(destination: string, merge: () => A): A {
+  const lock = `${destination}${MERGE_LOCK_SUFFIX}`;
+  for (let polls = 0; ;) {
+    // The lock appears whole, owner included, by renaming a filled folder into place.
+    const claim = `${lock}.${process.pid}`;
+    removeTree(claim);
+    NodeFS.mkdirSync(claim, { mode: 0o700 });
+    NodeFS.writeFileSync(NodePath.join(claim, "pid"), String(process.pid));
+    try {
+      NodeFS.renameSync(claim, lock);
+      break;
+    } catch {
+      removeTree(claim);
+    }
+    let owner = Number.NaN;
+    try {
+      owner = Number(NodeFS.readFileSync(NodePath.join(lock, "pid"), "utf8"));
+    } catch {
+      // Released meanwhile; try again.
+      continue;
+    }
+    if (!isProcessAlive(owner)) {
+      removeTree(lock);
+      continue;
+    }
+    if (++polls > MERGE_LOCK_POLLS) {
+      throw new T3MigrationError(
+        "in-use",
+        `Z6 Code is copying T3 Code's data into ${destination} in another process (pid ${owner}). Wait for it to finish, then start Z6 Code again. Nothing was changed.`,
+      );
+    }
+    sleepSync(MERGE_LOCK_POLL_MS);
+  }
+  try {
+    return merge();
+  } finally {
+    removeTree(lock);
+  }
+}
+
+/** Present in a Z6 home while a copy merges into it; with no `userdata` beside it, it is unfinished. */
+const MERGE_IN_PROGRESS = ".t3-copy-in-progress";
+
+/**
+ * Moves each of `staging`'s entries into `destination`, `userdata` last: its arrival is what
+ * makes the destination a Z6 home. Entries an unfinished merge left are replaced. False when
+ * another process's copy got there first.
+ */
+function moveEntriesInto(staging: string, destination: string): boolean {
+  const inProgress = NodePath.join(destination, MERGE_IN_PROGRESS);
+  NodeFS.writeFileSync(inProgress, "");
+  const names = NodeFS.readdirSync(staging).sort(
+    (a, b) => Number(a === "userdata") - Number(b === "userdata"),
+  );
+  for (const name of names) {
+    const target = NodePath.join(destination, name);
+    if (name === "userdata") {
+      if (exists(target)) return false;
+    } else if (exists(target)) {
+      removeTree(target);
+    }
+    try {
+      NodeFS.renameSync(NodePath.join(staging, name), target);
+    } catch (error) {
+      if (name === "userdata" && exists(target)) return false;
+      throw error;
+    }
+  }
+  NodeFS.rmSync(inProgress, { force: true });
+  return true;
+}
+
 function migrate(input: {
   readonly kind: T3DataKind;
   readonly source: string;
@@ -586,8 +675,19 @@ function migrate(input: {
   readonly options: CopyOptions;
   readonly leftInPlace: ReadonlyArray<string>;
   readonly now: string;
+  /** An existing destination holding only these top-level names still receives the copy. */
+  readonly mergeableNames?: ReadonlyArray<string>;
 }): T3MigrationResult {
-  if (exists(input.destination)) return { status: "skipped", reason: "destination-exists" };
+  const existing = exists(input.destination) ? NodeFS.readdirSync(input.destination) : null;
+  const unfinished =
+    existing !== null && existing.includes(MERGE_IN_PROGRESS) && !existing.includes("userdata");
+  const mergeInto =
+    existing !== null &&
+    input.mergeableNames !== undefined &&
+    (unfinished || existing.every((name) => input.mergeableNames!.includes(name)));
+  if (exists(input.destination) && !mergeInto) {
+    return { status: "skipped", reason: "destination-exists" };
+  }
   if (!exists(input.source)) return { status: "skipped", reason: "no-source" };
   const refuse = (inUse: string, changed: string) =>
     new T3MigrationError(
@@ -632,6 +732,20 @@ function migrate(input: {
     for (const { path, mode } of state.directoryModes) {
       // Folders under one that could not be read were removed again.
       if (exists(path)) NodeFS.chmodSync(path, mode);
+    }
+    if (mergeInto) {
+      // Another start may have finished while this one copied: look again under the lock, and
+      // leave a finished home untouched.
+      const merged = withMergeLock(
+        input.destination,
+        () =>
+          !exists(NodePath.join(input.destination, "userdata")) &&
+          moveEntriesInto(staging, input.destination),
+      );
+      removeTree(staging);
+      return merged
+        ? { status: "migrated", marker }
+        : { status: "skipped", reason: "destination-exists" };
     }
     try {
       NodeFS.renameSync(staging, input.destination);
@@ -695,6 +809,9 @@ export function migrateHomeFromT3(input: {
     },
     leftInPlace: T3_WORK_FOLDERS.map((name) => NodePath.join(input.t3Home, name)).filter(exists),
     now: input.now ?? nowIso(),
+    // The npm launcher and installers download a runtime into the Z6 home before the server's
+    // first start; that home holds no data yet.
+    mergeableNames: [...HOME_DOWNLOAD_FOLDERS, ".DS_Store"],
   });
 }
 

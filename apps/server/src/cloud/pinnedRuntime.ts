@@ -1,3 +1,4 @@
+import * as Config from "effect/Config";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
@@ -10,8 +11,12 @@ import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
+  CLI_RELEASE_BASE_URL_ENV,
   CLI_RELEASE_CHECKSUMS_FILE,
+  CLI_RELEASE_REPOSITORY_ENV,
+  CLI_RELEASES_OFF_MESSAGE,
   cliArchiveFileName,
+  cliReleaseBaseUrl,
   cliArchivePlatformKey,
   cliArchiveTarCommand,
   cliReleaseDownloadBaseUrl,
@@ -26,6 +31,23 @@ const PINNED_RUNTIME_ARCHIVE_FILE = "t3-runtime-archive";
 // Boot-service setup and remote update can construct separate layers. Serialize
 // the complete install transaction across every caller in this process.
 const pinnedRuntimeInstallLock = Semaphore.makeUnsafe(1);
+/**
+ * Where this server downloads release archives from, or undefined when no release source is
+ * configured, so the background service and remote updates download nothing.
+ */
+export const releaseBaseUrlConfig = Config.all({
+  [CLI_RELEASE_BASE_URL_ENV]: Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  [CLI_RELEASE_REPOSITORY_ENV]: Config.String(CLI_RELEASE_REPOSITORY_ENV).pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+}).pipe(Config.map(cliReleaseBaseUrl));
+
+/** The step a download fails at when no release source is configured: nothing is fetched. */
+export const PINNED_RUNTIME_NO_RELEASE_SOURCE_STEP = `looking for a release to download (${CLI_RELEASES_OFF_MESSAGE.replace(/\.$/, "")})`;
 
 export interface PinnedRuntimePaths {
   readonly versionDir: string;
@@ -172,6 +194,9 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
   }
   const httpClient = input.httpClient;
   const baseUrl = cliReleaseDownloadBaseUrl(input.version, input.releaseBaseUrl);
+  if (baseUrl === undefined) {
+    return yield* new PinnedRuntimeInstallError({ step: PINNED_RUNTIME_NO_RELEASE_SOURCE_STEP });
+  }
   const fileName = cliArchiveFileName(input.version, platformKey);
 
   input.onProgress?.({ stage: "download", received: 0, total: undefined });

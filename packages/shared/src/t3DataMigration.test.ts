@@ -158,6 +158,108 @@ describe("migrateHomeFromT3", () => {
     expect(NodeFS.existsSync(z6Home)).toBe(false);
   });
 
+  it("copies into a Z6 home that holds only a runtime the launcher downloaded", () => {
+    const root = tempRoot();
+    const t3Home = makeT3Home(root);
+    const z6Home = NodePath.join(root, ".z6");
+    write(NodePath.join(z6Home, "runtime", "versions", "1.0.0", "t3"), "z6 binary");
+
+    expect(migrateHomeFromT3({ t3Home, z6Home }).status).toBe("migrated");
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "userdata", "settings.json"), "utf8")).toBe(
+      '{"theme":"cinder"}',
+    );
+    expect(NodeFS.existsSync(NodePath.join(z6Home, "workflows", "mine.js"))).toBe(true);
+    expect(readT3MigrationMarker(z6Home)?.source).toBe(t3Home);
+    expect(
+      NodeFS.readFileSync(NodePath.join(z6Home, "runtime", "versions", "1.0.0", "t3"), "utf8"),
+    ).toBe("z6 binary");
+    expect(NodeFS.readdirSync(root).filter((name) => name.includes(".t3-copy-"))).toEqual([]);
+
+    // Anything else there is Z6's own, and the copy never runs over it.
+    const other = NodePath.join(root, "other");
+    write(NodePath.join(other, ".z6", "runtime", "versions", "1.0.0", "t3"), "z6 binary");
+    write(NodePath.join(other, ".z6", "workflows", "own.js"), "export default 2");
+    expect(migrateHomeFromT3({ t3Home, z6Home: NodePath.join(other, ".z6") })).toEqual({
+      status: "skipped",
+      reason: "destination-exists",
+    });
+    expect(NodeFS.existsSync(NodePath.join(other, ".z6", "userdata"))).toBe(false);
+  });
+
+  it("finishes a merge an earlier start left without userdata", () => {
+    const root = tempRoot();
+    const t3Home = makeT3Home(root);
+    const z6Home = NodePath.join(root, ".z6");
+    // What a merge that failed moving userdata leaves: the download, its first entries, and the
+    // in-progress mark.
+    write(NodePath.join(z6Home, "runtime", "versions", "1.0.0", "t3"), "z6 binary");
+    write(NodePath.join(z6Home, "workflows", "mine.js"), "partial");
+    write(NodePath.join(z6Home, "migrated-from-t3.json"), "{}");
+    write(NodePath.join(z6Home, ".t3-copy-in-progress"), "");
+
+    expect(migrateHomeFromT3({ t3Home, z6Home }).status).toBe("migrated");
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "userdata", "settings.json"), "utf8")).toBe(
+      '{"theme":"cinder"}',
+    );
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "workflows", "mine.js"), "utf8")).toBe(
+      "export default 1",
+    );
+    expect(readT3MigrationMarker(z6Home)?.source).toBe(t3Home);
+    expect(NodeFS.existsSync(NodePath.join(z6Home, ".t3-copy-in-progress"))).toBe(false);
+    expect(
+      NodeFS.readFileSync(NodePath.join(z6Home, "runtime", "versions", "1.0.0", "t3"), "utf8"),
+    ).toBe("z6 binary");
+    // Finished, it is Z6's own from then on.
+    expect(migrateHomeFromT3({ t3Home, z6Home })).toEqual({
+      status: "skipped",
+      reason: "destination-exists",
+    });
+  });
+
+  it("leaves a home another start finished while this one copied untouched", () => {
+    const root = tempRoot();
+    const t3Home = makeT3Home(root);
+    const z6Home = NodePath.join(root, ".z6");
+    write(NodePath.join(z6Home, "runtime", "versions", "1.0.0", "t3"), "z6 binary");
+    let checks = 0;
+    const result = migrateHomeFromT3({
+      t3Home,
+      z6Home,
+      inUse: () => {
+        // The check after copying: the other start has finished and the user is already working.
+        if (++checks === 2) {
+          write(NodePath.join(z6Home, "userdata", "settings.json"), '{"theme":"ember"}');
+          write(NodePath.join(z6Home, "workflows", "mine.js"), "edited since");
+          write(NodePath.join(z6Home, "workflows", "new.js"), "made since");
+        }
+        return undefined;
+      },
+    });
+
+    expect(result).toEqual({ status: "skipped", reason: "destination-exists" });
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "workflows", "mine.js"), "utf8")).toBe(
+      "edited since",
+    );
+    expect(NodeFS.existsSync(NodePath.join(z6Home, "workflows", "new.js"))).toBe(true);
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "userdata", "settings.json"), "utf8")).toBe(
+      '{"theme":"ember"}',
+    );
+    expect(NodeFS.existsSync(NodePath.join(z6Home, ".t3-copy-in-progress"))).toBe(false);
+    expect(NodeFS.readdirSync(root).filter((name) => name.includes(".t3-"))).toEqual([]);
+  });
+
+  it("takes over a merge lock its process left behind", () => {
+    const root = tempRoot();
+    const t3Home = makeT3Home(root);
+    const z6Home = NodePath.join(root, ".z6");
+    write(NodePath.join(z6Home, "runtime", "versions", "1.0.0", "t3"), "z6 binary");
+    write(NodePath.join(root, ".z6.t3-merge-lock", "pid"), "999999999");
+
+    expect(migrateHomeFromT3({ t3Home, z6Home }).status).toBe("migrated");
+    expect(NodeFS.existsSync(NodePath.join(z6Home, "userdata", "settings.json"))).toBe(true);
+    expect(NodeFS.existsSync(NodePath.join(root, ".z6.t3-merge-lock"))).toBe(false);
+  });
+
   it("snapshots a database another connection holds open mid-transaction", () => {
     const root = tempRoot();
     const t3Home = makeT3Home(root);

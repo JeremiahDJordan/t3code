@@ -226,6 +226,41 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }),
   );
 
+  it.effect("sends nothing without a configured PostHog key and host", () =>
+    Effect.gen(function* () {
+      const requests: Array<string> = [];
+      const layerRuntime = AnalyticsService.layer.pipe(
+        Layer.provideMerge(
+          ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-default-" }),
+        ),
+        Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(HostProcess.Platform, "linux"),
+            Layer.succeed(HostProcess.Architecture, "arm64"),
+            Layer.succeed(
+              HttpClient.HttpClient,
+              HttpClient.make((request) =>
+                Effect.sync(() => requests.push(request.url)).pipe(
+                  Effect.andThen(Effect.die("unexpected telemetry request")),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      yield* Effect.gen(function* () {
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.default", { index: 1 });
+        yield* analytics.flush;
+        yield* TestClock.adjust("5 seconds");
+      }).pipe(Effect.provide(layerRuntime));
+
+      assert.deepEqual(requests, []);
+    }),
+  );
+
   it.effect("does not send batch requests when telemetry is disabled", () =>
     Effect.gen(function* () {
       const capturedPaths: Array<string> = [];
