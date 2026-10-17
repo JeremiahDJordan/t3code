@@ -11,20 +11,12 @@ import { ApnsEnvironment, type ApnsCredentials } from "../Config.ts";
 import type { ApnsLiveActivityAlert, ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
 import type { ApnsJwtEncodingError, ApnsJwtSigningError } from "./apnsJwt.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
+import { apnsAlertBody, apnsLiveActivityBody } from "@t3tools/shared/agentActivityPush";
 
 export { ApnsJwtEncodingError, ApnsJwtSigningError } from "./apnsJwt.ts";
 
-const LIVE_ACTIVITY_NAME = "AgentActivity";
 // Bound sending and reading separately so neither stage can hold a batch open.
 const APNS_HTTP_STAGE_TIMEOUT = "10 seconds";
-// Updates only flow on domain events, so a healthy agent can be silent for
-// minutes (long tool calls, pending approvals).
-const STALE_AFTER_SECONDS = 10 * 60;
-const DISMISS_AFTER_SECONDS = 5 * 60;
-// An end without a final content-state leaves whatever the card last showed
-// frozen on the lock screen until dismissal — get it off quickly instead of
-// parading stale state for the full window.
-const CONTENTLESS_DISMISS_AFTER_SECONDS = 15;
 
 const ApnsLiveActivityEventSchema = Schema.Literals(["start", "update", "end"]);
 export type ApnsLiveActivityEvent = typeof ApnsLiveActivityEventSchema.Type;
@@ -78,13 +70,6 @@ const decodeApnsErrorResponseJson = Schema.decodeUnknownOption(
     }),
   ),
 );
-function contentState(state: RelayAgentActivityAggregateState) {
-  return {
-    name: LIVE_ACTIVITY_NAME,
-    props: JSON.stringify(state),
-  };
-}
-
 interface LiveActivityRequestBase {
   readonly token: string;
   readonly nowEpochSeconds: number;
@@ -103,94 +88,18 @@ type MakeLiveActivityRequestInput =
       readonly alert?: ApnsLiveActivityAlert | null;
     });
 
-// An alert dict on an update/end makes it an "alerting" update: iOS wakes the
-// screen and plays the haptic (the Apple Sports score-change behavior) instead
-// of silently redrawing the activity.
-function liveActivityAlertPayload(alert: ApnsLiveActivityAlert) {
-  return {
-    alert: {
-      title: alert.title,
-      body: alert.body,
-      sound: "default",
-    },
-  };
-}
-
+// Fork: the bodies moved to `@t3tools/shared/agentActivityPush`, which the server's push
+// gateway publisher shares with the relay.
 function makeLiveActivityRequest(input: MakeLiveActivityRequestInput): ApnsLiveActivityRequest {
-  const timestamp = input.nowEpochSeconds;
-  if (input.event === "end") {
-    return {
-      token: input.token,
-      event: input.event,
-      priority: "10",
-      payload: {
-        aps: {
-          timestamp,
-          event: "end",
-          ...(input.state ? { "content-state": contentState(input.state) } : {}),
-          ...(input.alert ? liveActivityAlertPayload(input.alert) : {}),
-          "dismissal-date":
-            timestamp + (input.state ? DISMISS_AFTER_SECONDS : CONTENTLESS_DISMISS_AFTER_SECONDS),
-        },
-      },
-    };
-  }
-
-  const state = input.state;
-  return {
-    token: input.token,
-    event: input.event,
-    priority: input.event === "update" && !input.alert ? "5" : "10",
-    payload: {
-      aps: {
-        timestamp,
-        event: input.event,
-        ...(input.event === "start"
-          ? {
-              "attributes-type": "LiveActivityAttributes",
-              attributes: {},
-              "input-push-token": 1,
-              alert: {
-                title: state.title,
-                body: state.subtitle,
-              },
-            }
-          : {}),
-        ...(input.event === "update" && input.alert ? liveActivityAlertPayload(input.alert) : {}),
-        "content-state": contentState(state),
-        "stale-date": timestamp + STALE_AFTER_SECONDS,
-      },
-    },
-  };
-}
-
-function notificationThreadId(notification: ApnsNotificationPayload): string {
-  return notification.threadId.length > 0
-    ? `${notification.environmentId}/${notification.threadId}`
-    : "t3-agent-alerts";
+  const body = apnsLiveActivityBody(input);
+  return { token: input.token, event: input.event, ...body };
 }
 
 function makePushNotificationRequest(input: {
   readonly token: string;
   readonly notification: ApnsNotificationPayload;
 }): ApnsPushNotificationRequest {
-  return {
-    token: input.token,
-    priority: "10",
-    payload: {
-      aps: {
-        alert: {
-          title: input.notification.title,
-          body: input.notification.body,
-        },
-        sound: "default",
-        "thread-id": notificationThreadId(input.notification),
-      },
-      environmentId: input.notification.environmentId,
-      threadId: input.notification.threadId,
-      deepLink: input.notification.deepLink,
-    },
-  };
+  return { token: input.token, priority: "10", payload: apnsAlertBody(input.notification) };
 }
 
 function apnsReasonFromBody(body: string): string | undefined {

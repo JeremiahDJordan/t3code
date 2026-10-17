@@ -22,15 +22,10 @@ import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as FcmDeliveryQueueSender from "./FcmDeliveryQueueSender.ts";
 import * as FcmClient from "./FcmClient.ts";
+import { androidAlertForAggregate, androidAlertForState } from "@t3tools/shared/agentActivityPush";
 import { androidActivityData, fitFcmData } from "./fcmPayloads.ts";
-import { makeAggregateState, statusForPhase } from "./agentActivityAggregate.ts";
-import { isExpiredAgentActivityState, notificationForActivity } from "./agentActivityPayloads.ts";
-import {
-  alertForActivityRows,
-  attentionTransitionRows,
-  terminalTransitionRows,
-  shouldAlertForActivity,
-} from "./agentActivityAlerts.ts";
+import { makeAggregateState } from "./agentActivityAggregate.ts";
+import { isExpiredAgentActivityState } from "./agentActivityPayloads.ts";
 
 export const FcmDeliveryJob = Schema.Struct({
   userId: Schema.String,
@@ -58,62 +53,8 @@ export class FcmDeliveryError extends Schema.TaggedError<FcmDeliveryError>()("Fc
   }
 }
 
-export function androidAlertForState(
-  state: RelayAgentActivityState,
-  preferences: RelayAgentAwarenessPreferences,
-  nowMs: number,
-) {
-  if (!shouldAlertForActivity({ ...state, preferences, nowMs })) return null;
-  const notification = notificationForActivity({ ...state, status: statusForPhase(state.phase) });
-  return {
-    alert_id: JSON.stringify([state.environmentId, state.threadId, state.phase, state.updatedAt]),
-    alert_group: JSON.stringify([state.environmentId, state.threadId]),
-    alert_title: notification.title,
-    alert_body: notification.body,
-    alert_path: notification.deepLink,
-  };
-}
-
-export function androidAlertForAggregate(input: {
-  readonly previousAggregate: RelayAgentActivityAggregateState;
-  readonly nextAggregate: RelayAgentActivityAggregateState;
-  readonly preferences: RelayAgentAwarenessPreferences;
-  readonly nowMs: number;
-}) {
-  if (!input.preferences.notificationsEnabled) return null;
-  const attention = attentionTransitionRows(input);
-  const activities =
-    attention.length > 0
-      ? attention
-      : terminalTransitionRows({ ...input, includeUnobserved: true });
-  const first = activities[0];
-  const alert = alertForActivityRows(activities);
-  if (!first || !alert) return null;
-  if (activities.length === 1) {
-    const notification = notificationForActivity(first);
-    return {
-      alert_id: JSON.stringify([first.environmentId, first.threadId, first.phase, first.updatedAt]),
-      alert_group: JSON.stringify([first.environmentId, first.threadId]),
-      alert_title: notification.title,
-      alert_body: notification.body,
-      alert_path: notification.deepLink,
-    };
-  }
-  return {
-    // Every contributing queue job identifies the same group, including after
-    // retries or a different database row order. The native handler deduplicates it.
-    alert_id: JSON.stringify(
-      activities
-        .map((row) => [row.environmentId, row.threadId, row.phase, row.updatedAt])
-        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
-    ),
-    alert_title: alert.title,
-    alert_body: alert.body,
-    // A multi-thread alert targets the overview so one visible thread cannot
-    // suppress notifications for the other threads in the group.
-    alert_path: "/",
-  };
-}
+// Fork: moved to `@t3tools/shared/agentActivityPush` with the rest of the payload builders.
+export { androidAlertForAggregate, androidAlertForState } from "@t3tools/shared/agentActivityPush";
 
 export class FcmDeliveries extends Context.Service<
   FcmDeliveries,
