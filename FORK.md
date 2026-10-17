@@ -362,8 +362,16 @@ over false allows was the owner's call.
 
 In Auto, web searches and fetches of public pages, skills and `gh` reads, which need the
 network, go to `bobAutoJudge.ts`: Apple's on-device model through a small Swift program T3
-compiles with `xcrun swiftc` into its caches and keeps running, or a model behind an
-OpenAI-compatible endpoint, by the instance's `autoReviewer` setting. The model answers whether
+compiles with `xcrun swiftc` into its caches and keeps running, a model behind an
+OpenAI-compatible endpoint, or one of the environment's providers' models through its text
+generation, by the instance's `autoReviewer` setting. The last, which the owner asked for
+(2026-10-17) so Linux, where Apple's model cannot run, has a reviewer, and a local model among
+them through Pi, is the instance's `autoReviewModelSelection` or, without one, the text
+generation model. It answers by a text generation operation every provider has
+(`generateJson`), in a folder of T3's provider cache so no project's instructions reach it, and
+Bob's runs as a Bob of its own in Ask mode, as Bob's text generation does. The registry gives each
+driver it builds a view of the others for this. Each prompt starts that provider's CLI, so a
+judgement may take up to 60 seconds before it asks. The model answers whether
 the user's messages call for this kind of action and whether it is risky; T3 allows only
 "requested and not risky", and anything else, a timeout or no model asks; an answer that came
 while the user wrote again or a rule changed is not used, and each call asks at its own deadline
@@ -1368,6 +1376,9 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   `bobRuleScope` in contracts `settings.ts`, `applyBobRuleChanges` in shared
   `serverSettings.ts` (losing it drops every rule a card or Settings adds), and
   `BobRulesSection` in web `ProviderInstanceCard.tsx`.
+- `ProviderInstanceRegistry.ts`: the registry in the context `reconcile` builds drivers with.
+  Losing it leaves Bob's Auto with no reviewer when it should be a provider's model, so every call
+  left to review asks. `ProviderInstanceRegistry.test.ts` covers it.
 - Who wrote a scheduled task's prompt, which Bob's Auto reviewer trusts as the user's words: in
   `OrchestratorMcpService.ts`, `updateScheduledTask` stamps `agent`/`mcp` when an agent changes
   the prompt or the task's `threadId`, and `ScheduledTaskService.ts`'s `upsert` lets the saver's

@@ -160,7 +160,12 @@ Intelligence on macOS 26 or later and the Xcode command line tools, and T3 Code 
 small helper for it the first time Auto runs. **OpenAI-compatible endpoint** asks a model
 you run, such as one in Ollama at `http://localhost:11434/v1`; set **Reviewer endpoint**
 and **Reviewer model**, and put a key, if the endpoint needs one, in the instance's
-`BOB_AUTO_REVIEW_API_KEY` environment variable. Only Auto sends your messages to the reviewer;
+`BOB_AUTO_REVIEW_API_KEY` environment variable. **A provider's model** asks a model of one of
+your providers, chosen in **Reviewer's model**, or the text generation model until you choose
+one. Bob can review itself: T3 Code asks a separate Bob in Ask mode, which costs Bobcoins for
+each call it reviews. On Linux, where Apple's model can't run, choose one of these; for a local
+model, set one up through a provider such as Pi. A provider's model starts for each call it
+reviews, so a call can wait several seconds. Only Auto sends your messages to the reviewer;
 for a Bob agent on a delegated task, that includes your messages in the thread where the work
 started, even when that thread runs another provider.
 **Rules only** asks you about every call the rules leave to review.
