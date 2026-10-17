@@ -556,6 +556,26 @@ describe("theme files", () => {
     expect(themeAllowsSidebarArtwork("my-custom-theme")).toBe(false);
   });
 
+  it("keeps every built-in theme's text readable", () => {
+    for (const theme of BUILT_IN_THEMES) {
+      for (const mode of getThemeModes(theme)) {
+        const colors = getThemeColorsForMode(theme, mode)!;
+        for (const [foreground, background] of [
+          ["text", "canvas"],
+          ["textMuted", "canvas"],
+          ["mutedForeground", "muted"],
+          ["placeholder", "surfaceRaised"],
+          ["accentForeground", "accent"],
+        ] as const) {
+          expect(
+            contrastRatio(colors[foreground], colors[background]),
+            `${theme.id} ${mode} ${foreground} on ${background}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+      }
+    }
+  });
+
   it("rejects a variant that repeats the base appearance", () => {
     expect(() =>
       parseThemeFile({

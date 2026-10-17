@@ -811,6 +811,15 @@ pipeline of its own costs a certificate and a package name for a few users. Ever
 builds from this branch, as [Install from source](#install-from-source) describes.
 Revisit when people outside the owner's team use the fork.
 
+### A Cinder theme beside upstream's built-ins (owner, 2026-10-16)
+
+Cinder is the owner's mobile-branch-review Ember palette as a T3 theme: Ember's burnt-orange accent
+on warm stone neutrals, with a near-black dark mode. Upstream already has an `ember` theme with
+brown-tinted neutrals, so Cinder takes its own id. Its colors live in `packages/shared/src/cinderTheme.ts`;
+upstream's files only gain its id and entry, plus the web boot table in `apps/web/index.html` and
+mobile's generated theme files (`vp run --filter @t3tools/mobile generate`, and `uniwind-types.d.ts`).
+An upstream client given `cinder` as a server's default theme falls back to its standard theme.
+
 ### Name the fork's builds Z6 Code (owner, 2026-10-16)
 
 The desktop app and the owner's own iPhone builds are **Z6 Code**, so they stand apart from T3's
