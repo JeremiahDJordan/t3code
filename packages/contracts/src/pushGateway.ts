@@ -43,6 +43,56 @@ export const PushDeviceUnregistrationInput = Schema.Struct({
 });
 export type PushDeviceUnregistrationInput = typeof PushDeviceUnregistrationInput.Type;
 
+/**
+ * The `user_id` of the server's Android data messages. The phone registers with several servers
+ * and has no account, so the native handler matches this fixed value and the device id instead.
+ */
+export const PUSH_GATEWAY_ANDROID_USER_ID = "push-gateway";
+
+/*
+ * Server to push gateway: `POST {gatewayUrl}/v1/deliveries`, `Authorization: Bearer <credential>`.
+ * `infra/push-gateway/src/protocol.ts` validates the same shape without Effect.
+ */
+
+export const PUSH_GATEWAY_MAX_DELIVERIES = 100;
+
+export const PushGatewayDelivery = Schema.Struct({
+  platform: RelayAgentAwarenessPlatform,
+  token: TrimmedNonEmptyString,
+  /** iOS: an `alert` or `liveactivity` push. Android: an alerting or a silent data message. */
+  kind: Schema.Literals(["alert", "liveactivity"]),
+  /** The APNs topic's base or the FCM restricted package. */
+  bundleId: TrimmedNonEmptyString,
+  apsEnvironment: Schema.optionalKey(RelayApnsEnvironment),
+  priority: Schema.optionalKey(Schema.Literals([5, 10])),
+  collapseId: Schema.optionalKey(TrimmedNonEmptyString),
+  /** Epoch seconds after which APNs drops the push. */
+  expiration: Schema.optionalKey(Schema.Int),
+  /** The APNs JSON body, or the FCM message without `token` and `restricted_package_name`. */
+  payload: Schema.Record(Schema.String, Schema.Unknown),
+});
+export type PushGatewayDelivery = typeof PushGatewayDelivery.Type;
+
+export const PushGatewayRequest = Schema.Struct({
+  deliveries: Schema.Array(PushGatewayDelivery),
+});
+export type PushGatewayRequest = typeof PushGatewayRequest.Type;
+
+export const PushGatewayResult = Schema.Struct({
+  ok: Schema.Boolean,
+  /** The APNs or FCM HTTP status; 0 when the gateway could not reach them. */
+  status: Schema.Int,
+  /** APNs `reason`, or the FCM error code (`UNREGISTERED`). */
+  reason: Schema.optionalKey(Schema.String),
+});
+export type PushGatewayResult = typeof PushGatewayResult.Type;
+
+/** One result per delivery, in request order. */
+export const PushGatewayResponse = Schema.Struct({
+  results: Schema.Array(PushGatewayResult),
+});
+export type PushGatewayResponse = typeof PushGatewayResponse.Type;
+
 export class PushDeviceError extends Schema.TaggedError<PushDeviceError>()("PushDeviceError", {
   reason: Schema.Literals(["not-configured", "unknown-device", "storage"]),
   detail: Schema.String,

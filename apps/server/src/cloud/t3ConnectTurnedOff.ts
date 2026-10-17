@@ -65,14 +65,16 @@ export const relayClientInstall = () =>
   );
 
 /** Without T3 Connect's relay or a push gateway, agent activity goes nowhere. */
+export const agentAwarenessRelayTurnedOff = AgentAwarenessRelay.AgentAwarenessRelay.of({
+  publishThread: () => Effect.void,
+  drain: Effect.void,
+  requestCatchUp: () => Effect.void,
+  start: () => Effect.void,
+});
+
 export const layerAgentAwarenessRelay = Layer.succeed(
   AgentAwarenessRelay.AgentAwarenessRelay,
-  AgentAwarenessRelay.AgentAwarenessRelay.of({
-    publishThread: () => Effect.void,
-    drain: Effect.void,
-    requestCatchUp: () => Effect.void,
-    start: () => Effect.void,
-  }),
+  agentAwarenessRelayTurnedOff,
 );
 
 /**

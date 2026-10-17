@@ -1,0 +1,168 @@
+import { assert, describe, it } from "@effect/vitest";
+import {
+  EnvironmentId,
+  type PushGatewayDelivery,
+  type PushGatewayResult,
+  ThreadId,
+} from "@t3tools/contracts";
+import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+
+import * as PushDevices from "./PushDevices.ts";
+import * as PushGatewayClient from "./PushGatewayClient.ts";
+import * as PushGatewayPublisher from "./PushGatewayPublisher.ts";
+
+const NOW = "2026-10-17T12:00:00.000Z";
+const THREAD = ThreadId.make("thread");
+
+const state = (phase: RelayAgentActivityState["phase"]): RelayAgentActivityState => ({
+  environmentId: EnvironmentId.make("env"),
+  threadId: THREAD,
+  projectTitle: "Project",
+  threadTitle: "Fix the build",
+  modelTitle: "gpt",
+  headline: "Agent",
+  phase,
+  updatedAt: NOW,
+  deepLink: "/threads/env/thread",
+});
+
+const device = (overrides: Partial<PushDevices.PushDevice> = {}): PushDevices.PushDevice => ({
+  deviceId: "iphone",
+  sessionId: "session",
+  platform: "ios",
+  label: "iPhone",
+  bundleId: "com.example.z6",
+  apsEnvironment: "production",
+  appVersion: null,
+  pushToken: "apns",
+  activityPushToken: null,
+  activityRegisteredAt: null,
+  preferences: {
+    liveActivitiesEnabled: true,
+    notificationsEnabled: true,
+    notifyOnApproval: true,
+    notifyOnInput: true,
+    notifyOnCompletion: true,
+    notifyOnFailure: true,
+  },
+  updatedAt: NOW,
+  ...overrides,
+});
+
+/** A gateway that records what it is sent and answers from `answer`. */
+function harness(devices: Array<PushDevices.PushDevice>) {
+  const sent: Array<ReadonlyArray<PushGatewayDelivery>> = [];
+  const cleared: Array<{ kind: string; deviceId: string; token: string }> = [];
+  const gateway = {
+    answer: (_delivery: PushGatewayDelivery): PushGatewayResult => ({ ok: true, status: 200 }),
+  };
+  const fakeDevices = PushDevices.PushDevices.of({
+    register: () => Effect.void,
+    registerLiveActivity: () => Effect.void,
+    unregister: () => Effect.void,
+    listDeliverable: Effect.sync(() => [...devices]),
+    clearPushToken: (deviceId, token) =>
+      Effect.sync(() => {
+        cleared.push({ kind: "push", deviceId, token });
+        const index = devices.findIndex((d) => d.deviceId === deviceId && d.pushToken === token);
+        if (index >= 0) devices[index] = { ...devices[index]!, pushToken: null };
+      }),
+    clearActivityPushToken: (deviceId, token) =>
+      Effect.sync(() => void cleared.push({ kind: "activity", deviceId, token })),
+    registrations: Stream.empty,
+  });
+  const fakeGateway = PushGatewayClient.PushGatewayClient.of({
+    send: (deliveries) =>
+      Effect.sync(() => {
+        sent.push(deliveries);
+        return deliveries.map((delivery) => gateway.answer(delivery));
+      }),
+  });
+  const deliverer = PushGatewayPublisher.makeDeliverer.pipe(
+    Effect.provideService(PushDevices.PushDevices, fakeDevices),
+    Effect.provideService(PushGatewayClient.PushGatewayClient, fakeGateway),
+  );
+  return { deliverer, sent, cleared, gateway };
+}
+
+const atNow = TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe(NOW)));
+
+describe("PushGatewayPublisher", () => {
+  it.effect("sends one alert per transition and nothing for a repeat", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const h = harness([device()]);
+      const deliverer = yield* h.deliverer;
+      yield* deliverer.publish(THREAD, state("running"));
+      yield* deliverer.publish(THREAD, state("waiting_for_input"));
+      yield* deliverer.publish(THREAD, state("waiting_for_input"));
+      assert.lengthOf(h.sent, 1);
+      assert.strictEqual(h.sent[0]?.[0]?.kind, "alert");
+    }),
+  );
+
+  it.effect("retires a token APNs refuses for good, and keeps delivering to the rest", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const h = harness([device(), device({ deviceId: "ipad", pushToken: "ipad-apns" })]);
+      h.gateway.answer = (delivery) =>
+        delivery.token === "apns"
+          ? { ok: false, status: 410, reason: "Unregistered" }
+          : { ok: true, status: 200 };
+      const deliverer = yield* h.deliverer;
+      yield* deliverer.publish(THREAD, state("failed"));
+      assert.deepStrictEqual(h.cleared, [{ kind: "push", deviceId: "iphone", token: "apns" }]);
+      assert.lengthOf(h.sent[0] ?? [], 2);
+    }),
+  );
+
+  it.effect("fails a transient refusal so the publish retries the same alert", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const h = harness([device()]);
+      h.gateway.answer = () => ({ ok: false, status: 503, reason: "ServiceUnavailable" });
+      const deliverer = yield* h.deliverer;
+      const failure = yield* deliverer.publish(THREAD, state("completed")).pipe(Effect.flip);
+      assert.strictEqual(failure._tag, "PushDeliveryRetryError");
+      h.gateway.answer = () => ({ ok: true, status: 200 });
+      yield* deliverer.publish(THREAD, state("completed"));
+      assert.lengthOf(h.sent, 2);
+      assert.deepStrictEqual(h.sent[1], h.sent[0]);
+      assert.deepStrictEqual(h.cleared, []);
+    }),
+  );
+
+  it.effect("repaints a newly registered Live Activity without an alert", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const devices = [device()];
+      const h = harness(devices);
+      const deliverer = yield* h.deliverer;
+      yield* deliverer.publish(THREAD, state("waiting_for_approval"));
+      devices[0] = { ...devices[0]!, activityPushToken: "la" };
+      yield* deliverer.replay("iphone");
+      assert.lengthOf(h.sent, 2);
+      assert.deepStrictEqual(
+        h.sent[1]?.map((delivery) => [delivery.kind, delivery.token, delivery.priority]),
+        [["liveactivity", "la", 5]],
+      );
+    }),
+  );
+
+  it.effect("retires an Android token FCM no longer knows", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const h = harness([
+        device({ deviceId: "pixel", platform: "android", apsEnvironment: null, pushToken: "fcm" }),
+      ]);
+      h.gateway.answer = () => ({ ok: false, status: 404, reason: "UNREGISTERED" });
+      const deliverer = yield* h.deliverer;
+      yield* deliverer.publish(THREAD, state("running"));
+      assert.deepStrictEqual(h.cleared, [{ kind: "push", deviceId: "pixel", token: "fcm" }]);
+    }),
+  );
+});

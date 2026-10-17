@@ -87,6 +87,7 @@ import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerOwnership from "./serverOwnership.ts";
 import * as AgentAwarenessRelay from "./relay/AgentAwarenessRelay.ts";
 import * as PushDevices from "./push/PushDevices.ts";
+import * as PushGatewayPublisher from "./push/PushGatewayPublisher.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts";
@@ -581,8 +582,11 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
-  T3_CONNECT_ENABLED ? AgentAwarenessRelay.layer : T3ConnectTurnedOff.layerAgentAwarenessRelay,
-  // Fork: phones' push registrations, for the owner's push gateway.
+  // Fork: without T3 Connect, agent activity goes to phones through the owner's push gateway
+  // when one is configured. The publisher and the RPC handlers share one memoized PushDevices.
+  T3_CONNECT_ENABLED
+    ? AgentAwarenessRelay.layer
+    : PushGatewayPublisher.layer.pipe(Layer.provide(PushDevices.layer)),
   PushDevices.layer,
   T3_CONNECT_ENABLED ? HeldHooksWaker.layer : Layer.empty,
   layerThreadSettlementWorker,
