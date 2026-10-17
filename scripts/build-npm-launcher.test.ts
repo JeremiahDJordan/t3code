@@ -130,6 +130,10 @@ it.layer(NodeServices.layer)("build-npm-launcher", (it) => {
         });
         assert.equal(unpack.exitCode, 0, unpack.stderr);
         const packageDir = path.join(installed, "package");
+        assert.equal(
+          yield* fs.readFileString(path.join(packageDir, "LICENSE")),
+          yield* fs.readFileString(yield* path.fromFileUrl(new URL("../LICENSE", import.meta.url))),
+        );
 
         const release = yield* serveFakeRelease(root);
         const home = path.join(root, "home");

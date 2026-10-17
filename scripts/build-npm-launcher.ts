@@ -84,6 +84,9 @@ export const buildNpmLauncher = Effect.fn("buildNpmLauncher")(function* (input: 
   if (yield* fs.exists(readme)) {
     yield* fs.copyFile(readme, path.join(stageDir, "README.md"));
   }
+  // MIT asks for the copyright notices in every copy, and the root LICENSE holds them all.
+  const license = yield* path.fromFileUrl(new URL("../LICENSE", import.meta.url));
+  yield* fs.copyFile(license, path.join(stageDir, "LICENSE"));
 
   const packageDir = path.join(input.outputDir, NPM_LAUNCHER_PACKAGE_NAME);
   const tarball = path.join(input.outputDir, `${NPM_LAUNCHER_PACKAGE_NAME}.tgz`);
