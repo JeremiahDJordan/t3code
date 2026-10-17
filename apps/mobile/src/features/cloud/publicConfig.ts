@@ -1,4 +1,5 @@
 import Constants from "expo-constants";
+import { T3_CONNECT_ENABLED } from "@t3tools/shared/forkFeatures";
 import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Schema from "effect/Schema";
@@ -56,14 +57,19 @@ function normalizeSecureUrl(value: unknown): string | null {
   }
 }
 
-export function resolveCloudPublicConfig(extra: ExpoExtra = Constants.expoConfig?.extra) {
+// Fork: with T3_CONNECT_ENABLED off, Clerk and the relay read as unconfigured,
+// which is upstream's own "cloud disabled" mode; observability is unaffected.
+export function resolveCloudPublicConfig(
+  extra: ExpoExtra = Constants.expoConfig?.extra,
+  t3ConnectEnabled = T3_CONNECT_ENABLED,
+) {
   return {
     clerk: {
-      publishableKey: trimNonEmpty(extra?.clerk?.publishableKey),
-      jwtTemplate: trimNonEmpty(extra?.clerk?.jwtTemplate),
+      publishableKey: t3ConnectEnabled ? trimNonEmpty(extra?.clerk?.publishableKey) : null,
+      jwtTemplate: t3ConnectEnabled ? trimNonEmpty(extra?.clerk?.jwtTemplate) : null,
     },
     relay: {
-      url: normalizeSecureRelayUrl(trimNonEmpty(extra?.relay?.url) ?? ""),
+      url: t3ConnectEnabled ? normalizeSecureRelayUrl(trimNonEmpty(extra?.relay?.url) ?? "") : null,
     },
     observability: {
       tracesUrl: normalizeSecureUrl(extra?.observability?.tracesUrl),

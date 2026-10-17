@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
+import { T3_CONNECT_ENABLED } from "@t3tools/shared/forkFeatures";
 import * as NetService from "@t3tools/shared/Net";
 import * as Crypto from "effect/Crypto";
 import * as ElectronApp from "../electron/ElectronApp.ts";
@@ -175,7 +176,10 @@ const bootstrap = Effect.gen(function* () {
     ...(environment.isDevelopment
       ? { targetOrigin: Option.getOrThrow(environment.devServerUrl) }
       : { assetDirectory: environment.clientAssetsDir }),
-    clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
+    // Fork: no Clerk origin in the CSP while T3 Connect is turned off.
+    clerkFrontendApiHostname: T3_CONNECT_ENABLED
+      ? DesktopClerk.desktopClerkFrontendApiHostname
+      : undefined,
   });
   yield* installDesktopIpcHandlers();
   yield* logBootstrapInfo("bootstrap ipc handlers registered");

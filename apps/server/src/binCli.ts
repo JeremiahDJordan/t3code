@@ -3,9 +3,10 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { Argument, Command } from "effect/cli";
+import { Argument, Command, Flag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
+import { T3_CONNECT_DISABLED_MESSAGE, T3_CONNECT_ENABLED } from "@t3tools/shared/forkFeatures";
 import * as NetService from "@t3tools/shared/Net";
 import packageJson from "../package.json" with { type: "json" };
 import { acpMcpBridgeCommand, acpMcpCallCommand } from "./cli/acpMcpBridge.ts";
@@ -17,7 +18,7 @@ import { connectCommand } from "./cli/connect.ts";
 import { pairCommand } from "./cli/pair.ts";
 import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
-import { sharedServerCommandFlags } from "./cli/config.ts";
+import { projectLocationFlags, sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
 import { runDefaultServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 import { updateCommand } from "./cli/update.ts";
@@ -57,7 +58,41 @@ const connectUnavailableCommand = Command.make("connect", {
   ),
 );
 
-export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
+class ConnectTurnedOffError extends CliError.UserError {
+  override get message() {
+    return T3_CONNECT_DISABLED_MESSAGE;
+  }
+}
+
+// Accepts `t3 connect`'s own flags so every documented form gets the refusal,
+// not an unrecognized-flag error.
+const ignoredConnectFlag = (name: string) => Flag.Boolean(name).pipe(Flag.withDefault(false));
+const connectTurnedOffCommand = Command.make("connect", {
+  ...projectLocationFlags,
+  headless: ignoredConnectFlag("headless"),
+  publishOnly: ignoredConnectFlag("publish-only"),
+  json: ignoredConnectFlag("json"),
+  disable: ignoredConnectFlag("disable"),
+  command: Argument.String("command").pipe(Argument.variadic),
+}).pipe(
+  Command.withDescription("T3 Connect is turned off in this build."),
+  Command.unlisted,
+  Command.withHandler(() =>
+    Effect.fail(
+      new CliError.ShowHelp({
+        commandPath: ["t3", "connect"],
+        errors: [new ConnectTurnedOffError({ cause: T3_CONNECT_DISABLED_MESSAGE })],
+      }),
+    ),
+  ),
+);
+
+// The fork's flag wins over public configuration: a build with `.env` still
+// refuses every `t3 connect` command until T3_CONNECT_ENABLED is turned on.
+export const makeCli = ({
+  cloudEnabled = hasCloudPublicConfig,
+  t3ConnectEnabled = T3_CONNECT_ENABLED,
+} = {}) =>
   Command.make("t3", { ...sharedServerCommandFlags }).pipe(
     Command.withDescription("Run the T3 Code server."),
     Command.withHandler(runDefaultServerCommand),
@@ -90,7 +125,11 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       traceCommand,
       doctorCommand,
       triageCommand,
-      cloudEnabled ? connectCommand : connectUnavailableCommand,
+      !t3ConnectEnabled
+        ? connectTurnedOffCommand
+        : cloudEnabled
+          ? connectCommand
+          : connectUnavailableCommand,
     ]),
   );
 

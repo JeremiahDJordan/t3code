@@ -7,6 +7,12 @@ import {
   resolveRelayClerkTokenOptions,
 } from "./publicConfig";
 
+// Fork: upstream's T3 Connect tests run with the fork's flag turned on.
+vi.mock("@t3tools/shared/forkFeatures", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/shared/forkFeatures")>()),
+  T3_CONNECT_ENABLED: true,
+}));
+
 vi.mock("expo-constants", () => ({
   default: {
     expoConfig: {

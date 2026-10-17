@@ -5,6 +5,7 @@ import { useNavigation } from "@react-navigation/native";
 import { Platform, View } from "react-native";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { T3_CONNECT_ENABLED, T3_CONNECT_OFF_NOTE } from "@t3tools/shared/forkFeatures";
 
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
@@ -117,7 +118,10 @@ function LocalSettingsRouteScreen() {
           paddingBottom: Math.max(insets.bottom, 18) + 18,
         }}
       >
-        <SettingsSection title="Connections">
+        <SettingsSection
+          title="Connections"
+          footer={T3_CONNECT_ENABLED ? undefined : T3_CONNECT_OFF_NOTE}
+        >
           <SettingsRow
             icon="desktopcomputer"
             label="Environments"

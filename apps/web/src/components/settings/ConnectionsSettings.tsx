@@ -168,6 +168,7 @@ import {
   supportsDesktopAppUpdate,
   supportsServerUpdateThreadContinuation,
 } from "~/versionSkew";
+import { T3_CONNECT_ENABLED, T3_CONNECT_OFF_NOTE } from "@t3tools/shared/forkFeatures";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { RemoveT3ConnectEnvironmentDialog } from "../clerk/RemoveT3ConnectEnvironmentDialog";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
@@ -2017,7 +2018,11 @@ function CloudLinkRow({
   readonly canReadRelay: boolean;
   readonly canManageRelay: boolean;
 }) {
-  if (!hasCloudPublicConfig()) return null;
+  if (!hasCloudPublicConfig()) {
+    return T3_CONNECT_ENABLED ? null : (
+      <SettingsRow title="T3 Connect" description={T3_CONNECT_OFF_NOTE} />
+    );
+  }
   if (!canReadRelay) {
     return (
       <SettingsRow

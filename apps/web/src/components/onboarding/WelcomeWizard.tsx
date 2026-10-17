@@ -37,6 +37,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
+import { T3_CONNECT_ENABLED, T3_CONNECT_OFF_NOTE } from "@t3tools/shared/forkFeatures";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
@@ -400,7 +401,9 @@ function ConnectionStep({
             selectedIds={selectedIds}
             onToggleEnvironment={onToggleEnvironment}
           />
-        ) : null}
+        ) : T3_CONNECT_ENABLED ? null : (
+          <p className="text-xs text-muted-foreground">{T3_CONNECT_OFF_NOTE}</p>
+        )}
         <div className="rounded-lg border border-border bg-background">
           <Collapsible open={pairingOpen} onOpenChange={setPairingOpen}>
             <CollapsibleTrigger

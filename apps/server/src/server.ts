@@ -143,6 +143,7 @@ import {
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as SecureChannel from "./secureChannel/SecureChannel.ts";
 import * as CloudHttp from "./cloud/http.ts";
+import * as T3ConnectTurnedOff from "./cloud/t3ConnectTurnedOff.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
 import { pendingServiceUpdateExists } from "./cloud/updateHandoff.ts";
 import * as RelayTracing from "./cloud/relayTracing.ts";
@@ -187,6 +188,7 @@ import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
 import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
+import { T3_CONNECT_ENABLED } from "@t3tools/shared/forkFeatures";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
@@ -445,7 +447,11 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
   Layer.provide(T3ProjectFileLoader.layer),
 );
 
-const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
+const layerServerEnvironment = (
+  T3_CONNECT_ENABLED
+    ? ServerEnvironment.layer
+    : T3ConnectTurnedOff.withoutAgentActivityPublishing(ServerEnvironment.layer)
+).pipe(Layer.provide(ServerSecretStore.layer));
 
 const layerAuth = EnvironmentAuth.layer.pipe(
   // Auth reads the gateway's connection marks, so one instance serves both.
@@ -487,7 +493,7 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
 );
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
-  Layer.provide(layerScheduledTaskWebhookOrigin),
+  Layer.provide(T3_CONNECT_ENABLED ? layerScheduledTaskWebhookOrigin : Layer.empty),
   Layer.provide(ProviderEventIngestor.layerAnalytics),
   Layer.provide(layerCheckpointStore),
   Layer.provide(layerGitWorkflow),
@@ -574,8 +580,8 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
-  AgentAwarenessRelay.layer,
-  HeldHooksWaker.layer,
+  T3_CONNECT_ENABLED ? AgentAwarenessRelay.layer : T3ConnectTurnedOff.layerAgentAwarenessRelay,
+  T3_CONNECT_ENABLED ? HeldHooksWaker.layer : Layer.empty,
   layerThreadSettlementWorker,
   CheckInsWorkerLive,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
@@ -710,7 +716,7 @@ const layerMakeRoutes = Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(AuthHttp.layer),
       Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
-      Layer.provide(CloudHttp.layer),
+      Layer.provide(T3_CONNECT_ENABLED ? CloudHttp.layer : T3ConnectTurnedOff.layerConnectHttp),
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
@@ -850,6 +856,13 @@ const layerMakeServer = Layer.unwrap(
       : Layer.empty;
     const layerCloudDesiredLinkReconcile = Layer.effectDiscard(
       Effect.gen(function* () {
+        // Fork: with T3 Connect turned off, nothing links, starts or releases a
+        // tunnel; the stored link stays as it is for when the flag comes back.
+        if (!T3_CONNECT_ENABLED) {
+          yield* Effect.logDebug("T3 Connect is turned off in this build; skipping link startup");
+          yield* Deferred.succeed(cloudLinkParked, undefined).pipe(Effect.orDie);
+          return;
+        }
         const cloudLink = yield* CloudLink.CloudLink;
         const releaseManagedTunnel = cloudLink.releaseManagedTunnelOnShutdown().pipe(
           Effect.timeout("10 seconds"),

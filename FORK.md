@@ -99,7 +99,6 @@ commands need tmux 3.2 or later.
 ```bash
 git clone -b bob-shell https://github.com/JeremiahDJordan/t3code.git
 cd t3code
-cp .env.example .env  # T3 Connect's public configuration; skip it to leave T3 Connect off
 vp i
 ```
 
@@ -119,10 +118,14 @@ provisioning profile, so the in-app browser has no Touch ID passkeys, as in the 
 
 **Server only (Linux, or a Mac without the desktop app).** `vp run --filter t3 build`,
 then start `node apps/server/dist/bin.mjs serve` in a project folder; it prints a
-pairing link. Add `--host 0.0.0.0 --port 3773` to reach it from other machines. For T3
-Connect, run `node apps/server/dist/bin.mjs connect link --headless` once in a terminal
-(it offers to download Cloudflare's relay client first), approve its code at
-accounts.t3.codes, and restart `serve`.
+pairing link. Add `--host 0.0.0.0 --port 3773` to reach it from other machines.
+
+T3 Connect is turned off (see its decision below). To build with it, set
+`T3_CONNECT_ENABLED` to `true` in `packages/shared/src/forkFeatures.ts`, run
+`cp .env.example .env` for its public configuration, and rebuild; on a server-only host,
+then run `node apps/server/dist/bin.mjs connect link --headless` once (it offers to
+download Cloudflare's relay client first), approve its code at accounts.t3.codes, and
+restart `serve`.
 
 On a machine where Bob has never run, the first turn reports Bob's license. Run `bob`
 once in a terminal, or `bob --accept-license -p "hi"` on a headless machine.
@@ -839,6 +842,34 @@ would conflict. The iPhone icon is the `.icon` package in `assets/fork`, white Z
 (`#b5552b`), and `z6-ios-1024.png` is its Icon Composer export (`ictool --export-image`), which
 Expo uses for its fallback icon and splash.
 
+### Turn T3 Connect off by default (owner, 2026-10-16)
+
+The fork reaches its machines over the LAN, Tailscale and its own encrypted Cloudflare
+tunnel, so nobody running it should link a machine to upstream's hosted relay by
+accident. `T3_CONNECT_ENABLED` in `packages/shared/src/forkFeatures.ts` is `false`; a
+source constant is the flag because the fork ships from source. It wins over `.env`, and
+no upstream code is removed. The gates sit at the entry points, so upstream's T3 Connect
+code and tests stay as they are (those tests mock the flag on):
+
+- **Server.** `t3 connect` and every subcommand refuse naming the flag (`binCli.ts`).
+  `server.ts` mounts `cloud/t3ConnectTurnedOff.ts` in place of the `connect` HTTP group
+  (link, relay config, unlink, preferences, health and mint refuse with 403;
+  `linkState` still reads), a no-op agent activity publisher, no held-webhook waker, no
+  relay webhook URL, and a descriptor without `agentActivityPublishing`, and skips
+  boot-time link startup, so no stored tunnel starts or is released. `ws.ts` refuses
+  `cloud.installRelayClient`. Stored link data is untouched, so turning the flag on
+  brings a link back.
+- **Web, desktop and mobile.** `resolveCloudPublicConfig` reads as unconfigured, which
+  is upstream's own "cloud disabled" mode: no Clerk, no sign-in, onboarding, settings or
+  palette entries. Settings → Connections and the welcome wizard (web), and Settings,
+  Add environment and Notifications (mobile) say T3 Connect is turned off in this build.
+  Desktop leaves the Clerk origin out of its CSP.
+
+Not gated: environments already saved with a relay route still list, and fail to
+connect asking for T3 Connect sign-in; the `schedule_task` tool description still tells
+an agent to suggest T3 Connect when a task has no webhook URL; the desktop Clerk bridge
+is still created, since it also owns deep links and the single-instance lock.
+
 ### Pair the phone through Cloudflare Access with a service token (owner, 2026-10-07)
 
 A machine behind the owner's own Cloudflare Tunnel sits behind Cloudflare Access, which turns
@@ -1098,6 +1129,18 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
   `UsageLimitsPooled.tsx` (`DRIVER_LABEL`), and Retry in `ThreadRouteScreen.tsx`,
   `thread-work-log.tsx` and `use-thread-composer-state.ts`.
 
+- T3 Connect's flag (`T3_CONNECT_ENABLED`): in `server.ts`, the
+  `T3ConnectTurnedOff` swaps for `CloudHttp.layer`, `AgentAwarenessRelay.layer`,
+  `HeldHooksWaker.layer`, `layerScheduledTaskWebhookOrigin` and `layerServerEnvironment`,
+  and the early return in `layerCloudDesiredLinkReconcile`; in `ws.ts`, the
+  `cloudInstallRelayClient` override after upstream's handler; in desktop
+  `DesktopApp.ts`, the `clerkFrontendApiHostname` check. Losing one quietly starts a
+  stored tunnel, publishes agent activity or answers the relay; `t3ConnectTurnedOff.test.ts`
+  covers only the swapped-in pieces. Web and mobile `publicConfig.ts` (`resolveCloudPublicConfig`)
+  are covered by `publicConfig.t3ConnectOff.test.ts`, and `binCli.ts` by
+  `connectTurnedOff.test.ts`. A new upstream T3 Connect entry point that bypasses
+  `resolveCloudPublicConfig`, the `connect` HTTP group or the boot layer needs its own gate.
+
 **Conflict hazards:** `ws.ts` around `makeWsRpcLayer`'s parameters; the scanner's
 already-imported/duplicate helpers, which both the transcript and Bob paths use (port
 an upstream change there into both); `ContextWindowMeter.tsx`; the `UsagePage.tsx` day
@@ -1129,10 +1172,12 @@ cd ../provider-acp && vp test run
 cd ../../apps/server && vp test run src/workflow src/orchestration-v2/StructuredResult \
   src/orchestration-v2/ResultPattern \
   src/orchestration-v2/DelegatedCompletionDelivery src/mcp/OrchestratorMcpService \
-  src/secureChannel src/auth src/startupAccess src/cli src/orchestration-v2/ThreadLaunchService
+  src/secureChannel src/auth src/startupAccess src/cli src/orchestration-v2/ThreadLaunchService \
+  src/cloud
 cd ../../packages/shared && vp test run src/secureChannel src/remote
 cd ../client-runtime && vp test run src/connection src/state/workflowCard
-cd ../../apps/web && vp test run src/hostedPairing src/components/settings/pairingUrls
+cd ../../apps/web && vp test run src/hostedPairing src/components/settings/pairingUrls src/cloud
+cd ../mobile && vp test run src/features/cloud src/features/agent-awareness
 cd ../desktop && vp test run src/app/DesktopSecureChannelKeys
 ```
 

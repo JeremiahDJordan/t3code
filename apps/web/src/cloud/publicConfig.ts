@@ -1,3 +1,4 @@
+import { T3_CONNECT_ENABLED } from "@t3tools/shared/forkFeatures";
 import { relayClerkTokenOptions } from "@t3tools/shared/relayAuth";
 import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import * as Schema from "effect/Schema";
@@ -37,7 +38,17 @@ function normalizeSecureUrl(value: string): string | null {
   }
 }
 
-export function resolveCloudPublicConfig(): CloudPublicConfig {
+// Fork: with T3_CONNECT_ENABLED off, everything reads as unconfigured, which is
+// upstream's own "cloud disabled" mode, even in a build with `.env`.
+export function resolveCloudPublicConfig(t3ConnectEnabled = T3_CONNECT_ENABLED): CloudPublicConfig {
+  if (!t3ConnectEnabled) {
+    return {
+      clerkPublishableKey: null,
+      clerkJwtTemplate: null,
+      relayUrl: null,
+      relayTracing: { tracesUrl: null, tracesDataset: null, tracesToken: null },
+    };
+  }
   return {
     clerkPublishableKey: trimNonEmpty(
       import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string | undefined,

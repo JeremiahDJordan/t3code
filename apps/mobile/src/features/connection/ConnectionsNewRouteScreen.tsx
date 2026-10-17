@@ -11,6 +11,7 @@ import {
   type StaticScreenProps,
 } from "@react-navigation/native";
 import type { EnvironmentId } from "@t3tools/contracts";
+import { T3_CONNECT_ENABLED, T3_CONNECT_OFF_NOTE } from "@t3tools/shared/forkFeatures";
 import { channelKeyFingerprint, decodeChannelKey } from "@t3tools/shared/secureChannel/handshake";
 import { AsyncResult } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -361,7 +362,13 @@ export function ConnectionsNewRouteScreen({
             </Text>
           </View>
 
-          {hasCloudPublicConfig() ? <T3ConnectSection /> : null}
+          {hasCloudPublicConfig() ? (
+            <T3ConnectSection />
+          ) : T3_CONNECT_ENABLED ? null : (
+            <Text className="px-4 text-sm leading-normal text-foreground-muted">
+              {T3_CONNECT_OFF_NOTE}
+            </Text>
+          )}
         </View>
       </ScrollView>
     </SettingsScreen>

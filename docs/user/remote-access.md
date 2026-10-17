@@ -5,6 +5,10 @@ machine. That machine must stay running and reachable while you work.
 
 ## T3 Connect
 
+In this build, T3 Connect is turned off: no app offers it and `t3 connect` refuses.
+To use it, set `T3_CONNECT_ENABLED` to `true` in `packages/shared/src/forkFeatures.ts`
+and rebuild; a link made before it was turned off comes back.
+
 T3 Connect makes an environment available to your other devices without setting
 up router forwarding. In the desktop app on the host, open **Settings →
 Connections**, sign in, and enable **T3 Connect** for that environment.

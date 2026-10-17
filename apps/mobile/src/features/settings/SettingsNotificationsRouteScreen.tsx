@@ -33,6 +33,7 @@ import {
   subscribeAgentAwarenessRegistrationStatus,
 } from "../agent-awareness/remoteRegistration";
 import { refreshManagedRelayEnvironments } from "../cloud/managedRelayState";
+import { T3_CONNECT_ENABLED, T3_CONNECT_OFF_NOTE } from "@t3tools/shared/forkFeatures";
 import { hasCloudPublicConfig, resolveRelayClerkTokenOptions } from "../cloud/publicConfig";
 import { runtime } from "../../lib/runtime";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
@@ -64,7 +65,9 @@ export function SettingsNotificationsRouteScreen() {
           contentContainerClassName="px-5 pt-4"
         >
           <Text className="text-base text-foreground-muted">
-            Notifications require T3 Connect in this app build.
+            {T3_CONNECT_ENABLED
+              ? "Notifications require T3 Connect in this app build."
+              : `Notifications require T3 Connect. ${T3_CONNECT_OFF_NOTE}`}
           </Text>
         </ScrollView>
       </SettingsScreen>

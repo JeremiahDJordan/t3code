@@ -522,6 +522,10 @@
     "./secureChannel/noise": {
       "types": "./src/secureChannel/noise.ts",
       "import": "./src/secureChannel/noise.ts"
+    },
+    "./forkFeatures": {
+      "types": "./src/forkFeatures.ts",
+      "import": "./src/forkFeatures.ts"
     }
   },
   "scripts": {
