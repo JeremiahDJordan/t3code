@@ -4,20 +4,26 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { afterAll, assert, describe, it } from "@effect/vitest";
+import { ProviderInstanceId, TextGenerationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import {
   AppleBobAutoJudge,
   appleBobAutoJudgeProgram,
+  askProviderModel,
   bobRestrictionChunks,
   bobMessageQuotes,
   bobAutoJudgePrompt,
   bobAutoJudgement,
+  type BobAutoJudgeModel,
   makeAppleBobAutoJudge,
+  makeBobAutoJudgeForSettings,
   makeEndpointBobAutoJudge,
+  makeModelBobAutoJudge,
   readEndpointAnswer,
 } from "./bobAutoJudge.ts";
 
@@ -326,6 +332,136 @@ describe("makeEndpointBobAutoJudge", () => {
       assert.equal((yield* Fiber.join(waiting)).decision, "ask");
     }),
   );
+});
+
+describe("askProviderModel", () => {
+  const selection = { instanceId: ProviderInstanceId.make("other-bob"), model: "default" };
+  const instance = (enabled: boolean, asked: Array<string>) => ({
+    enabled,
+    textGeneration: {
+      generateJson: ((input: { readonly cwd: string; readonly prompt: string }) =>
+        Effect.sync(() => {
+          asked.push(`${input.cwd}: ${input.prompt}`);
+          return { ok: true };
+        })) as never,
+    } as never,
+  });
+  const ask = (enabled: boolean | undefined, asked: Array<string>) =>
+    askProviderModel({
+      selection: Effect.succeed(selection),
+      getInstance: () =>
+        Effect.succeed(enabled === undefined ? undefined : instance(enabled, asked)),
+      folder: Effect.succeed("/cache/bob-auto-review"),
+    })("judge this", Schema.Struct({ ok: Schema.Boolean }));
+
+  it.effect("asks the chosen instance in the reviewer's folder", () =>
+    Effect.gen(function* () {
+      const asked: Array<string> = [];
+      assert.deepEqual(yield* ask(true, asked), { ok: true });
+      assert.deepEqual(asked, ["/cache/bob-auto-review: judge this"]);
+    }),
+  );
+
+  it.effect("never asks a turned-off or missing instance, so the call asks the user", () =>
+    Effect.gen(function* () {
+      const asked: Array<string> = [];
+      const off = yield* Effect.flip(ask(false, asked));
+      assert.equal(off.detail, "other-bob is turned off.");
+      const missing = yield* Effect.flip(ask(undefined, asked));
+      assert.equal(missing.detail, "No provider instance other-bob.");
+      assert.deepEqual(asked, []);
+    }),
+  );
+});
+
+describe("makeModelBobAutoJudge", () => {
+  /** A provider's model that answers every prompt with `reply`, decoded as text generation does. */
+  const modelSaying = (reply: (prompt: string) => string, prompts: Array<string> = []) => {
+    const ask: BobAutoJudgeModel = (prompt, outputSchema) => {
+      prompts.push(prompt);
+      return Schema.decodeUnknownEffect(Schema.fromJsonString(outputSchema))(reply(prompt)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({ operation: "generateJson", detail: "invalid", cause }),
+        ),
+      );
+    };
+    return makeModelBobAutoJudge({ name: "claude-haiku-4-5 (claude)", ask });
+  };
+  const input = { userMessages: said("run the tests"), call: "runs npm test" };
+
+  it.effect("puts the instructions before the call, and allows on the model's answer", () =>
+    Effect.gen(function* () {
+      const prompts: Array<string> = [];
+      const judge = modelSaying(
+        () => '{"action": "runs the tests", "requested": true, "risky": false}',
+        prompts,
+      );
+      assert.equal((yield* judge.judge(input)).decision, "allow");
+      const prompt = prompts[0] ?? "";
+      assert.isTrue(prompt.startsWith("You check one tool call"));
+      assert.isAbove(prompt.indexOf("The tool call: runs npm test"), prompt.indexOf("Examples:"));
+      const risky = modelSaying(() => '{"action": "pushes", "requested": true, "risky": true}');
+      assert.equal((yield* risky.judge(input)).decision, "ask");
+    }),
+  );
+
+  it.effect("quotes what a message forbids or allows, keeping only real ones", () =>
+    Effect.gen(function* () {
+      const judge = modelSaying(() =>
+        JSON.stringify({ restrictions: ["Never search the web."], permissions: ["Made up."] }),
+      );
+      assert.deepEqual(yield* judge.extract!("Use npm freely. Never search the web."), [
+        forbids("Never search the web."),
+      ]);
+      const unreadable = modelSaying(() => "Never search the web.");
+      assert.isUndefined(yield* unreadable.extract!("Never search the web."));
+    }),
+  );
+
+  it.effect("asks the user when the model fails or does not answer in time", () =>
+    Effect.gen(function* () {
+      const failing = modelSaying(() => "not json");
+      assert.deepEqual(yield* failing.judge(input), {
+        decision: "ask",
+        reason: "claude-haiku-4-5 (claude) did not answer",
+      });
+      const silent = makeModelBobAutoJudge({ name: "bob", ask: () => Effect.never });
+      const waiting = yield* Effect.forkChild(silent.judge(input));
+      yield* TestClock.adjust("61 seconds");
+      assert.equal((yield* Fiber.join(waiting)).decision, "ask");
+    }),
+  );
+
+  it("is the judge only when the settings pick a provider's model and T3 can reach it", () => {
+    const settings = { autoReviewEndpoint: "", autoReviewModel: "" };
+    const common = {
+      environment: {},
+      cacheDir: "/nowhere",
+      platform: "linux" as const,
+      httpClient: HttpClient.make(() => Effect.never),
+    };
+    const model = { name: "bob", ask: (() => Effect.never) satisfies BobAutoJudgeModel };
+    assert.equal(
+      makeBobAutoJudgeForSettings({
+        ...common,
+        settings: { ...settings, autoReviewer: "model" },
+        model,
+      }).judge?.name,
+      "bob",
+    );
+    assert.isUndefined(
+      makeBobAutoJudgeForSettings({ ...common, settings: { ...settings, autoReviewer: "model" } })
+        .judge,
+    );
+    assert.isUndefined(
+      makeBobAutoJudgeForSettings({
+        ...common,
+        settings: { ...settings, autoReviewer: "off" },
+        model,
+      }).judge,
+    );
+  });
 });
 
 describe("makeAppleBobAutoJudge", () => {

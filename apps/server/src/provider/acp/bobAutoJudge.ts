@@ -16,7 +16,8 @@
  * leaves the recent ones or is cut for length.
  *
  * Apple's on-device model is reached through a small Swift program T3 compiles on first use and
- * keeps running; an OpenAI-compatible endpoint, such as Ollama's, through its chat completions.
+ * keeps running; an OpenAI-compatible endpoint, such as Ollama's, through its chat completions;
+ * a provider's model through that provider's text generation, one prompt at a time.
  *
  * @module provider/acp/bobAutoJudge
  */
@@ -26,7 +27,13 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import type { BobSettings } from "@t3tools/contracts";
+import {
+  TextGenerationError,
+  type BobSettings,
+  type ModelSelection,
+  type ProviderInstanceId,
+} from "@t3tools/contracts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
@@ -805,15 +812,108 @@ export function makeEndpointBobAutoJudge(options: {
   return { name: options.model, judge, extract, warm: Effect.void };
 }
 
+/** One prompt to a provider's model, answered with one JSON object of `outputSchema`. */
+export type BobAutoJudgeModel = <T, E>(
+  prompt: string,
+  outputSchema: Schema.Codec<T, E>,
+) => Effect.Effect<T, TextGenerationError>;
+
+/**
+ * Asks the instance a selection names, through its text generation. A missing or turned-off
+ * instance fails, so the call asks the user; the selection stays for when it is back.
+ */
+export const askProviderModel =
+  (input: {
+    readonly selection: Effect.Effect<ModelSelection, TextGenerationError>;
+    readonly getInstance: (
+      instanceId: ProviderInstanceId,
+    ) => Effect.Effect<Pick<ProviderInstance, "enabled" | "textGeneration"> | undefined>;
+    /** The folder the model runs in, made on first use. */
+    readonly folder: Effect.Effect<string, TextGenerationError>;
+  }): BobAutoJudgeModel =>
+  (prompt, outputSchema) =>
+    Effect.gen(function* () {
+      const modelSelection = yield* input.selection;
+      const instance = yield* input.getInstance(modelSelection.instanceId);
+      if (instance === undefined || !instance.enabled) {
+        return yield* new TextGenerationError({
+          operation: "generateJson",
+          detail:
+            instance === undefined
+              ? `No provider instance ${modelSelection.instanceId}.`
+              : `${modelSelection.instanceId} is turned off.`,
+        });
+      }
+      return yield* instance.textGeneration.generateJson({
+        cwd: yield* input.folder,
+        prompt,
+        outputSchema,
+        modelSelection,
+      });
+    });
+
+/**
+ * How long a call waits for a provider's model, which starts its CLI, or a Bob of its own, for
+ * each prompt, and how long it may take to quote a part of a message, which nothing waits on.
+ */
+const MODEL_TIMEOUT = "60 seconds";
+/** Structured output modes, such as Codex's, take only objects whose every field is required. */
+const ProviderModelAnswer = Schema.Struct({
+  action: Schema.String,
+  requested: Schema.Boolean,
+  risky: Schema.Boolean,
+});
+const MODEL_EXTRACT_TIMEOUT = "2 minutes";
+
+/** A provider's model as a judge: the endpoint's prompts, with the instructions first. */
+export function makeModelBobAutoJudge(options: {
+  readonly name: string;
+  readonly ask: BobAutoJudgeModel;
+}): BobAutoJudge {
+  const judge = (input: BobAutoJudgeInput) =>
+    Effect.gen(function* () {
+      const prompt = bobAutoJudgePrompt(input);
+      if (prompt === undefined) return ask("the user's message is not quoted yet");
+      const answer = yield* options.ask(
+        `${BOB_AUTO_JUDGE_INSTRUCTIONS}\n\nAnswer with only a JSON object: {"action": "what the call does", "requested": true or false, "risky": true or false}.\n\n${prompt}`,
+        ProviderModelAnswer,
+      );
+      return bobAutoJudgement(answer);
+    }).pipe(
+      Effect.timeout(MODEL_TIMEOUT),
+      Effect.catchCause(() => Effect.succeed(ask(`${options.name} did not answer`))),
+    );
+  const extract = (text: string) =>
+    Effect.gen(function* () {
+      const restrictions: Array<string> = [];
+      const permissions: Array<string> = [];
+      for (const chunk of bobRestrictionChunks(text)) {
+        const answer = yield* options
+          .ask(
+            `${BOB_AUTO_JUDGE_EXTRACT_INSTRUCTIONS}\n\nAnswer with only a JSON object: {"restrictions": ["each sentence, exactly as written"], "permissions": ["each sentence, exactly as written"]}.\n\nThe part of the message:\n\n${chunk}`,
+            ModelQuotes,
+          )
+          .pipe(Effect.timeout(MODEL_EXTRACT_TIMEOUT));
+        restrictions.push(...answer.restrictions);
+        permissions.push(...answer.permissions);
+      }
+      return bobMessageQuotes(text, { restrictions, permissions });
+    }).pipe(Effect.catchCause(() => Effect.succeed(undefined)));
+  return { name: options.name, judge, extract, warm: Effect.void };
+}
+
 /** The environment variable whose value the endpoint gets as a bearer token. */
 export const BOB_AUTO_REVIEW_API_KEY_ENV = "BOB_AUTO_REVIEW_API_KEY";
 
 /**
  * The judge a Bob instance's settings pick, and how to stop it: Apple's model, an endpoint with
- * both its URL and model set, or none, so the calls left to it ask.
+ * both its URL and model set, a provider's model when T3 can reach the providers, or none, so the
+ * calls left to it ask.
  */
 export function makeBobAutoJudgeForSettings(input: {
   readonly settings: Pick<BobSettings, "autoReviewer" | "autoReviewEndpoint" | "autoReviewModel">;
+  /** A provider's model, by the settings' choice, and its name for logs and cards. */
+  readonly model?: { readonly name: string; readonly ask: BobAutoJudgeModel } | undefined;
   readonly environment: NodeJS.ProcessEnv;
   readonly cacheDir: string;
   readonly platform: NodeJS.Platform;
@@ -828,6 +928,9 @@ export function makeBobAutoJudgeForSettings(input: {
       ...(input.log ? { log: input.log } : {}),
     });
     return { judge: apple, close: apple.close };
+  }
+  if (settings.autoReviewer === "model" && input.model !== undefined) {
+    return { judge: makeModelBobAutoJudge(input.model), close: Effect.void };
   }
   if (
     settings.autoReviewer === "endpoint" &&

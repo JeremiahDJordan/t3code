@@ -87,6 +87,8 @@ function readFieldBooleanDefault(
 export function deriveProviderSettingsFields(
   definition: SettingsFormDefinition,
   value?: unknown,
+  /** The destination server's capabilities; an option that requires one it lacks is left out. */
+  capabilities?: Readonly<Record<string, unknown>>,
 ): ReadonlyArray<ProviderSettingsFieldModel> {
   const isLocalAcp =
     definition.driverKind === "acpRegistry" &&
@@ -137,7 +139,13 @@ export function deriveProviderSettingsFields(
             ? { defaultBooleanValue: readFieldBooleanDefault(fieldSchema) }
             : {}),
           ...(formAnnotation.control === "select" && formAnnotation.options
-            ? { options: formAnnotation.options }
+            ? {
+                options: formAnnotation.options.filter(
+                  (option) =>
+                    option.requiresCapability === undefined ||
+                    capabilities?.[option.requiresCapability] === true,
+                ),
+              }
             : {}),
         } satisfies ProviderSettingsFieldModel,
       ];
@@ -295,6 +303,7 @@ interface ProviderSettingsFormProps {
   readonly idPrefix: string;
   readonly variant: "card" | "dialog" | "settings";
   readonly onChange: (nextConfig: Record<string, unknown> | undefined) => void;
+  readonly capabilities?: Readonly<Record<string, unknown>> | undefined;
 }
 
 function ProviderSettingsSelect({
@@ -550,10 +559,11 @@ export function ProviderSettingsForm({
   idPrefix,
   variant,
   onChange,
+  capabilities,
 }: ProviderSettingsFormProps) {
   const fields = useMemo(
-    () => deriveProviderSettingsFields(definition, value),
-    [definition, value],
+    () => deriveProviderSettingsFields(definition, value, capabilities),
+    [capabilities, definition, value],
   );
   const isLocalAcp =
     definition.driverKind === "acpRegistry" &&

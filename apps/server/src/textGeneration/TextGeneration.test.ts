@@ -25,6 +25,7 @@ const makeStubTextGeneration = (
     generateBranchName: () => Effect.die("generateBranchName stub not configured for this test"),
     generateThreadTitle: () => Effect.die("generateThreadTitle stub not configured for this test"),
     generateReviewGuide: () => Effect.die("generateReviewGuide stub not configured for this test"),
+    generateJson: () => Effect.die("generateJson stub not configured for this test"),
     ...overrides,
   });
 

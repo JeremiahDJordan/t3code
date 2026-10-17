@@ -168,11 +168,21 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
     });
   });
 
+  const generateJson: ProviderTextGeneration["generateJson"] = (input) =>
+    run({
+      operation: "generateJson",
+      cwd: input.cwd,
+      modelSelection: input.modelSelection,
+      prompt: input.prompt,
+      outputSchema: input.outputSchema,
+    }).pipe(Effect.withSpan(`${name}.generateJson`));
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateJson,
   } satisfies ProviderTextGeneration;
 }

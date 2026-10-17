@@ -54,6 +54,7 @@ import { ProviderWizardAuthenticationStep } from "./ProviderWizardAuthentication
 import { resolveOfficialAcpRegistryIconUrl } from "./AcpRegistryIcon";
 import { AddManagedCodexAccountDialog } from "./CodexSetupSection";
 import { ProviderEnvironmentSection } from "./ProviderInstanceCard";
+import { useServerConfigs } from "../../state/entities";
 
 /**
  * Output is trimmed to 48 chars so the final composed id stays under the 64-char slug cap
@@ -108,6 +109,7 @@ export function AddProviderInstanceDialog({
   onCreated,
 }: AddProviderInstanceDialogProps) {
   const settings = useEnvironmentSettings(environmentId);
+  const capabilities = useServerConfigs().get(environmentId)?.environment.capabilities;
   const persistProviderInstance = usePersistEnvironmentProviderInstanceMutation(environmentId);
   const canManageProviders = useEnvironmentScope(environmentId, AuthProvidersManageScope);
 
@@ -488,6 +490,7 @@ export function AddProviderInstanceDialog({
                           idPrefix="add-provider-acpRegistry-manual"
                           variant="settings"
                           onChange={setConfigDraft}
+                          capabilities={capabilities}
                         />
                         {isLocalAcp ? (
                           <ProviderEnvironmentSection
@@ -636,6 +639,7 @@ export function AddProviderInstanceDialog({
                     idPrefix={`add-provider-${driver}`}
                     variant="settings"
                     onChange={setConfigDraft}
+                    capabilities={capabilities}
                   />
                 </SettingsGroup>
               ) : !isAcpRegistry && wizardStep === 2 ? (

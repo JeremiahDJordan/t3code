@@ -112,7 +112,7 @@ function fakeGhOutput(stdout: string): VcsProcess.VcsProcessOutput {
   };
 }
 
-type FakeGitTextGeneration = TextGeneration.TextGeneration["Service"];
+type FakeGitTextGeneration = Omit<TextGeneration.TextGeneration["Service"], "generateJson">;
 
 type FakePullRequest = NonNullable<FakeGhScenario["pullRequest"]>;
 
@@ -395,6 +395,7 @@ function createTextGeneration(
         ),
       ),
     generateReviewGuide: (input) => implementation.generateReviewGuide(input),
+    generateJson: () => Effect.die("generateJson is not used by git actions"),
   };
 }
 

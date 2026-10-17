@@ -370,11 +370,20 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
     }),
   ).generateReviewGuide;
 
+  // Like every prompt that carries all Bob needs: a Bob of its own, in Ask mode.
+  const generateJson: TextGeneration.TextGeneration["Service"]["generateJson"] = (input) =>
+    runBobJson({
+      operation: "generateJson",
+      prompt: input.prompt,
+      outputSchemaJson: input.outputSchema,
+    }).pipe(Effect.withSpan("BobTextGeneration.generateJson"));
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateJson,
   } satisfies TextGeneration.TextGeneration["Service"];
 });

@@ -98,6 +98,12 @@ import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetup
 import { ProviderAuthenticationSection } from "./ProviderAuthenticationSection";
 import { CodexSetupSection, CodexManagedRuntimeFields } from "./CodexSetupSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
+import {
+  BobAutoReviewModelSetting,
+  readBobAutoReviewer,
+  readBobAutoReviewModelSelection,
+  withBobAutoReviewModelSelection,
+} from "./BobAutoReviewModelSetting";
 import { providerClients } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
 import {
@@ -957,6 +963,24 @@ export function EnvironmentProviderSettings({
               environmentId={environmentId}
               instanceId={row.instanceId}
               provider={liveProvider}
+            />
+          ) : undefined
+        }
+        runtimeExtra={
+          mode === "editor" &&
+          row.driver === "bob" &&
+          readBobAutoReviewer(row.instance.config) === "model" ? (
+            <BobAutoReviewModelSetting
+              environmentId={environmentId}
+              settings={settings}
+              serverProviders={serverProviders}
+              selection={readBobAutoReviewModelSelection(row.instance.config)}
+              onChange={(selection) =>
+                void updateProviderInstance(row, {
+                  ...row.instance,
+                  config: withBobAutoReviewModelSelection(row.instance.config, selection),
+                })
+              }
             />
           ) : undefined
         }

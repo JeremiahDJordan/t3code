@@ -293,12 +293,6 @@ export const makeProviderInstanceRegistry = <R>(input: {
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
 
     const state: RegistryState = { entries, unavailable, changes };
-    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
-    const reconcile: ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutatorShape["reconcile"] =
-      (configMap) => reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
-
-    yield* reconcile(input.configMap);
-
     const registry: ProviderInstanceRegistry["Service"] = {
       getInstance: (id) => Ref.get(entries).pipe(Effect.map((map) => map.get(id)?.instance)),
       listInstances: Ref.get(entries).pipe(
@@ -317,6 +311,16 @@ export const makeProviderInstanceRegistry = <R>(input: {
         return PubSub.subscribe(changes);
       },
     };
+
+    const reconcileWithR = makeReconcile({ state, driversById, parentScope });
+    const reconcile: ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutatorShape["reconcile"] =
+      (configMap) =>
+        reconcileWithR(configMap).pipe(
+          // A driver may look up the other instances when it uses one, as Bob's Auto reviewer does.
+          Effect.provideContext(Context.add(driverContext, ProviderInstanceRegistry, registry)),
+        );
+
+    yield* reconcile(input.configMap);
 
     const mutator: ProviderInstanceRegistryMutator.ProviderInstanceRegistryMutatorShape = {
       reconcile,

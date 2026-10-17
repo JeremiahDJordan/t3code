@@ -490,6 +490,8 @@ export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "sw
 export interface ProviderSettingsFormOption {
   readonly value: string;
   readonly label: string;
+  /** Offered only by a server that advertises this environment capability. */
+  readonly requiresCapability?: string | undefined;
 }
 
 export interface ProviderSettingsFormAnnotation {
@@ -694,11 +696,13 @@ export type BobSessionHost = typeof BobSessionHost.Type;
 /**
  * What judges a Bob tool call in Auto that the rules leave to the user's request, such as running
  * the project's tests or a web search: Apple's on-device model, a model behind an
- * OpenAI-compatible endpoint, or nothing, so those ask.
+ * OpenAI-compatible endpoint, a model of one of the environment's providers, or nothing, so those
+ * ask.
  */
 const BOB_AUTO_REVIEWERS = [
   { value: "apple", label: "Apple's on-device model" },
   { value: "endpoint", label: "OpenAI-compatible endpoint" },
+  { value: "model", label: "A provider's model", requiresCapability: "bobProviderModelReviewer" },
   { value: "off", label: "Rules only" },
 ] as const satisfies ReadonlyArray<ProviderSettingsFormOption>;
 export const BobAutoReviewer = Schema.Literals(
@@ -751,7 +755,7 @@ export const BobSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Auto mode reviewer",
         description:
-          "In Auto, judges a tool call that may be routine, such as a web search, against what you asked; anything else asks you. Apple's model runs on this Mac with Apple Intelligence on macOS 26 or later and the Xcode command line tools. Rules only asks you about those calls. Open threads keep the reviewer they started with until their Bob restarts.",
+          "In Auto, judges a tool call that may be routine, such as a web search, against what you asked; anything else asks you. Apple's model runs on a Mac with Apple Intelligence on macOS 26 or later and the Xcode command line tools. A provider's model is one you choose below, by default the text generation model; your messages and the calls it judges go to that provider, and Bob's runs as a separate Bob in Ask mode. Rules only asks you about those calls. Open threads keep the reviewer they started with until their Bob restarts.",
         providerSettingsForm: {
           control: "select",
           options: BOB_AUTO_REVIEWERS,
@@ -778,6 +782,10 @@ export const BobSettings = makeProviderSettingsSchema(
         description: "For an OpenAI-compatible reviewer: the model to ask.",
         providerSettingsForm: { placeholder: "qwen3:8b", clearWhenEmpty: "omit" },
       }),
+    ),
+    /** For a provider's model as the reviewer; absent, the text generation model. */
+    autoReviewModelSelection: Schema.optionalKey(ModelSelection).pipe(
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),

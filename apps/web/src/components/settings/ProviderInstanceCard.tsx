@@ -61,6 +61,7 @@ import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { BobRulesSection } from "./BobRulesSection";
+import { useServerConfigs } from "../../state/entities";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
@@ -583,6 +584,8 @@ interface ProviderInstanceCardProps {
   readonly headerAction?: ReactNode | undefined;
   readonly setup?: ReactNode;
   readonly runtime?: ReactNode;
+  /** Rows after the driver's own runtime settings, for one that needs more than a form field. */
+  readonly runtimeExtra?: ReactNode;
   readonly hiddenModels: ReadonlyArray<string>;
   readonly favoriteModels: ReadonlyArray<string>;
   readonly modelOrder: ReadonlyArray<string>;
@@ -633,6 +636,7 @@ export function ProviderInstanceCard({
   headerAction,
   setup,
   runtime,
+  runtimeExtra,
   hiddenModels,
   favoriteModels,
   modelOrder,
@@ -648,6 +652,11 @@ export function ProviderInstanceCard({
   acpProjects = EMPTY_ACP_PROJECTS,
   projectOverride,
 }: ProviderInstanceCardProps) {
+  const serverConfigs = useServerConfigs();
+  const capabilities =
+    environmentId === undefined
+      ? undefined
+      : serverConfigs.get(environmentId)?.environment.capabilities;
   const enabled = projectOverride?.effectiveEnabled ?? resolveProviderInstanceEnabled(instance);
   const compatibility = enabled ? liveProvider?.compatibilityAdvisory : undefined;
   const statusKey: ProviderStatusKey = enabled
@@ -1094,6 +1103,7 @@ export function ProviderInstanceCard({
       idPrefix={`provider-instance-${instanceId}`}
       variant="settings"
       onChange={updateConfig}
+      capabilities={capabilities}
     />
   ) : (
     <SettingsRow
@@ -1226,6 +1236,7 @@ export function ProviderInstanceCard({
           className={readOnly ? "opacity-50 select-none" : undefined}
         >
           {runtimeFields}
+          {runtimeExtra}
         </SettingsSection>
       ) : null}
 

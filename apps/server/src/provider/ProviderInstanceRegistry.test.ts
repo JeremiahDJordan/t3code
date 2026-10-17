@@ -39,7 +39,13 @@ import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRunt
 import * as OpenCodeServerLedger from "@t3tools/provider-opencode/server/OpenCodeServerLedger";
 import * as ResetCreditCoordinator from "./resetCreditCoordinator.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistry.ts";
+import {
+  makeProviderInstanceRegistry,
+  ProviderInstanceRegistry,
+} from "./ProviderInstanceRegistry.ts";
+import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as ProviderOrchestrationAdapterInfrastructure from "./ProviderOrchestrationAdapterInfrastructure.ts";
 import * as ProviderHostLive from "./ProviderHostLive.ts";
 
@@ -757,5 +763,42 @@ describe("ProviderInstanceRegistry — all drivers slice", () => {
         `${openCodeDriverKind}:instance:${openCodeId}`,
       );
     }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("ProviderInstanceRegistry — drivers", () => {
+  it.effect("lets a driver look up the other instances, as Bob's Auto reviewer does", () =>
+    Effect.gen(function* () {
+      const seen = new Map<
+        ProviderInstanceId,
+        Option.Option<ProviderInstanceRegistry["Service"]>
+      >();
+      const driverKind = ProviderDriverKind.make("lookup");
+      const { registry } = yield* makeProviderInstanceRegistry({
+        drivers: [
+          {
+            driverKind,
+            metadata: { displayName: "Lookup", supportsMultipleInstances: true },
+            configSchema: Schema.Unknown,
+            defaultConfig: () => ({}),
+            create: ({ instanceId }) =>
+              Effect.gen(function* () {
+                seen.set(instanceId, yield* Effect.serviceOption(ProviderInstanceRegistry));
+                return { instanceId, driverKind } as unknown as ProviderInstance;
+              }),
+          },
+        ],
+        configMap: {
+          [ProviderInstanceId.make("bob")]: { driver: driverKind },
+          [ProviderInstanceId.make("claude")]: { driver: driverKind },
+        } as ProviderInstanceConfigMap,
+      });
+      const fromBob = seen.get(ProviderInstanceId.make("bob"));
+      expect(fromBob !== undefined && Option.isSome(fromBob)).toBe(true);
+      const sibling = yield* Option.getOrThrow(fromBob!).getInstance(
+        ProviderInstanceId.make("claude"),
+      );
+      expect(sibling).toBe(yield* registry.getInstance(ProviderInstanceId.make("claude")));
+    }).pipe(Effect.scoped),
   );
 });

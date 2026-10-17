@@ -15,6 +15,7 @@ import {
   ProviderDriverKind,
   ProviderThreadId,
   type ServerSettings,
+  TextGenerationError,
   ThreadId,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -48,7 +49,12 @@ import * as ProcessRunner from "../../processRunner.ts";
 import { ServerActivation } from "../../serverActivation.ts";
 import * as TmuxServer from "../../tmux/TmuxServer.ts";
 import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeLogging";
-import { type BobAutoJudge, makeBobAutoJudgeForSettings } from "../acp/bobAutoJudge.ts";
+import {
+  type BobAutoJudge,
+  askProviderModel,
+  makeBobAutoJudgeForSettings,
+} from "../acp/bobAutoJudge.ts";
+import * as ProviderInstanceRegistry from "../ProviderInstanceRegistry.ts";
 import {
   type AdoptableBobRelay,
   bobRelayHasTurn,
@@ -287,9 +293,47 @@ export const BobDriver: ProviderDriver<
       // In Auto, the model that judges the tool calls the rules leave to what the user asked.
       const runFork = Effect.runForkWith(yield* Effect.context<never>());
       const judgePlatform = yield* HostProcess.Platform;
+      // A provider's model judges through that instance's text generation, looked up for each
+      // prompt so it follows the instance as it is rebuilt, and a Bob through a Bob of its own.
+      const instances = yield* Effect.serviceOption(
+        ProviderInstanceRegistry.ProviderInstanceRegistry,
+      );
+      const judgeFolder = path.join(host.paths.providerStatusCacheDir, "bob-auto-review");
+      const chosenModel = effectiveConfig.autoReviewModelSelection;
+      const judgeFailed = (cause: unknown) =>
+        new TextGenerationError({
+          operation: "generateJson",
+          detail: "T3 could not ask the reviewer.",
+          cause,
+        });
+      const judgeModel = askProviderModel({
+        selection:
+          chosenModel === undefined
+            ? serverSettings.getSettings.pipe(
+                Effect.map((settings) => settings.textGenerationModelSelection),
+                Effect.mapError(judgeFailed),
+              )
+            : Effect.succeed(chosenModel),
+        getInstance: (instanceId) =>
+          Option.isSome(instances)
+            ? instances.value.getInstance(instanceId)
+            : Effect.succeed(undefined),
+        folder: fileSystem
+          .makeDirectory(judgeFolder, { recursive: true })
+          .pipe(Effect.as(judgeFolder), Effect.mapError(judgeFailed)),
+      });
       const makeJudge = () =>
         makeBobAutoJudgeForSettings({
           settings: effectiveConfig,
+          model: Option.isSome(instances)
+            ? {
+                name:
+                  chosenModel === undefined
+                    ? "the text generation model"
+                    : `${chosenModel.model} (${chosenModel.instanceId})`,
+                ask: judgeModel,
+              }
+            : undefined,
           environment: processEnv,
           cacheDir: host.paths.providerStatusCacheDir,
           platform: judgePlatform,

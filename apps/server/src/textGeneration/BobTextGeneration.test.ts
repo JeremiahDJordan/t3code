@@ -275,6 +275,36 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
     }),
   );
 
+  it.effect("answers T3's own judgements from a Bob of its own in ask mode, in T3's folder", () =>
+    withFakeAcpBob(
+      {
+        mockEnv: {
+          T3_ACP_PROMPT_RESPONSE_TEXT: JSON.stringify({ requested: true, risky: false }),
+        },
+      },
+      (textGeneration, requestLogPath, _argvLogPath, workingFolder) =>
+        Effect.gen(function* () {
+          const answer = yield* textGeneration.generateJson({
+            cwd: process.cwd(),
+            prompt: "Is this call requested?",
+            outputSchema: Schema.Struct({ requested: Schema.Boolean, risky: Schema.Boolean }),
+            modelSelection,
+          });
+          expect(answer).toEqual({ requested: true, risky: false });
+          const requests = readJsonRpcRequests(requestLogPath);
+          expect(requests.find((request) => request.method === "session/new")?.params?.cwd).toBe(
+            workingFolder,
+          );
+          expect(
+            requests
+              .filter((request) => request.method === "session/set_mode")
+              .map((request) => request.params?.modeId),
+          ).toEqual(["ask"]);
+          expect(requests.at(-1)?.method).toBe("session/delete");
+        }),
+    ),
+  );
+
   it.effect("returns the thread title Bob wraps in conversational text", () =>
     withFakeAcpBob(
       {

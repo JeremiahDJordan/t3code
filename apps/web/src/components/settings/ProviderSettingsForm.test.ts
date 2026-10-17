@@ -186,4 +186,21 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(next).toEqual({ experimental: false });
   });
+
+  it("offers Bob's provider-model reviewer only to a server that advertises it", () => {
+    const bob = providerClients.get(ProviderDriverKind.make("bob"));
+    const reviewers = (capabilities?: Readonly<Record<string, unknown>>) =>
+      deriveProviderSettingsFields(bob!, undefined, capabilities)
+        .find((field) => field.key === "autoReviewer")
+        ?.options?.map((option) => option.value);
+
+    // An older fork server rejects the whole Bob config that names "model".
+    expect(reviewers()).toEqual(["apple", "endpoint", "off"]);
+    expect(reviewers({ bobProviderModelReviewer: true })).toEqual([
+      "apple",
+      "endpoint",
+      "model",
+      "off",
+    ]);
+  });
 });

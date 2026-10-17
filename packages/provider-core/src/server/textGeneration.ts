@@ -6,6 +6,7 @@ import type {
   TextGenerationError,
 } from "@t3tools/contracts";
 import type * as Effect from "effect/Effect";
+import type * as Schema from "effect/Schema";
 
 import type { TextGenerationPolicy } from "./textGenerationPolicy.ts";
 
@@ -88,6 +89,17 @@ export interface ReviewGuideGenerationInput {
   modelSelection: ModelSelection;
 }
 
+export interface JsonGenerationInput<T, E> {
+  /** Where the model runs. The prompt carries everything, so a folder with no project in it. */
+  cwd: string;
+  /** Instructions and data together; the model gets no tools. */
+  prompt: string;
+  /** The JSON object the model answers with. */
+  outputSchema: Schema.Codec<T, E>;
+  /** What model and provider to use for generation. */
+  modelSelection: ModelSelection;
+}
+
 export type ReviewGuideGenerationResult = Omit<
   PullRequestReviewGuide,
   "headSha" | "generatedAt" | "modelSelection"
@@ -113,4 +125,9 @@ export interface ProviderTextGeneration {
   readonly generateReviewGuide: (
     input: ReviewGuideGenerationInput,
   ) => Effect.Effect<ReviewGuideGenerationResult, TextGenerationError>;
+
+  /** Answer a prompt that carries everything with one JSON object, for T3's own judgements. */
+  readonly generateJson: <T, E>(
+    input: JsonGenerationInput<T, E>,
+  ) => Effect.Effect<T, TextGenerationError>;
 }
