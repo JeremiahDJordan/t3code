@@ -982,6 +982,17 @@ server explicitly, so it copies itself, first thing in `main.ts`
   (set another in one app's Settings when both serve); Linux's desktop entry and WM class (the
   fork builds no Linux desktop app); and `~/.t3` on SSH and WSL hosts, where the desktop runs
   upstream's server.
+- **Before shipping a Linux desktop package**, rename these together, or Z6 and T3 replace each
+  other's files and windows group as one app: the executable and WM class `t3code`
+  (`build-desktop-artifact.ts`'s `executableName` and `StartupWMClass`, `linuxWmClass` in
+  `DesktopEnvironment.ts` and `DesktopEarlyElectronStartup.ts`), the desktop entry
+  `com.t3tools.T3Code.desktop` (`resolveLinuxDesktopEntryName`), the AppStream id and file
+  `com.t3tools.t3code.metainfo.xml` (`apps/desktop/resources/linux/`), the package's maintainer
+  and homepage, the GNOME extension's uuid `snap-shot@t3.codes` and name (`gnome-extension/`
+  `metadata.json` and `bundle.json`) with its D-Bus names (`com.t3tools.T3Code.SnapShot` in
+  `captureService.js`), and the KDE capture entry and D-Bus names (`KdeSnapShot.ts`,
+  `linuxCaptureSession.ts`, `native/kde-snap-shot`). The guard's Linux allowances
+  (`scripts/upstream-services.test.ts`) go with them.
 - **Removing T3's folders** (`packages/shared/src/t3DataCleanup.ts`). The desktop asks once, after
   the start that copied (Keep, or Move to Trash), and Settings → General shows the old folders with
   **Move to Trash** while they remain; servers have `t3 t3-data status` and `t3 t3-data remove`.
