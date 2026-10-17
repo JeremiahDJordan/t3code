@@ -82,7 +82,7 @@ const removeCommand = Command.make("remove", {
   ),
 }).pipe(
   Command.withDescription(
-    "Move the T3 Code folders Z6 Code was copied from to the Trash. Worktrees Z6 still uses, or with uncommitted changes, are kept.",
+    "Move the T3 Code folders Z6 Code was copied from to the Trash. Anything Z6 Code still uses, and work in T3's worktrees, scratch and projects folders that is not a clean git checkout, is kept.",
   ),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
@@ -96,7 +96,7 @@ const removeCommand = Command.make("remove", {
       yield* Console.log("This moves to the Trash:");
       for (const location of state.locations) yield* Console.log(`  ${location.path}`);
       yield* Console.log(
-        "T3 Code starts empty afterwards. Worktrees Z6 Code still uses, or with uncommitted changes, are kept.",
+        "T3 Code starts empty afterwards. Anything Z6 Code still uses is kept, and so is work in T3's worktrees, scratch and projects folders that is not a clean git checkout.",
       );
       if (!flags.yes) {
         if (!(process.stdin.isTTY && process.stdout.isTTY)) {
@@ -130,6 +130,11 @@ const removeCommand = Command.make("remove", {
       if (result.status === "refused") return yield* new CliT3DataError({ reason: result.reason });
       for (const removed of result.removed) yield* Console.log(`Moved to the Trash: ${removed}`);
       for (const kept of result.kept) yield* Console.log(`Kept ${kept.path}: ${kept.reason}`);
+      if ((result.trashedCheckouts ?? []).length > 0) {
+        yield* Console.log(
+          "Git still lists the trashed checkouts as worktrees; `git worktree prune` in their repository forgets them once the Trash is emptied.",
+        );
+      }
     }),
   ),
 );

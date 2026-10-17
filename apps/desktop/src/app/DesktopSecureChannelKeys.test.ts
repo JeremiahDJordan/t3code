@@ -13,7 +13,11 @@ import * as DesktopSecureChannelKeys from "./DesktopSecureChannelKeys.ts";
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-function layerFor(baseDir: string, encryptionAvailable: boolean | (() => boolean)) {
+function layerFor(
+  baseDir: string,
+  encryptionAvailable: boolean | (() => boolean),
+  decryptFails: () => boolean = () => false,
+) {
   const environment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
     homeDirectory: baseDir,
@@ -34,7 +38,14 @@ function layerFor(baseDir: string, encryptionAvailable: boolean | (() => boolean
       typeof encryptionAvailable === "function" ? encryptionAvailable() : encryptionAvailable,
     ),
     encryptString: (value) => Effect.succeed(textEncoder.encode(`sealed:${value}`)),
-    decryptString: (value) => Effect.succeed(textDecoder.decode(value).slice("sealed:".length)),
+    decryptString: (value) =>
+      decryptFails()
+        ? Effect.fail(
+            new ElectronSafeStorage.ElectronSafeStorageDecryptError({
+              cause: new Error("the keychain denied the key"),
+            }),
+          )
+        : Effect.succeed(textDecoder.decode(value).slice("sealed:".length)),
     selectedStorageBackend: Effect.succeedNone,
   } satisfies ElectronSafeStorage.ElectronSafeStorage["Service"]);
   return DesktopSecureChannelKeys.layer.pipe(
@@ -119,6 +130,28 @@ describe("DesktopSecureChannelKeys", () => {
           const key = yield* keyFor("route");
           assert.strictEqual(Buffer.from(key, "base64url").length, 32);
         }).pipe(Effect.provide(layerFor(baseDir, () => unlocked)));
+      }),
+    ),
+  );
+
+  it.effect("never replaces a master secret it cannot decrypt, such as one copied from T3", () =>
+    withTempDir((baseDir) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const first = yield* launches(baseDir)(keyFor("route"));
+        const masterPath = path.join(baseDir, "userdata", "secure-channel-keys.json");
+        const saved = yield* fileSystem.readFileString(masterPath);
+
+        let denied = true;
+        yield* Effect.gen(function* () {
+          const failure = yield* Effect.flip(keyFor("route"));
+          assert.include(failure.message, "decrypt");
+          assert.strictEqual(yield* fileSystem.readFileString(masterPath), saved);
+          // Allowed again within the launch, the same key comes back.
+          denied = false;
+          assert.strictEqual(yield* keyFor("route"), first);
+        }).pipe(Effect.provide(layerFor(baseDir, true, () => denied)));
       }),
     ),
   );

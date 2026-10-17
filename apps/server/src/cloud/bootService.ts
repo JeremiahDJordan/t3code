@@ -13,6 +13,7 @@ import { HttpClient } from "effect/http";
 import * as Schema from "effect/Schema";
 
 import { CLI_RELEASE_BASE_URL_ENV } from "@t3tools/shared/cliRelease";
+import { T3_SERVICE_LAUNCHD_LABEL, T3_SERVICE_SYSTEMD_UNIT } from "@t3tools/shared/t3DataMigration";
 
 import * as ProcessRunner from "../processRunner.ts";
 import {
@@ -40,6 +41,23 @@ const BOOT_SERVICE_UNIT_FILE = `${BOOT_SERVICE_NAME}.service`;
 const BOOT_SERVICE_LAUNCHD_LABEL = "org.zanson.z6code.service";
 const BOOT_SERVICE_PLIST_FILE = `${BOOT_SERVICE_LAUNCHD_LABEL}.plist`;
 const BOOT_SERVICE_UNIT_ENV = "T3_BOOT_SERVICE_UNIT";
+
+interface ServiceNames {
+  readonly unitFile: string;
+  readonly launchdLabel: string;
+}
+const Z6_SERVICE_NAMES: ServiceNames = {
+  unitFile: BOOT_SERVICE_UNIT_FILE,
+  launchdLabel: BOOT_SERVICE_LAUNCHD_LABEL,
+};
+/**
+ * T3 Code's service, which the fork's builds before Z6 Code had its own data installed too. It
+ * runs a server on `~/.t3`; only `service uninstall --t3` removes it.
+ */
+const T3_SERVICE_NAMES: ServiceNames = {
+  unitFile: T3_SERVICE_SYSTEMD_UNIT,
+  launchdLabel: T3_SERVICE_LAUNCHD_LABEL,
+};
 export const BOOT_SERVICE_LOG_FILE = "boot-service.log";
 
 /** systemd expands `%` specifiers, including in unquoted append-log paths. */
@@ -214,14 +232,10 @@ export interface BootServiceManager {
 function systemdManager(input: {
   readonly path: Path.Path;
   readonly homeDir: string;
+  readonly names: ServiceNames;
 }): BootServiceManager {
-  const unitPath = input.path.join(
-    input.homeDir,
-    ".config",
-    "systemd",
-    "user",
-    BOOT_SERVICE_UNIT_FILE,
-  );
+  const unitFile = input.names.unitFile;
+  const unitPath = input.path.join(input.homeDir, ".config", "systemd", "user", unitFile);
   return {
     kind: "systemd",
     unitPath,
@@ -230,7 +244,7 @@ function systemdManager(input: {
       {
         step: "stopping the installed service",
         command: "systemctl",
-        args: ["--user", "stop", BOOT_SERVICE_UNIT_FILE],
+        args: ["--user", "stop", unitFile],
         timeout: STOP_STEP_TIMEOUT,
       },
     ],
@@ -243,26 +257,26 @@ function systemdManager(input: {
       {
         step: "enabling the service",
         command: "systemctl",
-        args: ["--user", "enable", BOOT_SERVICE_UNIT_FILE],
+        args: ["--user", "enable", unitFile],
       },
       {
         step: "starting the service",
         command: "systemctl",
-        args: ["--user", "restart", BOOT_SERVICE_UNIT_FILE],
+        args: ["--user", "restart", unitFile],
       },
     ],
     restart: [
       {
         step: "restarting the service after a failed update",
         command: "systemctl",
-        args: ["--user", "restart", BOOT_SERVICE_UNIT_FILE],
+        args: ["--user", "restart", unitFile],
       },
     ],
     deactivate: [
       {
         step: "stopping the service",
         command: "systemctl",
-        args: ["--user", "disable", "--now", BOOT_SERVICE_UNIT_FILE],
+        args: ["--user", "disable", "--now", unitFile],
         timeout: STOP_STEP_TIMEOUT,
       },
     ],
@@ -281,15 +295,16 @@ function launchdManager(input: {
   readonly homeDir: string;
   readonly uid: number;
   readonly environmentPath: string;
+  readonly names: ServiceNames;
 }): BootServiceManager {
   const unitPath = input.path.join(
     input.homeDir,
     "Library",
     "LaunchAgents",
-    BOOT_SERVICE_PLIST_FILE,
+    `${input.names.launchdLabel}.plist`,
   );
   const domainTarget = `gui/${input.uid}`;
-  const serviceTarget = `${domainTarget}/${BOOT_SERVICE_LAUNCHD_LABEL}`;
+  const serviceTarget = `${domainTarget}/${input.names.launchdLabel}`;
   // bootout/enable are optional: they fail on not-loaded states that are fine
   // to proceed from. The strict `bootstrap` runs last and is also the start:
   // loading a RunAtLoad/KeepAlive plist starts the job, so a separate kickstart
@@ -357,12 +372,13 @@ function selectBootServiceManager(input: {
   readonly uid: number | undefined;
   readonly path: Path.Path;
   readonly environmentPath: string;
+  readonly names: ServiceNames;
 }): BootServiceManager | undefined {
   if (input.homeDir === "") {
     return undefined;
   }
   if (input.platform === "linux") {
-    return systemdManager({ path: input.path, homeDir: input.homeDir });
+    return systemdManager({ path: input.path, homeDir: input.homeDir, names: input.names });
   }
   if (input.platform === "darwin" && input.uid !== undefined) {
     return launchdManager({
@@ -370,6 +386,7 @@ function selectBootServiceManager(input: {
       homeDir: input.homeDir,
       uid: input.uid,
       environmentPath: input.environmentPath,
+      names: input.names,
     });
   }
   return undefined;
@@ -510,6 +527,12 @@ export class BootService extends Context.Service<
       operation: Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | BootServiceError, R>;
     readonly uninstall: Effect.Effect<boolean, BootServiceError>;
+    /**
+     * Stop and remove T3 Code's service (`com.t3tools.t3code.service`, `t3code.service`), which
+     * older fork builds also installed. Only on the user's explicit command: the name is
+     * upstream's own too. Resolves false when it is not installed.
+     */
+    readonly uninstallT3Service: Effect.Effect<boolean, BootServiceError>;
     readonly status: Effect.Effect<BootServiceStatus, BootServiceError>;
   }
 >()("t3/cloud/bootService") {}
@@ -565,6 +588,15 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     uid,
     path,
     environmentPath,
+    names: Z6_SERVICE_NAMES,
+  });
+  const t3Manager = selectBootServiceManager({
+    platform,
+    homeDir,
+    uid,
+    path,
+    environmentPath,
+    names: T3_SERVICE_NAMES,
   });
   const unitPath = detectedManager?.unitPath ?? "";
   const logPath = path.join(input.logsDir, BOOT_SERVICE_LOG_FILE);
@@ -937,21 +969,31 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
       );
     }).pipe(Effect.withSpan("cloud.boot_service.with_stopped"));
 
-  const uninstall: BootService["Service"]["uninstall"] = Effect.gen(function* () {
-    const manager = yield* requireManager;
-    if (
-      !(yield* fs
-        .exists(unitPath)
-        .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause }))))
-    )
-      return false;
-    yield* runSteps(manager.deactivate);
-    yield* fs
-      .remove(unitPath)
-      .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
-    yield* runSteps(manager.finalize);
-    return true;
-  }).pipe(Effect.withSpan("cloud.boot_service.uninstall"));
+  const uninstallWith = (manager: BootServiceManager) =>
+    Effect.gen(function* () {
+      if (
+        !(yield* fs
+          .exists(manager.unitPath)
+          .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause }))))
+      )
+        return false;
+      yield* runSteps(manager.deactivate);
+      yield* fs
+        .remove(manager.unitPath)
+        .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
+      yield* runSteps(manager.finalize);
+      return true;
+    });
+
+  const uninstall: BootService["Service"]["uninstall"] = requireManager.pipe(
+    Effect.flatMap(uninstallWith),
+    Effect.withSpan("cloud.boot_service.uninstall"),
+  );
+
+  const uninstallT3Service: BootService["Service"]["uninstallT3Service"] = Effect.gen(function* () {
+    if (t3Manager === undefined) return yield* new BootServiceUnsupportedError({ platform });
+    return yield* uninstallWith(t3Manager);
+  }).pipe(Effect.withSpan("cloud.boot_service.uninstall_t3_service"));
 
   const status: BootService["Service"]["status"] = Effect.gen(function* () {
     if (detectedManager === undefined) {
@@ -1000,7 +1042,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     Effect.withSpan("cloud.boot_service.status"),
   );
 
-  return BootService.of({ install, restart, withStopped, uninstall, status });
+  return BootService.of({ install, restart, withStopped, uninstall, uninstallT3Service, status });
 });
 
 export const layer = (input: {

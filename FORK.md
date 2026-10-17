@@ -845,32 +845,66 @@ server and CLI built from this branch) use `~/.z6` for the server home and `z6co
 desktop's Electron profile, against T3's `~/.t3` and `t3code-v2`; the names live in
 `packages/shared/src/t3DataMigration.ts`. The first start that finds a Z6 location missing copies
 T3's into it (`migrateHomeFromT3`, `migrateDesktopUserDataFromT3`), then neither app reads the
-other's folders. The server copies in `resolveBaseDir`'s default branch (`os-jank.ts`), so `serve`
-and every CLI command get it; the desktop passes its home to its server explicitly, so it copies
-itself, first thing in `main.ts` (`DesktopT3Data.migrateOnFirstStart`). An explicit `T3CODE_HOME`
-or `--base-dir`, dev state (`--dev-url`, a worktree's `.t3`) and `t3 app` never copy.
+other's folders, except the work folders below. The server copies in `resolveBaseDir`'s default
+branch (`os-jank.ts`), so `serve` and every CLI command get it; the desktop passes its home to its
+server explicitly, so it copies itself, first thing in `main.ts`
+(`DesktopT3Data.migrateOnFirstStart`). An explicit `T3CODE_HOME` or `--base-dir`, dev state
+(`--dev-url`, a worktree's `.t3`), `t3 app` and `service uninstall --t3` never copy.
 
-- The copy is staged beside the destination and renamed into place, so a crash never leaves a
-  half copy that later starts count as done. Each SQLite file is snapshot with `VACUUM INTO` from
-  a read-only connection (`immutable` when it has no journal, so no `-wal`/`-shm` appear beside
-  T3's). Nothing under T3's folders is written.
-- It refuses while T3 Code runs on the source: a server holding `server-owner.sqlite`'s lock (or a
-  live pre-lock `server-runtime.json`), or a T3 desktop whose `SingletonLock` names a live pid.
-  Copied mid-turn, T3's interrupted runs would continue in both apps (restart continuation). The
-  desktop shows why and quits; the CLI fails with the same message. Nothing is created, so the
-  next start tries again.
-- Left out: `worktrees/` (git records their absolute paths, so the copied threads keep using them
-  under `~/.t3/worktrees`), `runtime/`, `tools/`, `caches/`, `source/`, `bin/`, `dev/`, logs,
-  sockets and lock or pid files, `environment-id` and `anonymous-id`, and the T3 Connect and
-  tunnel secrets (`secrets/cloud-*`, `secrets/secure-channel-x25519`). Z6 is a separate
-  environment: with T3's id, clients would merge the two servers into one entry and the relay
-  would hand one tunnel to both. So phones and browsers pair with Z6 again, and `connect link`
-  runs again for T3 Connect. Chromium's caches and `Singleton*` files stay out of the profile
-  copy. `migrated-from-t3.json` in each copy records the source, the time and what was left out.
+- **Work folders stay in place** (owner's rule): folders T3 Code made for the user's work are
+  never copied. `worktrees/`, `scratch/` and `projects/` (`ManagedProjectFolders.ts`) stay under
+  `~/.t3`, and the copied database keeps pointing at them there. The marker's `leftInPlace` lists
+  them.
+- **Nothing under T3's folders is written.** The copy is staged beside the destination and
+  renamed into place, so a crash never leaves a half copy that later starts count as done. T3's
+  own databases (SQLite files directly in `userdata/`) are copied raw, with their `-wal`, `-shm`
+  and `-journal`, into the staging folder and snapshot from that copy with `VACUUM INTO`: opening
+  T3's file itself, even read-only, writes read marks into its `-shm` or creates one. Every other
+  file, SQLite or not (Chromium's stores, a project's `.db`), is copied raw. The in-use probe
+  opens `server-owner.sqlite`, a rollback-journal file, read-only, which writes nothing. Tests
+  check T3's folder byte for byte, including a database with a `-wal` and no `-shm`. Folders are
+  created owner-writable and get their source modes just before the rename, so read-only source
+  folders copy and a failed copy can always be removed.
+- **Unreadable files, per class.** In the home, anything under `userdata/` (databases, secrets,
+  settings, terminal history) that cannot be copied fails the whole copy, naming the file and
+  what to do (`chmod u+r`, or `PRAGMA integrity_check` for a database): losing a secret silently
+  is worse than not starting. Anything else that cannot be read is left out and recorded in the
+  marker's `skipped`. In the desktop profile the same holds for T3's own top-level files (saved
+  connections and keys); Chromium's stores below are left out and recorded. A full disk or a
+  read-only destination always fails.
+- **It refuses while T3 Code runs on the source:** a server holding `server-owner.sqlite`'s lock
+  (or a live pre-lock `server-runtime.json`), or a T3 desktop whose `SingletonLock` names a live
+  pid. Copied mid-turn, T3's interrupted runs would continue in both apps (restart continuation).
+  The check runs again right before the rename, and a T3 Code that started during the copy
+  discards it. The desktop shows why and quits (`app.exit` then `process.exit`, so the log writer
+  never creates `~/.z6/userdata/logs`, which later starts would take for a finished copy); the
+  CLI fails with the same message. Nothing is created, so the next start tries again.
+- **T3's background service.** The fork's builds before this change installed their service as
+  `com.t3tools.t3code.service` (systemd `t3code.service`) with `T3CODE_HOME=~/.t3` and KeepAlive,
+  the same names as upstream's own. It keeps a T3 server running, so the copy refuses on every
+  start. When one is installed, the refusal and the cleanup's refusal (`describeT3Service`) say so
+  and give the exact commands: `z6 service uninstall --t3` (`t3 service uninstall --t3` with the
+  fork's server CLI), or `launchctl bootout` / `systemctl --user disable --now` plus `rm` of the
+  unit. Since the names are upstream's too, only that explicit command removes it
+  (`BootService.uninstallT3Service`); `--t3` resolves the home without copying, so it works while
+  the copy refuses.
+- Left out: `runtime/`, `tools/`, `caches/`, `source/`, `bin/`, `dev/`, T3's logs except terminal
+  history (`userdata/logs/terminals`, which is copied), sockets and lock or pid files,
+  `environment-id` and `anonymous-id`, and the T3 Connect and tunnel secrets (`secrets/cloud-*`,
+  `secrets/secure-channel-x25519`). Z6 is a separate environment: with T3's id, clients would
+  merge the two servers into one entry and the relay would hand one tunnel to both. So phones and
+  browsers pair with Z6 again, and `connect link` runs again for T3 Connect. Chromium's caches
+  and `Singleton*` files stay out of the profile copy. `migrated-from-t3.json` in each copy
+  records the source, the time, what was left out and why, the work folders left in place, and
+  copied absolute symlinks that still point into the source (`linksIntoSource`).
 - **Shared keychain key.** The staged package name stays `t3code`, so both apps use the
   `t3code Safe Storage` key, and the copied safeStorage files (`connection-catalog.json`,
   `secure-channel-keys.json`, `saved-environments.json`) still decrypt. A new name would give Z6
-  a new key and lose the saved connections. macOS may ask once whether Z6 may use the key.
+  a new key and lose the saved connections. macOS may ask once whether Z6 may use the key. If it
+  is denied, nothing copied is lost: a catalog or route secret that does not decrypt fails to
+  load and stays on disk as it is, and saving a catalog refuses while the one on disk cannot be
+  decrypted (`DesktopConnectionCatalogStore.set`), so an empty catalog never replaces it. With
+  secure storage unavailable, nothing is saved at all.
 - Made distinct for running side by side: the bundle id (`org.zanson.z6code` in
   `build-desktop-artifact.ts`, `install-desktop-macos.sh`, and the Windows app user model id),
   the Electron profile, and with it Chromium's single-instance lock, the desktop's CLI command
@@ -892,14 +926,25 @@ or `--base-dir`, dev state (`--dev-url`, a worktree's `.t3`) and `t3 app` never 
 - **Removing T3's folders** (`packages/shared/src/t3DataCleanup.ts`). The desktop asks once, after
   the start that copied (Keep, or Move to Trash), and Settings → General shows the old folders with
   **Move to Trash** while they remain; servers have `t3 t3-data status` and `t3 t3-data remove`.
-  Removal refuses while T3 Code or a T3 server runs on those folders, or T3's background service
-  is installed.
-  It keeps every `~/.t3/worktrees` checkout that Z6's database uses (a thread's `worktreePath`,
-  archived threads included, or a project root), has uncommitted changes, or git cannot check,
-  and keeps everything when Z6's database cannot be read. The rest goes to the Trash (Electron's
-  `shell.trashItem`, macOS's `trash`, or the XDG trash), never deleted outright, and git prunes
-  the trashed worktrees. It reports what moved and what stayed and why, and records it in the
-  markers.
+  It refuses, removing nothing, while T3 Code or a T3 server runs on those folders, while T3's
+  background service is installed, and while Z6's database is missing, unreadable or not yet at
+  the V2 schema (only V1 `state.sqlite`, or no V2 projection tables), saying why.
+  It protects every path Z6 refers to inside the T3 home: it reads every string that looks like
+  a path from every table of Z6's database except the event and receipt logs (conversation tables
+  only where a row names T3's folder), skipping rows marked deleted, so thread worktrees
+  (archived threads included), project roots and any other stored path count, plus paths in
+  Z6's settings files (such as a worktrees folder in `~/.t3`). Paths compare through symlinks
+  (`/tmp` and `/private/tmp`) and without case where the disk ignores case. A protected path and
+  every folder above it stay, a git checkout is never split, and only the unprotected siblings
+  go, so a referenced folder without `.git` is kept too. In `worktrees/`, `scratch/` and
+  `projects/` only clean, unreferenced git checkouts and empty folders go; a checkout with
+  uncommitted changes or one git cannot check, and loose files, stay as possibly the user's
+  work. Everything else in the home is T3's own and goes. Items go to the Trash (Electron's
+  `shell.trashItem`, macOS's `trash`, or the XDG trash), never deleted outright. It does not run
+  `git worktree prune`, which would also forget unrelated worktrees (one on an unmounted drive,
+  say); the record's `trashedCheckouts` names the checkouts git still lists. It reports what
+  moved and what stayed and why, and records it in the markers. A later run removes what has
+  stopped being protected.
 - `scripts/install-desktop-macos.sh` also quits an older build at the same path that still has
   T3's bundle id, since it holds `~/.t3` and would block the copy. The same-bundle-id check names
   only earlier Z6 copies now; T3 Code itself may stay.

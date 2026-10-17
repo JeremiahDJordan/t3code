@@ -20,6 +20,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
@@ -385,6 +386,8 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const savedEnvironments = yield* DesktopSavedEnvironments.DesktopSavedEnvironments;
   const catalogPath = path.join(environment.stateDir, "connection-catalog.json");
+  // Set once the file on disk was decrypted, or replaced by one this app wrote.
+  const existingCatalogReadable = yield* Ref.make(false);
   const encryptionAvailable = safeStorage.isEncryptionAvailable.pipe(
     Effect.mapError(
       (cause) =>
@@ -494,11 +497,38 @@ export const make = Effect.gen(function* () {
           ),
         ),
       );
+      yield* Ref.set(existingCatalogReadable, true);
       return Option.some(decrypted);
     }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
       if (!(yield* encryptionAvailable)) {
         return false;
+      }
+      // A catalog this app cannot decrypt, such as one copied from T3 Code while the keychain
+      // denies the shared key, is the user's saved connections; never replace it with one that
+      // started empty. It stays as it is until the keychain allows the key again.
+      if (!(yield* Ref.get(existingCatalogReadable))) {
+        yield* readDocument(fileSystem, catalogPath).pipe(
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.void,
+              onSome: (document) =>
+                decodeSecretBytes(catalogPath, document.encryptedCatalog).pipe(
+                  Effect.flatMap(safeStorage.decryptString),
+                  Effect.asVoid,
+                ),
+            }),
+          ),
+          Effect.mapError(
+            (cause) =>
+              new DesktopConnectionCatalogStoreProtectionError({
+                operation: "decrypt-catalog",
+                catalogPath,
+                cause,
+              }),
+          ),
+        );
+        yield* Ref.set(existingCatalogReadable, true);
       }
       yield* writeCatalog(catalog);
       return true;

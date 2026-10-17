@@ -118,6 +118,7 @@ function makeTestService(serviceStatus: BootService.BootServiceStatus) {
         };
       }),
     uninstall: Effect.succeed(false),
+    uninstallT3Service: Effect.succeed(false),
   });
   return { service, installOptions, restarts };
 }
@@ -143,6 +144,36 @@ it.layer(Layer.mergeAll(NodeServices.layer, NetService.layer))("service commands
 
       expect(restarts).toEqual([true]);
       expect(installOptions).toEqual([]);
+    }),
+  );
+
+  it.effect.each([
+    { args: ["uninstall"], removed: ["z6"] },
+    { args: ["uninstall", "--t3"], removed: ["t3"] },
+  ])("uninstall $args removes only the service it names", ({ args, removed }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-cli-test-" });
+      const calls: Array<string> = [];
+      const service = BootService.BootService.of({
+        ...makeTestService(status).service,
+        uninstall: Effect.sync(() => calls.push("z6") > 0),
+        uninstallT3Service: Effect.sync(() => calls.push("t3") > 0),
+      });
+      vi.spyOn(BootService, "layer").mockReturnValue(
+        Layer.succeed(BootService.BootService, service),
+      );
+
+      yield* Command.runWith(serviceCommand, { version: packageJson.version })([
+        ...args,
+        "--base-dir",
+        baseDir,
+      ]).pipe(
+        Effect.provideService(HostProcess.Environment, {}),
+        Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+      );
+
+      expect(calls).toEqual(removed);
     }),
   );
 

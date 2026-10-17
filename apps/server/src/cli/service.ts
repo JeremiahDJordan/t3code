@@ -2,6 +2,8 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Terminal from "effect/Terminal";
 import { Command, Flag, GlobalFlag, Prompt } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
@@ -10,6 +12,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import * as BootService from "../cloud/bootService.ts";
 import { compareExactServiceVersions } from "../cloud/serviceProtocol.ts";
 import type * as ServerConfig from "../config.ts";
+import { resolveBaseDir } from "../os-jank.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -178,19 +181,53 @@ const serviceRestartCommand = Command.make("restart", projectLocationFlags).pipe
   ),
 );
 
-const serviceUninstallCommand = Command.make("uninstall", projectLocationFlags).pipe(
+const serviceUninstallCommand = Command.make("uninstall", {
+  ...projectLocationFlags,
+  t3: Flag.Boolean("t3").pipe(
+    Flag.withDescription(
+      "Remove T3 Code's background service (com.t3tools.t3code.service, or t3code.service on Linux) instead of this one. Older builds of this fork installed it under that name; it keeps a server running on ~/.t3. If T3 Code itself installed it, T3 Code's `t3 service install` sets it up again.",
+    ),
+    Flag.withDefault(false),
+  ),
+}).pipe(
   Command.withDescription("Stop and remove the T3 Code background service."),
   Command.withHandler((flags) =>
-    runServiceCommand(
-      flags,
-      Effect.gen(function* () {
-        const service = yield* BootService.BootService;
-        const removed = yield* service.uninstall;
-        yield* Console.log(
-          removed ? "Removed the T3 Code service." : "T3 Code service is not installed.",
-        );
-      }),
-    ),
+    flags.t3
+      ? // T3's service keeps T3's data in use, which makes the first-start copy refuse, so
+        // removing it must not need that copy: resolve the home without copying.
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const env = yield* HostProcess.Environment;
+          const baseDir = yield* resolveBaseDir(
+            Option.getOrUndefined(flags.baseDir) ?? env.T3CODE_HOME,
+            { migrateFromT3: false },
+          );
+          const removed = yield* BootService.BootService.pipe(
+            Effect.flatMap((service) => service.uninstallT3Service),
+            Effect.provide(
+              BootService.layer({
+                baseDir,
+                logsDir: path.join(baseDir, "userdata", "logs"),
+                cliVersion: packageJson.version,
+              }).pipe(Layer.provide(ProcessRunner.layer), Layer.provide(FetchHttpClient.layer)),
+            ),
+          );
+          yield* Console.log(
+            removed
+              ? "Removed T3 Code's background service (com.t3tools.t3code.service). It no longer keeps a server running on ~/.t3."
+              : "T3 Code's background service is not installed.",
+          );
+        })
+      : runServiceCommand(
+          flags,
+          Effect.gen(function* () {
+            const service = yield* BootService.BootService;
+            const removed = yield* service.uninstall;
+            yield* Console.log(
+              removed ? "Removed the T3 Code service." : "T3 Code service is not installed.",
+            );
+          }),
+        ),
   ),
 );
 

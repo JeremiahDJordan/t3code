@@ -440,4 +440,74 @@ describe("DesktopConnectionCatalogStore", () => {
       assert.deepStrictEqual(yield* store.get, Option.some('{"schemaVersion":1,"targets":[]}'));
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
+
+  it.effect("never replaces a catalog it cannot decrypt, such as one copied from T3 Code", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-connection-catalog-test-",
+      });
+      const catalogPath = path.join(baseDir, "userdata", "connection-catalog.json");
+      const failDecrypt = yield* Ref.make(false);
+      const launch = <A, E>(
+        use: Effect.Effect<A, E, DesktopConnectionCatalogStore.DesktopConnectionCatalogStore>,
+      ) => use.pipe(Effect.provide(layerFor(baseDir, true, failDecrypt)));
+      const store = DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+      const saved = '{"schemaVersion":1,"targets":["saved"]}';
+      assert.isTrue(yield* launch(store.pipe(Effect.flatMap((s) => s.set(saved)))));
+      const copied = yield* fileSystem.readFileString(catalogPath);
+
+      // The keychain denies the shared key on this launch.
+      yield* Ref.set(failDecrypt, true);
+      const error = yield* launch(
+        store.pipe(Effect.flatMap((s) => s.set('{"schemaVersion":1,"targets":[]}'))),
+      ).pipe(Effect.flip);
+      assert.instanceOf(
+        error,
+        DesktopConnectionCatalogStore.DesktopConnectionCatalogStoreProtectionError,
+      );
+      assert.equal(yield* fileSystem.readFileString(catalogPath), copied);
+
+      // Once the key is allowed again, the copied catalog is all there.
+      yield* Ref.set(failDecrypt, false);
+      assert.deepStrictEqual(
+        yield* launch(store.pipe(Effect.flatMap((s) => s.get))),
+        Option.some(saved),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("leaves a copied catalog alone while secure storage is unavailable", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-connection-catalog-test-",
+      });
+      const catalogPath = path.join(baseDir, "userdata", "connection-catalog.json");
+      const store = DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+      yield* store.pipe(
+        Effect.flatMap((s) => s.set('{"schemaVersion":1,"targets":["saved"]}')),
+        Effect.provide(layerFor(baseDir, true)),
+      );
+      const copied = yield* fileSystem.readFileString(catalogPath);
+
+      const unavailable = layerFor(baseDir, false);
+      assert.deepStrictEqual(
+        yield* store.pipe(
+          Effect.flatMap((s) => s.get),
+          Effect.provide(unavailable),
+        ),
+        Option.none(),
+      );
+      assert.isFalse(
+        yield* store.pipe(
+          Effect.flatMap((s) => s.set("{}")),
+          Effect.provide(unavailable),
+        ),
+      );
+      assert.equal(yield* fileSystem.readFileString(catalogPath), copied);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 });

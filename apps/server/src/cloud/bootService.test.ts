@@ -242,7 +242,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       ),
     );
   const service = yield* makeService();
-  return { service, makeService, fs, statePath, commands, timeouts, control, runtime };
+  return { service, makeService, fs, home, statePath, commands, timeouts, control, runtime };
 });
 
 it.layer(NodeServices.layer)("boot service install", (it) => {
@@ -774,6 +774,40 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       expect(timeouts.get("launchctl bootout --wait gui/501/org.zanson.z6code.service")).toEqual(
         Duration.seconds(120),
       );
+    }),
+  );
+
+  it.effect.each([
+    {
+      platform: "darwin" as const,
+      unit: ["Library", "LaunchAgents", "com.t3tools.t3code.service.plist"],
+      stops: ["launchctl bootout --wait gui/501/com.t3tools.t3code.service"],
+    },
+    {
+      platform: "linux" as const,
+      unit: [".config", "systemd", "user", "t3code.service"],
+      stops: ["systemctl --user disable --now t3code.service", "systemctl --user daemon-reload"],
+    },
+  ])("removes T3 Code's older service only when asked, on $platform", ({ platform, unit, stops }) =>
+    Effect.gen(function* () {
+      const { service, fs, home, commands } = yield* makeHarness(platform);
+      const path = yield* Path.Path;
+      const plan = yield* service.install();
+      const t3Unit = path.join(home, ...unit);
+      yield* fs.makeDirectory(path.dirname(t3Unit), { recursive: true });
+      yield* fs.writeFileString(t3Unit, "T3CODE_HOME=~/.t3\n");
+
+      // Z6's own uninstall leaves T3's service alone.
+      expect(yield* service.uninstall).toBe(true);
+      expect(yield* fs.exists(t3Unit)).toBe(true);
+      yield* service.install();
+      commands.length = 0;
+
+      expect(yield* service.uninstallT3Service).toBe(true);
+      expect(yield* fs.exists(t3Unit)).toBe(false);
+      expect(yield* fs.exists(plan.unitPath)).toBe(true);
+      expect(commands.filter((command) => !command.includes("show-environment"))).toEqual(stops);
+      expect(yield* service.uninstallT3Service).toBe(false);
     }),
   );
 

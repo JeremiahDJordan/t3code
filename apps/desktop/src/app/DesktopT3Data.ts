@@ -58,6 +58,9 @@ export function migrateOnFirstStart(): void {
       error instanceof Error ? error.message : String(error),
     );
     Electron.app.exit(1);
+    // `app.exit` before ready may return and let startup go on; the log writer would then
+    // create `~/.z6/userdata/logs`, and later starts would take that for a finished copy.
+    process.exit(1);
   }
 }
 
@@ -91,7 +94,14 @@ export const make = Effect.gen(function* () {
   const state = readState.pipe(
     Effect.map((current): DesktopT3DataState => ({
       locations: current.locations.map(({ kind, path }) => ({ kind, path })),
-      lastCleanup: current.lastCleanup ?? null,
+      lastCleanup:
+        current.lastCleanup === undefined
+          ? null
+          : {
+              at: current.lastCleanup.at,
+              removed: current.lastCleanup.removed,
+              kept: current.lastCleanup.kept,
+            },
     })),
   );
 
@@ -159,7 +169,7 @@ export const make = Effect.gen(function* () {
             (location) => `${location.path} (${describeKind(location.kind)})`,
           ),
           "",
-          "T3 Code will start empty afterwards. Worktrees Z6 Code still uses, or with uncommitted changes, are kept.",
+          "T3 Code will start empty afterwards. Anything Z6 Code still uses is kept, and so is work in T3's worktrees, scratch and projects folders that is not a clean git checkout.",
         ].join("\n"),
       })
       .pipe(Effect.orElseSucceed(() => ({ response: 0, checkboxChecked: false })));
