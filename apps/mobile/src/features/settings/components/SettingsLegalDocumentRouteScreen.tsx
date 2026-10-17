@@ -34,9 +34,11 @@ export function SettingsLegalDocumentCloseHeaderButton() {
 export function SettingsLegalDocumentExternalHeaderButton({
   externalUrl = LEGAL_URL,
 }: {
-  readonly externalUrl?: string;
+  readonly externalUrl?: string | null;
 }) {
-  const safeExternalUrl = isLegalDocumentUrl(externalUrl) ? externalUrl : LEGAL_URL;
+  const safeExternalUrl = externalUrl && isLegalDocumentUrl(externalUrl) ? externalUrl : LEGAL_URL;
+  // Fork: a build without a legal site has no page to open.
+  if (!safeExternalUrl) return null;
 
   return (
     <Pressable

@@ -986,6 +986,42 @@ connect asking for T3 Connect sign-in; the `schedule_task` tool description stil
 an agent to suggest T3 Connect when a task has no webhook URL; the desktop Clerk bridge
 is still created, since it also owns deep links and the single-instance lock.
 
+### Talk to no T3 web service (owner, 2026-10-16)
+
+#### Mobile
+
+The mobile build holds no T3 host, account or key. Each service stays off, making no request,
+until the build environment names the owner's own: the root `.env` or `.env.local`, the shell,
+or an EAS environment. `app.config.test.ts` evaluates the config both ways.
+
+- **Updates.** Without an update server, `app.config.ts` builds expo-updates disabled with no
+  URL, so `Updates.isEnabled` is false and the launch, foreground and About-tap checks never
+  run. Diagnostics then says the startup crash log, which expo-updates keeps, is off. To turn
+  updates on, set `T3CODE_EAS_PROJECT_ID`, plus `T3CODE_EAS_OWNER`, for an EAS project (this also
+  sets `extra.eas.projectId` and `owner`). For a self-hosted expo-updates server, set
+  `T3CODE_MOBILE_UPDATES_URL`. `T3CODE_MOBILE_UPDATES_ENABLED=0` still forces updates off.
+- **Push notifications and Live Activities** go only through T3 Connect's relay. Without a relay
+  URL, device registration stops before it asks APNs or FCM for a token (`registerDevice` in
+  `remoteRegistration.ts`). Settings → Notifications says push is off. The app sends native
+  device tokens, not Expo push tokens, so push needs no EAS project. To turn it on, set
+  `T3_CONNECT_ENABLED`, the owner's Clerk values and `T3CODE_RELAY_URL` for their own relay
+  (`infra/relay`, which holds the APNs and FCM keys), plus `T3CODE_ANDROID_GOOGLE_SERVICES_FILE`
+  on Android.
+- **Tracing** has no default endpoint. Spans export only when `T3CODE_MOBILE_OTLP_TRACES_URL`,
+  `_DATASET` and `_TOKEN` are all set. The mobile app has no other analytics or crash reporting.
+- **Legal pages** have no default site, so Settings → About has no Legal row. To bring it back,
+  set `EXPO_PUBLIC_MARKETING_SITE_URL` to a site that serves `/legal`, `/privacy-policy`,
+  `/terms-of-service` and `/security-policy`.
+- **Apple and Clerk identity.** No team is pinned; `T3CODE_APPLE_TEAM_ID` sets `ios.appleTeamId`.
+  Personal Team builds still pass their team to xcodebuild. Associated domains and Sign in with
+  Apple are added only when T3 Connect is on with a Clerk publishable key. As on desktop, the
+  domain is the key's Frontend API host. `eas.json` has no App Store Connect app id: add
+  `submit.production.ios.ascAppId` for the owner's app.
+- **Left as they are:** the `com.t3tools.t3code*` bundle ids of non-Personal-Team builds, the
+  native modules' Gradle groups and podspec homepages, and the sample hosts in showcase
+  screenshots. These are names that are never contacted. `pingdotgg/t3code` appears only in test
+  fixtures.
+
 ### License: upstream's MIT, with the fork's changes copyright Jeremiah Jordan (owner, 2026-10-16)
 
 `LICENSE` keeps upstream's MIT notice, "Copyright (c) 2026 T3 Tools Inc.", and adds "Copyright (c)

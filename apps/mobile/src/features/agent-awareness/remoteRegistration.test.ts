@@ -523,6 +523,8 @@ describe("makeRelayDeviceRegistrationRequest", () => {
   });
 
   it.effect("refreshes APNs registration for connected environments after settings changes", () => {
+    // Fork: registration needs a relay before it reads the push token.
+    Constants.expoConfig!.extra = { relay: { url: "https://relay.example.test/" } };
     registerAgentAwarenessConnection(savedConnection());
     return Effect.gen(function* () {
       yield* runBackgroundOperations();
@@ -531,6 +533,25 @@ describe("makeRelayDeviceRegistrationRequest", () => {
       yield* refreshAgentAwarenessRegistration();
 
       expect(Notifications.getDevicePushTokenAsync).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.provide(layerRelayTest));
+  });
+
+  it.effect("asks for no push token and registers nowhere without a relay", () => {
+    const fetchMock = vi.fn(() => Promise.resolve(Response.json({ ok: true })));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(Notifications.getPermissionsAsync).mockClear();
+    vi.mocked(Notifications.getDevicePushTokenAsync).mockClear();
+    setAgentAwarenessRelayTokenProvider(() => Promise.resolve("clerk-token-user-a"), "user-a");
+    registerAgentAwarenessConnection(savedConnection());
+    return Effect.gen(function* () {
+      yield* runBackgroundOperations();
+      yield* refreshAgentAwarenessRegistration();
+      yield* updateAgentAwarenessRegistrationPreferences({ liveActivitiesEnabled: true });
+
+      expect(Notifications.getPermissionsAsync).not.toHaveBeenCalled();
+      expect(Notifications.getDevicePushTokenAsync).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(getAgentAwarenessRegistrationStatus()).toBe("unknown");
     }).pipe(Effect.provide(layerRelayTest));
   });
 

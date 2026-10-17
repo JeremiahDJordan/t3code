@@ -3,6 +3,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { vi } from "vite-plus/test";
+import Constants from "expo-constants";
 
 import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
@@ -91,6 +92,32 @@ it.effect("does not let OTLP serialization failures alter application effects", 
         expect(new TextDecoder().decode(fetchFn.mock.calls[0]?.[1]?.body as Uint8Array)).toContain(
           "mobile.test.failed-span",
         );
+      }),
+    ),
+  );
+});
+
+// Fork: an unconfigured build has no tracing endpoint. Its public manifest carries unset values
+// as `{}`, which must still read as off.
+it.effect("sends no spans when the build names no tracing endpoint", () => {
+  Constants.expoConfig!.extra = {
+    observability: { tracesUrl: {}, tracesDataset: {}, tracesToken: {} },
+  };
+  expect(Tracing.resolveTracingConfig()).toBeNull();
+
+  const fetchFn = vi.fn<typeof fetch>(async () => new Response(null, { status: 202 }));
+  const layerTracedApplication = Layer.effectDiscard(
+    Effect.void.pipe(Effect.withSpan("mobile.test.span"), withRelayClientTracing),
+  ).pipe(
+    Layer.provide(Tracing.layerFromConfig(null, { appVariant: "test" })),
+    Layer.provide(layerRemoteHttpClient(fetchFn)),
+  );
+
+  return Layer.build(layerTracedApplication).pipe(
+    Effect.scoped,
+    Effect.andThen(
+      Effect.sync(() => {
+        expect(fetchFn).not.toHaveBeenCalled();
       }),
     ),
   );

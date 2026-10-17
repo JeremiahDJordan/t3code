@@ -67,7 +67,7 @@ export function SettingsNotificationsRouteScreen() {
           <Text className="text-base text-foreground-muted">
             {T3_CONNECT_ENABLED
               ? "Notifications require T3 Connect in this app build."
-              : `Notifications require T3 Connect. ${T3_CONNECT_OFF_NOTE}`}
+              : `Push notifications and Live Activities are off in this build: they are delivered through T3 Connect's relay. ${T3_CONNECT_OFF_NOTE}`}
           </Text>
         </ScrollView>
       </SettingsScreen>

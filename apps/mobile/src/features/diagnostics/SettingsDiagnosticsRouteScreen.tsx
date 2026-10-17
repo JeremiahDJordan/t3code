@@ -88,7 +88,12 @@ export function SettingsDiagnosticsRouteScreen() {
             <EmptyState
               icon="exclamationmark.triangle"
               title="Crash log unavailable"
-              detail="Startup crash records are only kept in store and TestFlight builds."
+              detail={
+                // Fork: expo-updates keeps this log, and it is built disabled without an update server.
+                Updates.isEnabled
+                  ? "Startup crash records are only kept in store and TestFlight builds."
+                  : "Startup crash records are kept by app updates, which are off in this build."
+              }
             />
           ) : records.length === 0 ? (
             <EmptyState

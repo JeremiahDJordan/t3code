@@ -5,6 +5,8 @@ import {
   APP_PREVIEW_SCHEME,
   APP_SCHEME,
 } from "../../packages/shared/src/forkIdentity.ts";
+import { T3_CONNECT_ENABLED } from "../../packages/shared/src/forkFeatures.ts";
+import { clerkFrontendApiHostnameFromPublishableKey } from "../../packages/shared/src/relayAuth.ts";
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
@@ -21,6 +23,23 @@ const runtimeVersionPolicy =
 
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+
+// Fork: no T3-owned service is built in. Expo updates, the EAS project, the Apple team and
+// Clerk's iOS capabilities each come from the build's own environment, and are absent without it.
+const optionalEnv = (name: string) => repoEnv[name]?.trim() || undefined;
+const easProjectId = optionalEnv("T3CODE_EAS_PROJECT_ID");
+const easOwner = optionalEnv("T3CODE_EAS_OWNER");
+const appleTeamId = optionalEnv("T3CODE_APPLE_TEAM_ID");
+const updatesUrl =
+  optionalEnv("T3CODE_MOBILE_UPDATES_URL") ??
+  (easProjectId ? `https://u.expo.dev/${easProjectId}` : undefined);
+const clerkPublishableKey = T3_CONNECT_ENABLED
+  ? optionalEnv("EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY")
+  : undefined;
+// Clerk's associated domain is its Frontend API host, which the publishable key encodes.
+const clerkRelyingParty = clerkPublishableKey
+  ? clerkFrontendApiHostnameFromPublishableKey(clerkPublishableKey)
+  : undefined;
 
 const fromRepoRoot = (relativePath: string) => `../../${relativePath}`;
 const androidAdaptiveForeground = "./assets/android-icon-foreground.png";
@@ -80,7 +99,6 @@ const VARIANT_CONFIG = {
     scheme: APP_DEV_SCHEME,
     iosBundleIdentifier: "com.t3tools.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
-    relyingParty: "clerk.t3.codes",
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
@@ -88,7 +106,6 @@ const VARIANT_CONFIG = {
     scheme: APP_PREVIEW_SCHEME,
     iosBundleIdentifier: "com.t3tools.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
-    relyingParty: "clerk.t3.codes",
     assets: PREVIEW_ASSETS,
   },
   production: {
@@ -96,7 +113,6 @@ const VARIANT_CONFIG = {
     scheme: APP_SCHEME,
     iosBundleIdentifier: "com.t3tools.t3code",
     androidPackage: "com.t3tools.t3code",
-    relyingParty: "clerk.t3.codes",
     assets: RELEASE_ASSETS,
   },
 } as const;
@@ -254,25 +270,32 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
-  updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 0,
-  },
+  // Fork: without an update server expo-updates is built disabled, so the app never checks one.
+  updates: updatesUrl
+    ? {
+        enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
+        url: updatesUrl,
+        checkAutomatically: "ON_LOAD",
+        fallbackToCacheTimeout: 0,
+      }
+    : { enabled: false },
   ios: {
     icon: variant.assets.iosIcon,
     supportsTablet: true,
     requireFullScreen: process.env.T3_SHOWCASE_CAPTURE_BUILD === "1",
     bundleIdentifier: iosBundleIdentifier,
-    // Pin code signing to the T3 Tools team so non-interactive `expo run:ios`
+    // Pin code signing to the build's team so non-interactive `expo run:ios`
     // does not fall back to a personal team (which cannot sign app groups,
     // Sign in with Apple, or push notification entitlements).
-    appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [
-      `applinks:${variant.relyingParty}`,
-      `webcredentials:${variant.relyingParty}`,
-    ],
+    ...(appleTeamId ? { appleTeamId } : {}),
+    ...(clerkRelyingParty
+      ? {
+          associatedDomains: [
+            `applinks:${clerkRelyingParty}`,
+            `webcredentials:${clerkRelyingParty}`,
+          ],
+        }
+      : {}),
     entitlements: {
       "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
     },
@@ -374,7 +397,13 @@ const config: ExpoConfig = {
     ],
     // appleSignIn must be gated here: withoutIosPersonalTeamCapabilities.cjs runs before
     // plugins earlier in this array, so it cannot strip the entitlement Clerk would add.
-    ["@clerk/expo", { theme: "./clerk-theme.json", appleSignIn: !isIosPersonalTeamBuild }],
+    [
+      "@clerk/expo",
+      {
+        theme: "./clerk-theme.json",
+        appleSignIn: !isIosPersonalTeamBuild && clerkPublishableKey !== undefined,
+      },
+    ],
     "expo-web-browser",
     [
       "expo-quick-actions",
@@ -498,15 +527,13 @@ const config: ExpoConfig = {
     EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_ANDROID_CLIENT_ID,
     EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME: repoEnv.EXPO_PUBLIC_CLERK_GOOGLE_IOS_URL_SCHEME,
     observability: {
-      tracesUrl: repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL ?? "https://api.axiom.co/v1/traces",
+      tracesUrl: repoEnv.EXPO_PUBLIC_OTLP_TRACES_URL ?? null,
       tracesDataset: repoEnv.EXPO_PUBLIC_OTLP_TRACES_DATASET ?? null,
       tracesToken: repoEnv.EXPO_PUBLIC_OTLP_TRACES_TOKEN ?? null,
     },
-    eas: {
-      projectId: "d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    },
+    ...(easProjectId ? { eas: { projectId: easProjectId } } : {}),
   },
-  owner: "pingdotgg",
+  ...(easOwner ? { owner: easOwner } : {}),
 };
 
 export default config;

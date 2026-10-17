@@ -595,6 +595,22 @@ describe("createAppUpdateLaunchCheck", () => {
     expect(checkOnLaunch()).toBeUndefined();
     expect(client.checkForUpdateAsync).not.toHaveBeenCalled();
   });
+
+  // Fork: a build without an update server has Expo updates disabled.
+  it("never contacts an update server for a manual check while updates are disabled", async () => {
+    const client = makeUpdateClient({ isEnabled: false });
+    const states: AppUpdateCheckState[] = [];
+
+    await runAppUpdateCheck({
+      applyMode: "immediate",
+      client,
+      onStateChange: (state) => states.push(state),
+    });
+
+    expect(client.checkForUpdateAsync).not.toHaveBeenCalled();
+    expect(client.fetchUpdateAsync).not.toHaveBeenCalled();
+    expect(states).toEqual([]);
+  });
 });
 
 describe("shouldRecheckAppUpdateOnForeground", () => {

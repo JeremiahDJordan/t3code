@@ -696,6 +696,11 @@ function registerDevice(
       logRegistrationDebug("device registration skipped; platform does not support it");
       return;
     }
+    // Fork: without a relay there is nowhere to register, so do not ask APNs or FCM for a token.
+    if (!readRelayConfig()) {
+      setRegistrationStatus("unknown");
+      return;
+    }
 
     logRegistrationDebug("device registration loading local state", { expectedGeneration });
     const [deviceId, storedPreferences] = yield* Effect.all([
