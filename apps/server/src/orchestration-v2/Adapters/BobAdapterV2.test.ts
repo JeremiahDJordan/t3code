@@ -732,6 +732,18 @@ describe("BobAdapterV2 turns", () => {
       }).pipe(Effect.provide(sessionLayer), Effect.scoped),
   );
 
+  it.effect("shows a command's output from Bob's result", () =>
+    Effect.gen(function* () {
+      const result = yield* runBobTurn({ text: "run a command" });
+      assert.equal(terminalOf(result.events)?.status, "completed");
+      const command = result.events
+        .flatMap((event) => (event.type === "turn_item.updated" ? [event.turnItem] : []))
+        .findLast((item) => item.type === "command_execution");
+      assert.equal(command?.status, "completed");
+      assert.equal(command?.type === "command_execution" ? command.output : undefined, "a=b");
+    }).pipe(Effect.provide(sessionLayer), Effect.scoped),
+  );
+
   it.effect("says how to sign in, or accept Bob's license, when Bob refuses the session", () =>
     Effect.gen(function* () {
       const signedOut = yield* Effect.flip(

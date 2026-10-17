@@ -720,6 +720,10 @@ function textFromUnknown(value: unknown): string | undefined {
       return text;
     }
   }
+  // Bob 2.0.6 ends a command with rawOutput `{ result: "<output>" }`.
+  for (const value of [record.Result, record.result]) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
   const result = unknownRecord(record.Result) ?? unknownRecord(record.result);
   if (result !== undefined) {
     return textFromUnknown(result);

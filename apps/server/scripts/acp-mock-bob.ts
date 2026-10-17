@@ -258,11 +258,25 @@ function runPrompt(params: Json): Json {
     });
   }
   if (text.includes("run a command")) {
+    // The frames Bob 2.0.6 sends for a command: streamed content, then the result as rawOutput.
     notify(sessionId, {
       sessionUpdate: "tool_call",
       toolCallId: "command-1",
       title: "echo a&#x3D;b",
       kind: "execute",
+      rawInput: { command: "echo a=b" },
+      status: "pending",
+    });
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "command-1",
+      content: [{ type: "content", content: { type: "text", text: "a=b\n" } }],
+    });
+    notify(sessionId, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "command-1",
+      rawOutput: { result: "a=b" },
+      content: [{ type: "content", content: { type: "text", text: "a=b" } }],
       status: "completed",
     });
   }
