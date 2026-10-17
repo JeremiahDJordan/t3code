@@ -145,7 +145,7 @@ describe("fitted", () => {
 });
 
 describe("WorkflowExec without a sandbox", () => {
-  const layer = layerOn("linux", { ...process.env, GITHUB_TOKEN: "secret" });
+  const layer = layerOn("win32", { ...process.env, GITHUB_TOKEN: "secret" });
 
   it.live("runs a command through the shell in its folder, with the script's env", () =>
     Effect.gen(function* () {
@@ -312,7 +312,8 @@ describe.skipIf(!bobSandboxAvailable(platform))("WorkflowExec in the sandbox", (
       for (const runtimeMode of ["auto", "full-access"] as const) {
         const inBase = yield* runIn(repository, write, { runtimeMode });
         expect(inBase.exitCode).not.toBe(0);
-        expect(inBase.stderr).toContain("Operation not permitted");
+        // Seatbelt's refusal, or Bubblewrap's read-only mount.
+        expect(inBase.stderr).toMatch(/Operation not permitted|Read-only file system/);
       }
       expect(NodeFS.existsSync(NodePath.join(repository, "made.txt"))).toBe(false);
       expect((yield* runIn(repository, "cat README.md", { runtimeMode: "auto" })).stdout).toBe(

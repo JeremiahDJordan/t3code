@@ -115,8 +115,10 @@ const mcpRegistryLayer = McpSessionRegistry.layer.pipe(
   ),
 );
 
-/** Whether this host runs Bob's commands in a sandbox, as macOS does. */
+/** Whether this host runs Bob's commands in a sandbox, as macOS and Linux with Bubblewrap do. */
 const sandboxAvailable = bobSandboxAvailable(HostProcess.Platform.defaultValue());
+/** The platform tests that need the sandbox run on: the host's. Others run as Windows, without. */
+const sandboxPlatform = HostProcess.Platform.defaultValue();
 
 const flavor = makeBobAcpAdapterFlavor({
   instanceId: ProviderInstanceId.make("bob-test"),
@@ -370,7 +372,7 @@ const openBob = (input: {
   readonly runtimeMode?: RuntimeMode;
   /** Auto's reviewer model. */
   readonly autoJudge?: BobAutoJudge;
-  /** The host's platform; macOS runs Bob's commands in a sandbox. */
+  /** The host's platform; Windows, without a sandbox, unless given. */
   readonly platform?: NodeJS.Platform;
   /** The user's saved permission rules. */
   readonly rules?: BobRulesSource;
@@ -416,7 +418,7 @@ const openBob = (input: {
       environment: input.home === undefined ? process.env : { ...process.env, HOME: input.home },
       selfInvocation: yield* resolveSelfInvocation(),
       ...(input.autoJudge ? { autoJudge: input.autoJudge } : {}),
-      ...(input.platform ? { platform: input.platform } : {}),
+      platform: input.platform ?? "win32",
       ...(input.rules ? { rules: input.rules } : {}),
       ...(input.userMessages
         ? {
@@ -998,7 +1000,7 @@ describe("BobAdapterV2 turns", () => {
           [{ decision: "acceptAlways", optionId: "t3-rule:project" }],
           undefined,
           false,
-          "linux",
+          "win32",
           source,
         );
         assert.deepEqual(asked, ["command"]);
@@ -1028,7 +1030,7 @@ describe("BobAdapterV2 turns", () => {
         [{ decision: "acceptAlways", optionId: "t3-rule:thread" }, "decline"],
         undefined,
         false,
-        "linux",
+        "win32",
         source,
       );
       assert.deepEqual(asked, ["command", "command"]);
@@ -1049,7 +1051,7 @@ describe("BobAdapterV2 turns", () => {
         ],
         undefined,
         false,
-        "linux",
+        "win32",
         source,
       );
       assert.deepEqual(answers, ["commit=allow", "commit=reject"]);
@@ -1068,7 +1070,7 @@ describe("BobAdapterV2 turns", () => {
           ["decline"],
           undefined,
           false,
-          "darwin",
+          sandboxPlatform,
           source,
         );
         const approve = cards[0]?.find((option) => option.decision === "accept");
@@ -1107,7 +1109,7 @@ describe("BobAdapterV2 turns", () => {
         ["decline"],
         judge,
         false,
-        "linux",
+        "win32",
         source,
       );
       assert.deepEqual(answers, ["search=reject"]);
@@ -1133,7 +1135,7 @@ describe("BobAdapterV2 turns", () => {
         };
         const bob = yield* openBob({
           runtimeMode: "auto",
-          platform: "linux",
+          platform: "win32",
           rules: source,
           autoJudge: judge,
         });
@@ -1190,7 +1192,7 @@ describe("BobAdapterV2 turns", () => {
           }),
         extract: (text) => Effect.succeed(quotesOf(text)),
       };
-      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "win32", autoJudge: judge });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
         threadId: bob.threadId,
@@ -1247,7 +1249,7 @@ describe("BobAdapterV2 turns", () => {
       };
       const bob = yield* openBob({
         runtimeMode: "auto",
-        platform: "linux",
+        platform: "win32",
         autoJudge: judge,
         userMessages: (threadId) =>
           threadId === startedIn
@@ -1305,7 +1307,7 @@ describe("BobAdapterV2 turns", () => {
       };
       const bob = yield* openBob({
         runtimeMode: "auto",
-        platform: "linux",
+        platform: "win32",
         autoJudge: judge,
         // The user adds a restriction after the task's turn began.
         userMessages: () => [
@@ -1361,7 +1363,7 @@ describe("BobAdapterV2 turns", () => {
       };
       const bob = yield* openBob({
         runtimeMode: "auto",
-        platform: "linux",
+        platform: "win32",
         autoJudge: judge,
         userMessages: () => messages,
       });
@@ -1421,7 +1423,7 @@ describe("BobAdapterV2 turns", () => {
         };
         const bob = yield* openBob({
           runtimeMode: "auto",
-          platform: "linux",
+          platform: "win32",
           autoJudge: judge,
           userMessages: () => [
             { id: "message-restriction", text: "Never search the web for this task." },
@@ -1477,7 +1479,7 @@ describe("BobAdapterV2 turns", () => {
         };
         const bob = yield* openBob({
           runtimeMode: "auto",
-          platform: "linux",
+          platform: "win32",
           autoJudge: judge,
           userMessages: () => messages,
         });
@@ -1530,7 +1532,7 @@ describe("BobAdapterV2 turns", () => {
             return quotesOf(text);
           }),
       };
-      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "win32", autoJudge: judge });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
         threadId: bob.threadId,
@@ -1603,7 +1605,7 @@ describe("BobAdapterV2 turns", () => {
         };
         const bob = yield* openBob({
           runtimeMode: "auto",
-          platform: "linux",
+          platform: "win32",
           autoJudge: judge,
           network: "ask",
         });
@@ -1657,7 +1659,7 @@ describe("BobAdapterV2 turns", () => {
             Effect.as(quotesOf(text)),
           ),
       };
-      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "win32", autoJudge: judge });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
         threadId: bob.threadId,
@@ -1708,7 +1710,7 @@ describe("BobAdapterV2 turns", () => {
           }),
       };
       for (const runtimeMode of ["auto-accept-edits", "auto"] as const) {
-        const bob = yield* openBob({ runtimeMode, platform: "linux", autoJudge: judge });
+        const bob = yield* openBob({ runtimeMode, platform: "win32", autoJudge: judge });
         const session = yield* bob.openSession(bob.workspace);
         const providerThread = yield* session.ensureThread({
           threadId: bob.threadId,
@@ -1741,7 +1743,7 @@ describe("BobAdapterV2 turns", () => {
           ),
       };
       yield* Effect.gen(function* () {
-        const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+        const bob = yield* openBob({ runtimeMode: "auto", platform: "win32", autoJudge: judge });
         const session = yield* bob.openSession(bob.workspace);
         const providerThread = yield* session.ensureThread({
           threadId: bob.threadId,
@@ -1772,7 +1774,7 @@ describe("BobAdapterV2 turns", () => {
             ? Effect.succeed(undefined)
             : Effect.yieldNow.pipe(Effect.as(quotesOf(text))),
       };
-      const bob = yield* openBob({ runtimeMode: "auto", platform: "linux", autoJudge: judge });
+      const bob = yield* openBob({ runtimeMode: "auto", platform: "win32", autoJudge: judge });
       const session = yield* bob.openSession(bob.workspace);
       const providerThread = yield* session.ensureThread({
         threadId: bob.threadId,
@@ -1813,7 +1815,7 @@ describe("BobAdapterV2 turns", () => {
         ["decline"],
         undefined,
         false,
-        "linux",
+        "win32",
         source,
       );
       assert.deepEqual(answers, ["edit=reject"]);
@@ -1829,7 +1831,7 @@ describe("BobAdapterV2 turns", () => {
         ["decline"],
         undefined,
         false,
-        "linux",
+        "win32",
         source,
       );
       assert.deepEqual(offered, [[]]);
@@ -1928,7 +1930,7 @@ describe("BobAdapterV2 turns", () => {
         const bob = yield* openBob({
           runtimeMode: "auto",
           autoJudge: allowAll,
-          platform: "darwin",
+          platform: sandboxPlatform,
         });
         const session = yield* bob.openSession(bob.workspace);
         const providerThread = yield* session.ensureThread({
@@ -1966,7 +1968,7 @@ describe("BobAdapterV2 turns", () => {
           ["decline", "decline"],
           undefined,
           false,
-          "darwin",
+          sandboxPlatform,
         );
         assert.deepEqual(answers, ["ls=allow", "test=reject", "edit=reject"]);
         const shell = bob.requests().find((request) => request.method === "_mock/env")?.params;
@@ -1984,7 +1986,7 @@ describe("BobAdapterV2 turns", () => {
           ["accept"],
           undefined,
           false,
-          "darwin",
+          sandboxPlatform,
         );
         assert.deepEqual(answers, ["test=allow", "execute=allow"]);
         // Bob's shell finds an approval for the approved `rm -rf build` only.
@@ -2016,7 +2018,7 @@ describe("BobAdapterV2 turns", () => {
           [{ decision: "acceptAlways", optionId: "t3-rule:thread" }],
           undefined,
           false,
-          "darwin",
+          sandboxPlatform,
           source,
           home,
         );
@@ -2053,7 +2055,7 @@ describe("BobAdapterV2 turns", () => {
           ["accept"],
           undefined,
           false,
-          "darwin",
+          sandboxPlatform,
         );
         assert.deepEqual(answers, ["test-denied=allow", "test-denied=allow"]);
         assert.deepEqual(asked, ["command"]);

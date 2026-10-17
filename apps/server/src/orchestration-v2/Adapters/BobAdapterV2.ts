@@ -849,7 +849,7 @@ function bobSandboxDenied(update: EffectAcpSchema.ToolCallUpdate): boolean {
       ? update.rawOutput
       : JSON.stringify(update.rawOutput ?? ""),
   ].join("\n");
-  return /sandbox-exec:|operation not permitted|EPERM|EACCES|could not resolve host|ENOTFOUND|EAI_AGAIN|getaddrinfo|nodename nor servname|network is unreachable|couldn't connect to server|ECONNREFUSED/i.test(
+  return /sandbox-exec:|bwrap:|operation not permitted|permission denied|read-only file system|EPERM|EACCES|EROFS|could not resolve host|ENOTFOUND|EAI_AGAIN|getaddrinfo|nodename nor servname|network is unreachable|couldn't connect to server|ECONNREFUSED/i.test(
     output,
   );
 }
@@ -867,7 +867,13 @@ function bobSandboxDeniedPath(update: EffectAcpSchema.ToolCallUpdate): string | 
     )
     .join("\n");
   for (const line of output.split("\n")) {
-    if (!/operation not permitted|EPERM|EACCES/i.test(line)) continue;
+    if (
+      !/operation not permitted|permission denied|read-only file system|EPERM|EACCES|EROFS/i.test(
+        line,
+      )
+    ) {
+      continue;
+    }
     const path = /(?:^|[\s'"`(:=])(\/[^\s'"`():,;]+)/.exec(line)?.[1];
     if (path !== undefined) return path.replace(/[.]+$/, "");
   }
@@ -1857,9 +1863,12 @@ function wrapBobRuntime(
   return wrapped;
 }
 
-/** The temporary folders Bob's commands may write in, as the sandbox and reviewer take them. */
+/**
+ * The temporary folders Bob's commands may write in, as the sandbox and reviewer take them: macOS's
+ * under `/private`, and Linux's, which on a Mac lead to the same folders.
+ */
 function bobTemporaryFolders(): ReadonlyArray<string> {
-  return [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp"];
+  return [NodeOS.tmpdir(), "/private/tmp", "/private/var/tmp", "/tmp", "/var/tmp"];
 }
 
 /**

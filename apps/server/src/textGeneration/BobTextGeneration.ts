@@ -39,10 +39,10 @@ const BOB_TIMEOUT_MS = 180_000;
 /** Bob's mode that runs commands, which reading a checkout needs. */
 const BOB_AGENT_MODE_ID = "agent";
 
-export const BOB_REVIEW_GUIDE_MACOS_ONLY =
-  "Bob Shell writes review guides only on macOS, where T3 can run it read-only. Choose another review guide model, or source control writer model when none is set.";
+export const BOB_REVIEW_GUIDE_NO_HOST_SANDBOX =
+  "Bob Shell writes review guides only on macOS and on Linux with Bubblewrap, where T3 can run it read-only. Choose another review guide model, or source control writer model when none is set.";
 export const BOB_REVIEW_GUIDE_NO_SANDBOX =
-  "T3 could not start Bob read-only in this checkout, so it wrote no review guide. Check the Bob provider's binary path, or choose another review guide model.";
+  "T3 could not start Bob read-only in this checkout, so it wrote no review guide. Check the Bob provider's binary path, and on Linux that pasta is installed, or choose another review guide model.";
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
@@ -88,7 +88,7 @@ function answerInvestigationPermission(
  * A review guide has Bob read a pull request's disposable checkout instead, in Agent mode so it
  * can run Git, with the whole `bob acp` process in a read-only sandbox (`bobProcessSandboxSpawn`):
  * Bob's own tools, its commands and anything it starts change nothing, and the sandbox hides the
- * checkout's own `.bob` setup. T3 answers Bob's permission requests itself. macOS only.
+ * checkout's own `.bob` setup. T3 answers Bob's permission requests itself. macOS and Linux only.
  */
 export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function* (
   bobSettings: BobSettings,
@@ -135,7 +135,10 @@ export const makeBobTextGeneration = Effect.fn("makeBobTextGeneration")(function
         );
       } else {
         if (!bobSandboxAvailable(platform)) {
-          return yield* new TextGenerationError({ operation, detail: BOB_REVIEW_GUIDE_MACOS_ONLY });
+          return yield* new TextGenerationError({
+            operation,
+            detail: BOB_REVIEW_GUIDE_NO_HOST_SANDBOX,
+          });
         }
         cwd = investigate.cwd;
         launcher = bobProcessSandboxSpawn({

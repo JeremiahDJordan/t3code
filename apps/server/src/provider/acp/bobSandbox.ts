@@ -19,12 +19,21 @@
  * The base of the Seatbelt profile follows Codex's (openai/codex, Apache-2.0,
  * `codex-rs/sandboxing/src/seatbelt_base_policy.sbpl`).
  *
+ * On Linux the same rules run under Bubblewrap (`bubblewrapScript`): the profile is a shell script
+ * that mounts what a command may not read over with unreadable placeholders and what it may not
+ * write read-only, finds the `.env` files on each run, and starts the command in its own
+ * namespaces with a seccomp filter that refuses Unix sockets. Work that reaches the network runs
+ * in pasta's network namespace, with no route to this machine.
+ *
  * @module provider/acp/bobSandbox
  */
+import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 /** What a sandboxed command may write: nothing but temporary files, or the workspace too. */
 export type BobSandboxMode = "read-only" | "workspace-write";
@@ -67,15 +76,16 @@ const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
 /** Whether this host can run Bob's commands in a sandbox. */
 export function bobSandboxAvailable(platform: NodeJS.Platform): boolean {
+  if (platform === "linux") return bubblewrapTools() !== undefined;
   return platform === "darwin" && NodeFS.existsSync(SANDBOX_EXEC);
 }
 
 /**
  * The shell Bob runs commands with. Approved commands are matched by their exact text and the
  * folder they run in; anything else, including any other way of calling this shell, runs in the
- * sandbox.
+ * sandbox: under `sandbox-exec` on macOS, and through the profile's own script on Linux.
  */
-export const BOB_SANDBOX_SHELL = `#!/bin/sh
+const sandboxShell = (sandbox: string) => `#!/bin/sh
 # T3 Code's shell for Bob: each command runs in the sandbox of the thread's permission mode,
 # unless the user approved that exact command in this folder.
 real="$T3_BOB_SHELL"
@@ -102,8 +112,14 @@ if [ "$#" -eq 2 ] && [ "$1" = "-c" ] && [ -n "$approvals" ] && [ -d "$approvals"
   done
 fi
 export T3_BOB_IN_SANDBOX=1
-exec ${SANDBOX_EXEC} -f "$T3_BOB_SANDBOX_PROFILE" "$real" "$@"
+${sandbox}
 `;
+export const BOB_SANDBOX_SHELL = sandboxShell(
+  `exec ${SANDBOX_EXEC} -f "$T3_BOB_SANDBOX_PROFILE" "$real" "$@"`,
+);
+export const BOB_BUBBLEWRAP_SHELL = sandboxShell(
+  `exec /bin/sh "$T3_BOB_SANDBOX_PROFILE" "$real" "$@"`,
+);
 
 function digest(text: string): string {
   return NodeCrypto.createHash("sha256").update(text).digest("hex").slice(0, 16);
@@ -938,6 +954,7 @@ export function makeBobSandbox(input: {
   readonly rules?: BobSandboxRules | undefined;
 }): BobSandbox | undefined {
   if (!bobSandboxAvailable(input.platform)) return undefined;
+  const linux = input.platform === "linux" ? bubblewrapTools() : undefined;
   // A place holding a `"`, a control character or a lone surrogate gets no sandbox, so its
   // commands ask.
   if (
@@ -962,11 +979,13 @@ export function makeBobSandbox(input: {
       : "/bin/sh";
   const root = NodePath.join(input.cacheDir, "bob-sandbox");
   // Named like the user's shell, since Bob tells its model the shell's name.
-  const shell = NodePath.join(root, digest(BOB_SANDBOX_SHELL), NodePath.basename(realShell));
-  const profileFor = (rules: BobSandboxRules) =>
-    bobSandboxProfile({
+  const shellText = linux === undefined ? BOB_SANDBOX_SHELL : BOB_BUBBLEWRAP_SHELL;
+  const shell = NodePath.join(root, digest(shellText), NodePath.basename(realShell));
+  const files = linux === undefined ? undefined : bubblewrapFiles(input.cacheDir, linux);
+  const profileFor = (rules: BobSandboxRules) => {
+    const profileInput = {
       mode: input.mode,
-      workspace: [input.workspace, workspace],
+      workspace: [input.workspace, workspace] as const,
       home: input.home,
       privateFolders: [input.stateDir],
       attachmentsFolder: input.attachmentsDir,
@@ -975,13 +994,22 @@ export function makeBobSandbox(input: {
       rules,
       // The sandbox's own files and every cache of T3's, the reviewer's program included.
       sandboxFolders: [input.cacheDir],
-    });
+    };
+    return files === undefined
+      ? bobSandboxProfile(profileInput)
+      : bubblewrapScript(profileInput, files);
+  };
   let profileText = profileFor(input.rules ?? NO_BOB_SANDBOX_RULES);
-  const profile = NodePath.join(root, "profiles", `${digest(`${input.key}\0${input.mode}`)}.sb`);
+  const profile = NodePath.join(
+    root,
+    "profiles",
+    `${digest(`${input.key}\0${input.mode}`)}.${files === undefined ? "sb" : "sh"}`,
+  );
   const approvals = NodePath.join(input.stateDir, "bob-sandbox", "approvals", digest(input.key));
   const ensure = () => {
-    writeOnce(shell, BOB_SANDBOX_SHELL, 0o755);
+    writeOnce(shell, shellText, 0o755);
     writeOnce(profile, profileText, 0o644);
+    if (files !== undefined) bubblewrapFilesReady(files, true);
     NodeFS.mkdirSync(approvals, { recursive: true, mode: 0o700 });
   };
   ensure();
@@ -1002,7 +1030,12 @@ export function makeBobSandbox(input: {
     },
     // A command run outside could change the shell or profile, so readiness checks what they say.
     ready: () => {
-      if (holds(shell, BOB_SANDBOX_SHELL) && executable(shell) && holds(profile, profileText)) {
+      if (
+        holds(shell, shellText) &&
+        executable(shell) &&
+        holds(profile, profileText) &&
+        (files === undefined || bubblewrapFilesReady(files, false))
+      ) {
         return true;
       }
       ensure();
@@ -1137,6 +1170,90 @@ function bobProcessSandboxProfile(input: {
 ${OTHER_MACHINES}`;
 }
 
+/**
+ * `bobProcessSandboxProfile` under Bubblewrap: the read-only profile of Bob's commands, with
+ * Bob's own reads and writes in `~/.bob`, the checkout read-only and its `.bob` folder hidden, and
+ * other machines through pasta. None where pasta is missing.
+ */
+function bubblewrapProcessScript(
+  input: Omit<Parameters<typeof bobProcessSandboxProfile>[0], "install"> & {
+    readonly install: string;
+  },
+  cacheDir: string,
+): string | undefined {
+  const files = sandboxFiles(cacheDir, true);
+  if (files === undefined) return undefined;
+  const home = realPath(input.home);
+  const bobHome = realPath(NodePath.join(input.home, ".bob"));
+  // Bubblewrap opens what is there, and `~/.bob` stays read-only, so Bob's own state is made
+  // first: its folders, and an empty list of trusted folders for `--trust` to write.
+  try {
+    for (const folder of BOB_HOME_WRITABLE_FOLDERS) {
+      NodeFS.mkdirSync(NodePath.join(bobHome, folder), { recursive: true, mode: 0o700 });
+    }
+    NodeFS.writeFileSync(NodePath.join(bobHome, "trustedFolders.json"), "{}", {
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch {
+    // There already, or Bob's home is not writable: Bob reports what it cannot write.
+  }
+  const install = within(realPath(input.install), home) === undefined ? [input.install] : [];
+  const allow = (match: BobPathMatch): BubblewrapRule => ({ allow: true, match });
+  const projectBob: BobPathMatch = {
+    kind: "subpath",
+    path: NodePath.join(input.workspace[1], ".bob"),
+  };
+  return bubblewrapScript(
+    {
+      mode: "read-only",
+      workspace: input.workspace,
+      home: input.home,
+      privateFolders: input.privateFolders,
+      temporaryFolders: input.temporaryFolders,
+      searchPath: input.searchPath,
+      rules: { read: [NodePath.join(input.home, ".bob"), ...install], write: [], private: [] },
+      sandboxFolders: input.sandboxFolders,
+      read: [{ allow: false, match: projectBob }],
+      write: [
+        { allow: false, match: { kind: "subpath", path: input.workspace[1] } },
+        ...BOB_HOME_WRITABLE_FOLDERS.map((folder) =>
+          allow({ kind: "subpath", path: NodePath.join(bobHome, folder) }),
+        ),
+        ...BOB_HOME_WRITABLE_FILES.map((file) =>
+          allow({ kind: "literal", path: NodePath.join(bobHome, file) }),
+        ),
+      ],
+    },
+    files,
+  );
+}
+
+/**
+ * The temporary folders a sandboxed process writes: its own, and the system's, through macOS's
+ * links on a Mac.
+ */
+function sandboxTemporaryFolders(
+  platform: NodeJS.Platform,
+  environment: NodeJS.ProcessEnv,
+): Array<string> {
+  return [
+    environment.TMPDIR || NodeOS.tmpdir(),
+    ...(platform === "linux" ? ["/tmp", "/var/tmp"] : ["/private/tmp", "/private/var/tmp"]),
+  ];
+}
+
+/** Bubblewrap's files under T3's caches, written; with the network, none where pasta is missing. */
+function sandboxFiles(cacheDir: string, network: boolean): BubblewrapFiles | undefined {
+  const tools = bubblewrapTools();
+  if (tools === undefined) return undefined;
+  const files = bubblewrapFiles(cacheDir, tools);
+  bubblewrapFilesReady(files, true);
+  if (!network) return files;
+  const reach = bubblewrapNetwork(cacheDir);
+  return reach === undefined ? undefined : { ...files, network: reach };
+}
+
 /** `command` as `PATH` finds it, or as given when it names a path. None when it is not there. */
 function bobExecutable(command: string, searchPath: string | undefined): string | undefined {
   const candidates = command.includes("/")
@@ -1185,11 +1302,7 @@ export function bobProcessSandboxSpawn(input: {
   if (!bobSandboxAvailable(input.platform)) return undefined;
   const home = input.environment.HOME || NodeOS.homedir();
   const searchPath = input.environment.PATH;
-  const temporaryFolders = [
-    input.environment.TMPDIR || NodeOS.tmpdir(),
-    "/private/tmp",
-    "/private/var/tmp",
-  ];
+  const temporaryFolders = sandboxTemporaryFolders(input.platform, input.environment);
   const executable = bobExecutable(input.command, searchPath);
   if (executable === undefined) return undefined;
   const install = bobInstallFolder(executable);
@@ -1211,6 +1324,23 @@ export function bobProcessSandboxSpawn(input: {
   // gets no sandbox.
   const workspace = bobWorkspace(input.workspace, home);
   if (workspace === undefined) return undefined;
+  if (input.platform === "linux") {
+    const script = bubblewrapProcessScript(
+      {
+        workspace: [input.workspace, workspace],
+        home,
+        privateFolders: [input.stateDir],
+        sandboxFolders: [input.cacheDir],
+        temporaryFolders,
+        searchPath,
+        install,
+      },
+      input.cacheDir,
+    );
+    return script === undefined
+      ? undefined
+      : { command: "/bin/sh", args: ["-c", script, "t3-bob-sandbox", executable] };
+  }
   const profile = bobProcessSandboxProfile({
     workspace: [input.workspace, workspace],
     home,
@@ -1300,11 +1430,7 @@ export function commandSandboxSpawn(input: {
   if (!bobSandboxAvailable(input.platform)) return undefined;
   const home = input.environment.HOME || NodeOS.homedir();
   const searchPath = input.environment.PATH;
-  const temporaryFolders = [
-    input.environment.TMPDIR || NodeOS.tmpdir(),
-    "/private/tmp",
-    "/private/var/tmp",
-  ];
+  const temporaryFolders = sandboxTemporaryFolders(input.platform, input.environment);
   const git = input.mode === "workspace-write" ? worktreeGitFolders(input.cwd) : undefined;
   if (
     !nameable([
@@ -1321,9 +1447,9 @@ export function commandSandboxSpawn(input: {
   }
   const workspace = bobWorkspace(input.cwd, home);
   if (workspace === undefined) return undefined;
-  const profile = bobSandboxProfile({
+  const profileInput = {
     mode: input.mode,
-    workspace: [input.cwd, workspace],
+    workspace: [input.cwd, workspace] as const,
     home,
     privateFolders: [input.stateDir],
     temporaryFolders,
@@ -1334,7 +1460,36 @@ export function commandSandboxSpawn(input: {
       private: [],
     },
     sandboxFolders: [input.cacheDir],
-  });
+  };
+  if (input.platform === "linux") {
+    const files = sandboxFiles(input.cacheDir, input.network);
+    if (files === undefined) return undefined;
+    const denied = (path: string): BubblewrapRule => ({
+      allow: false,
+      match: { kind: "subpath", path },
+    });
+    const script = bubblewrapScript(
+      {
+        ...profileInput,
+        write: [
+          ...(input.mode === "read-only" ? [denied(workspace)] : []),
+          ...(git === undefined
+            ? []
+            : ["commondir", "gitdir", "config.worktree"].map((file) =>
+                denied(realPath(NodePath.join(git.gitDir, file))),
+              )),
+        ],
+        // Caches and git's folders hold no project's secrets, and are too large to search.
+        envFolders: [workspace],
+      },
+      files,
+    );
+    return {
+      command: "/bin/sh",
+      args: ["-c", script, "t3-bob-sandbox", "/bin/sh", "-c", input.command],
+    };
+  }
+  const profile = bobSandboxProfile(profileInput);
   const pointers =
     git === undefined
       ? []
@@ -1359,10 +1514,630 @@ export function commandSandboxSpawn(input: {
   return { command: SANDBOX_EXEC, args: ["-p", text, "/bin/sh", "-c", input.command] };
 }
 
-/** Whether a file holds exactly `content`. */
-function holds(path: string, content: string): boolean {
+/**
+ * The programs Bubblewrap's profile runs, from the system's own folders, never the `PATH` a user's
+ * environment sets; none where one is missing or Bubblewrap cannot make namespaces here, as in a
+ * container that forbids them. Probed once.
+ */
+interface BubblewrapTools {
+  readonly bwrap: string;
+  readonly find: string;
+  readonly mktemp: string;
+  readonly readlink: string;
+  readonly rm: string;
+  readonly printenv: string;
+  readonly arch: keyof typeof SECCOMP_ARCHES;
+}
+let bubblewrapProbe: { readonly tools: BubblewrapTools | undefined } | undefined;
+
+const SYSTEM_FOLDERS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+
+function systemTool(name: string): string | undefined {
+  return SYSTEM_FOLDERS.map((folder) => NodePath.join(folder, name)).find(
+    (path) => executable(path) && NodeFS.statSync(path).isFile(),
+  );
+}
+
+function bubblewrapTools(): BubblewrapTools | undefined {
+  if (bubblewrapProbe !== undefined) return bubblewrapProbe.tools;
+  const arch = HostProcess.Architecture.defaultValue();
+  const [bwrap, find, mktemp, readlink, rm, printenv] = [
+    "bwrap",
+    "find",
+    "mktemp",
+    "readlink",
+    "rm",
+    "printenv",
+  ].map(systemTool);
+  const tools =
+    (arch === "x64" || arch === "arm64") &&
+    bwrap !== undefined &&
+    find !== undefined &&
+    mktemp !== undefined &&
+    readlink !== undefined &&
+    rm !== undefined &&
+    printenv !== undefined &&
+    NodeChildProcess.spawnSync(
+      bwrap,
+      ["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", "--", "/bin/true"],
+      { stdio: "ignore", timeout: 10_000 },
+    ).status === 0
+      ? { bwrap, find, mktemp, readlink, rm, printenv, arch }
+      : undefined;
+  bubblewrapProbe = { tools };
+  return tools;
+}
+
+/**
+ * The calls a sandboxed command may not make, per architecture: creating a Unix socket, which
+ * reaches Docker, tmux, the session's agents and T3 itself (`socketpair` still works, for pipes
+ * between a command's own processes); io_uring, which makes sockets past this filter; and the
+ * kernel's keyrings, which hold the session's keys.
+ */
+const SECCOMP_ARCHES = {
+  x64: { audit: 0xc000003e, socket: 41, refused: [425, 426, 427, 248, 249, 250], x32: true },
+  arm64: { audit: 0xc00000b7, socket: 198, refused: [425, 426, 427, 217, 218, 219], x32: false },
+} as const;
+
+/** The classic BPF program Bubblewrap loads with `--seccomp`: `EPERM` for the calls above. */
+function seccompFilter(arch: keyof typeof SECCOMP_ARCHES): Buffer {
+  const { audit, socket, refused, x32 } = SECCOMP_ARCHES[arch];
+  const LOAD = 0x20; // BPF_LD | BPF_W | BPF_ABS
+  const EQUALS = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+  const AT_LEAST = 0x35; // BPF_JMP | BPF_JGE | BPF_K
+  const RETURN = 0x06; // BPF_RET | BPF_K
+  type Label = "allow" | "refuse" | "unknown";
+  const program: Array<{ code: number; k: number; yes?: Label; no?: Label }> = [];
+  const labels = new Map<Label, number>();
+  // The architecture, and on x86-64 no x32 calls, whose numbers differ.
+  program.push({ code: LOAD, k: 4 }, { code: EQUALS, k: audit, no: "unknown" });
+  program.push({ code: LOAD, k: 0 });
+  if (x32) program.push({ code: AT_LEAST, k: 0x40000000, yes: "unknown" });
+  for (const call of refused) program.push({ code: EQUALS, k: call, yes: "refuse" });
+  // `socket(AF_UNIX, …)`: the low word of its first argument.
+  program.push({ code: EQUALS, k: socket, no: "allow" });
+  program.push({ code: LOAD, k: 16 }, { code: EQUALS, k: 1, yes: "refuse" });
+  labels.set("allow", program.length);
+  program.push({ code: RETURN, k: 0x7fff0000 });
+  labels.set("refuse", program.length);
+  program.push({ code: RETURN, k: 0x00050000 | 1 }); // EPERM
+  labels.set("unknown", program.length);
+  program.push({ code: RETURN, k: 0x00050000 | 38 }); // ENOSYS
+  const filter = Buffer.alloc(program.length * 8);
+  for (const [index, step] of program.entries()) {
+    const jump = (label: Label | undefined) =>
+      label === undefined ? 0 : labels.get(label)! - index - 1;
+    filter.writeUInt16LE(step.code, index * 8);
+    filter.writeUInt8(jump(step.yes), index * 8 + 2);
+    filter.writeUInt8(jump(step.no), index * 8 + 3);
+    filter.writeUInt32LE(step.k >>> 0, index * 8 + 4);
+  }
+  return filter;
+}
+
+/** A rule of a Bubblewrap profile: Seatbelt's, applied the same way, the last that matches. */
+interface BubblewrapRule {
+  readonly allow: boolean;
+  readonly match: BobPathMatch;
+}
+
+/** Whether `match` covers `path`, compared as Linux compares names: exactly. */
+function tester(match: BobPathMatch): (path: string) => boolean {
+  if (match.kind === "regex") {
+    const pattern = new RegExp(match.pattern, "u");
+    return (path) => pattern.test(path);
+  }
+  if (match.kind === "literal") return (path) => path === match.path;
+  const below = (root: string, path: string) => within(root, path) !== undefined;
+  return (path) =>
+    below(match.path, path) && !(match.except ?? []).some((root) => below(root, path));
+}
+
+function decider(rules: ReadonlyArray<BubblewrapRule>): (path: string) => boolean {
+  const tests = rules.map((rule) => [rule.allow, tester(rule.match)] as const);
+  return (path) => {
+    let allowed = false;
+    for (const [allow, test] of tests) if (test(path)) allowed = allow;
+    return allowed;
+  };
+}
+
+/** A string as one shell word. */
+function shellQuote(text: string): string {
+  return `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
+/** A path as a `find -path` pattern that matches it alone. */
+function findPattern(path: string): string {
+  return shellQuote(path.replace(/[*?[\]\\]/g, "\\$&"));
+}
+
+/** The files the profile's script reads, from T3's caches, where no command writes. */
+interface BubblewrapFiles {
+  readonly tools: BubblewrapTools;
+  /** A file no one may read, mounted over each one a command may not. */
+  readonly denied: string;
+  readonly seccomp: string;
+  /** Where each run leaves Bubblewrap its arguments, for the moment it reads them. */
+  readonly runs: string;
+  /** Other machines, through pasta, for work that reaches the network. */
+  readonly network?: BubblewrapNetwork | undefined;
+}
+
+interface BubblewrapNetwork {
+  readonly pasta: string;
+  readonly ip: string;
+  /** Addresses of this machine, which no command may reach. */
+  readonly routes: ReadonlyArray<string>;
+  /** A `resolv.conf` naming pasta's resolver, and the file it covers. */
+  readonly resolvConf: string;
+  readonly resolvTarget: string | undefined;
+}
+
+/**
+ * What glibc drops from the environment of a program that gains privileges, as pasta's child
+ * does: the profile hands them to the command itself.
+ */
+const SECURE_EXEC_DROPPED = [
+  "TMPDIR",
+  "TZDIR",
+  "LD_LIBRARY_PATH",
+  "LD_PRELOAD",
+  "LOCPATH",
+  "NLSPATH",
+  "GCONV_PATH",
+  "GETCONF_DIR",
+  "HOSTALIASES",
+  "LOCALDOMAIN",
+  "RES_OPTIONS",
+  "RESOLV_HOST_CONF",
+  "MALLOC_TRACE",
+  "NIS_PATH",
+];
+
+/** pasta's address for this machine's resolver, which is all of it a command reaches. */
+const PASTA_RESOLVER = "169.254.1.53";
+
+/** Virtual bridges, whose machines are this one's containers. */
+const LOCAL_BRIDGES = /^(docker|br-|virbr|podman|cni|lxcbr|lxdbr)/;
+
+/**
+ * Where pasta must not route: every address of this machine, which pasta's namespace would
+ * otherwise reach as any other, and the containers behind its bridges. pasta's copy of the main
+ * address, and its own loopback, stay inside the namespace.
+ */
+function localRoutes(): Array<string> {
+  return Object.entries(NodeOS.networkInterfaces()).flatMap(([name, addresses]) =>
+    (addresses ?? [])
+      .filter((address) => !address.internal)
+      .flatMap((address) => {
+        const own = `${address.address.split("%")[0]}/${address.family === "IPv4" ? 32 : 128}`;
+        return LOCAL_BRIDGES.test(name) && address.cidr !== null ? [own, address.cidr] : [own];
+      }),
+  );
+}
+
+/** What pasta needs, from the system's own folders; none where either is missing. */
+function bubblewrapNetwork(cacheDir: string): BubblewrapNetwork | undefined {
+  const pasta = systemTool("pasta");
+  const ip = systemTool("ip");
+  if (pasta === undefined || ip === undefined) return undefined;
+  const resolvConf = NodePath.join(cacheDir, "bob-sandbox", "resolv.conf");
+  writeOnce(resolvConf, `nameserver ${PASTA_RESOLVER}\n`, 0o644);
+  let resolvTarget: string | undefined;
   try {
-    return NodeFS.readFileSync(path, "utf8") === content;
+    resolvTarget = NodeFS.realpathSync("/etc/resolv.conf");
+  } catch {
+    // No resolver configured: names do not resolve, as outside.
+  }
+  return { pasta, ip, routes: localRoutes(), resolvConf, resolvTarget };
+}
+
+/** The profile's own files under T3's caches, written as `ensureBubblewrapFiles` checks them. */
+function bubblewrapFiles(
+  cacheDir: string,
+  tools: BubblewrapTools,
+): Omit<BubblewrapFiles, "network"> {
+  const root = NodePath.join(cacheDir, "bob-sandbox");
+  return {
+    tools,
+    denied: NodePath.join(root, "denied"),
+    seccomp: NodePath.join(root, `seccomp-${tools.arch}.bpf`),
+    runs: NodePath.join(root, "runs"),
+  };
+}
+
+/** Whether the profile's own files hold what they should; `fix` writes any that do not. */
+function bubblewrapFilesReady(files: Omit<BubblewrapFiles, "network">, fix: boolean): boolean {
+  const filter = seccompFilter(files.tools.arch);
+  let denied = false;
+  try {
+    const stat = NodeFS.lstatSync(files.denied);
+    denied = stat.isFile() && stat.size === 0 && (stat.mode & 0o7777) === 0;
+  } catch {
+    // Not there yet.
+  }
+  let runs = false;
+  try {
+    runs = NodeFS.lstatSync(files.runs).isDirectory();
+  } catch {
+    // Not there yet.
+  }
+  const seccomp = holds(files.seccomp, filter);
+  if (fix) {
+    if (!seccomp) writeOnce(files.seccomp, filter, 0o644);
+    if (!denied) {
+      NodeFS.mkdirSync(NodePath.dirname(files.denied), { recursive: true });
+      NodeFS.rmSync(files.denied, { recursive: true, force: true });
+      NodeFS.writeFileSync(files.denied, "", { mode: 0 });
+      NodeFS.chmodSync(files.denied, 0);
+    }
+    if (!runs) NodeFS.mkdirSync(files.runs, { recursive: true, mode: 0o700 });
+  }
+  return seccomp && denied && runs;
+}
+
+/** What `bubblewrapScript` takes: Seatbelt's profile's input, and the rules that follow it. */
+type BubblewrapInput = Parameters<typeof bobSandboxProfile>[0] & {
+  /** Rules after the commands' own, which outrank them. */
+  readonly read?: ReadonlyArray<BubblewrapRule> | undefined;
+  readonly write?: ReadonlyArray<BubblewrapRule> | undefined;
+  /** The folders whose `.env` files each run finds; the workspace and the write rules' by default. */
+  readonly envFolders?: ReadonlyArray<string> | undefined;
+};
+
+/**
+ * The Bubblewrap profile for one workspace and mode: a script for `/bin/sh`, given the command
+ * as its arguments, that runs it as `bobSandboxProfile`'s rules would.
+ *
+ * Bubblewrap mounts instead of matching, so the rules are applied to every path they name, and
+ * each path whose reading or writing differs from its folder's gets a mount: a placeholder no one
+ * reads over what a command may not read (an empty folder, or for a folder holding something it
+ * may read, a folder it may pass through but not list, holding only that), and a read-only or
+ * writable mount of itself where writing changes. Which of them exist is checked on each run.
+ * What the rules match by name, the home folder's hidden entries, `.env` files and shell history,
+ * is found on each run too. Every folder a command may not move is a mount, which no one can
+ * move or remove, as Seatbelt's profile refuses to unlink them.
+ *
+ * Bubblewrap cannot refuse a name, so where Seatbelt stops a command creating a `.env` file, a
+ * `.git` or an agent's settings folder that is not there yet, this does not (FORK.md, Known gaps).
+ */
+function bubblewrapScript(input: BubblewrapInput, files: BubblewrapFiles): string {
+  const workspace = input.workspace[1];
+  const home = realPath(input.home);
+  const rules = rulesApplied(input.rules ?? NO_BOB_SANDBOX_RULES, {
+    home: input.home,
+    realHome: home,
+    workspace: input.workspace,
+  });
+  const allow = (match: BobPathMatch): BubblewrapRule => ({ allow: true, match });
+  const deny = (match: BobPathMatch): BubblewrapRule => ({ allow: false, match });
+  const subpath = (path: string): BobPathMatch => ({ kind: "subpath", path });
+  const opened = [...new Set([...rules.read, ...rules.write])];
+  const userWritable = [...new Set(rules.write)];
+  const temporary = [...new Set(input.temporaryFolders.map(realPath))];
+  const onPath = (input.searchPath ?? "")
+    .split(":")
+    .filter((folder) => NodePath.isAbsolute(folder));
+  const toolFolders = [
+    ...new Set(onPath.map(realPath).filter((folder) => NodePath.basename(folder) === "bin")),
+  ];
+  const envRoots = [workspace, ...userWritable];
+  const runtimeFolder = NodePath.join("/run/user", String(NodeOS.userInfo().uid));
+  const readRules: Array<BubblewrapRule> = [
+    allow(subpath("/")),
+    deny({ kind: "regex", pattern: `^${regexQuote(home)}/\\.[^/]+` }),
+    // The session's own folder: its agents' sockets, its keyring, Podman's registry logins.
+    deny(subpath(runtimeFolder)),
+    ...[...HOME_READABLE.map((entry) => NodePath.join(home, entry)), ...toolFolders, workspace].map(
+      (path) => allow(subpath(path)),
+    ),
+    ...opened.map((path) => allow(subpath(path))),
+    ...credentialMatches(home, opened).map(deny),
+    ...envMatches(envRoots).map(deny),
+    ...envRoots.map((root) =>
+      allow({
+        kind: "regex",
+        pattern: `^${regexQuote(root)}/(.*/)?\\.env[^/]*\\.(example|sample|template|dist)$`,
+      }),
+    ),
+    ...opened
+      .filter((path) => NodePath.basename(path).startsWith(".env"))
+      .map((path) => allow({ kind: "literal", path })),
+    ...[...new Set([...rules.private, ...input.privateFolders].map(realPath))].map((path) =>
+      deny(subpath(path)),
+    ),
+    ...(input.attachmentsFolder === undefined
+      ? []
+      : [allow(subpath(realPath(input.attachmentsFolder)))]),
+    ...(input.read ?? []),
+  ];
+  const read = decider(readRules);
+  const writeRules: Array<BubblewrapRule> = [
+    deny(subpath("/")),
+    ...(input.mode === "workspace-write" ? [workspace] : []).map((path) => allow(subpath(path))),
+    ...[...temporary, ...userWritable].map((path) => allow(subpath(path))),
+    ...writeDenials({
+      home,
+      workspace,
+      rules,
+      privateFolders: input.privateFolders,
+      sandboxFolders: input.sandboxFolders ?? [],
+      temporaryFolders: input.temporaryFolders,
+    }).map(deny),
+    ...(input.write ?? []),
+  ];
+  const write = decider(writeRules);
+  // The folders a command may not move or remove, as Seatbelt's profile anchors them.
+  const anchors = new Set<string>();
+  for (const root of [
+    workspace,
+    ...userWritable,
+    ...rules.private.map(realPath),
+    ...input.privateFolders.map(realPath),
+    ...(input.sandboxFolders ?? []).map(realPath),
+  ]) {
+    for (let path = root; path !== NodePath.dirname(path); path = NodePath.dirname(path)) {
+      anchors.add(path);
+    }
+  }
+  // Links on the way to a `PATH` folder, such as `~/.pulumi/current`, which a placeholder over
+  // their folder keeps, so the tools behind them still run.
+  const links = new Set<string>();
+  for (const folder of onPath) {
+    for (let path = folder; path !== NodePath.dirname(path); path = NodePath.dirname(path)) {
+      try {
+        if (NodeFS.lstatSync(path).isSymbolicLink()) links.add(path);
+      } catch {
+        // Not there.
+      }
+    }
+  }
+  // Every path a rule names, and the folders above it.
+  const named = new Set<string>(["/"]);
+  const name = (path: string) => {
+    for (let at = path; !named.has(at); at = NodePath.dirname(at)) named.add(at);
+  };
+  const ruleMatches = [...readRules, ...writeRules].flatMap(({ match }) =>
+    match.kind === "regex"
+      ? []
+      : [match.path, ...(match.kind === "subpath" ? (match.except ?? []) : [])],
+  );
+  for (const path of [...ruleMatches, ...anchors, ...links]) {
+    if (NodePath.isAbsolute(path)) name(NodePath.normalize(path));
+  }
+  const children = new Map<string, Array<string>>();
+  for (const path of [...named].toSorted()) {
+    if (path === "/") continue;
+    const parent = NodePath.dirname(path);
+    children.set(parent, [...(children.get(parent) ?? []), path]);
+  }
+  const readableBelow = new Map<string, boolean>();
+  const anyReadableBelow = (path: string): boolean => {
+    const known = readableBelow.get(path);
+    if (known !== undefined) return known;
+    const found = (children.get(path) ?? []).some(
+      (child) => read(child) || anyReadableBelow(child),
+    );
+    readableBelow.set(path, found);
+    return found;
+  };
+  // How each path appears: writable, read-only, a folder showing only what is mounted in it, or
+  // not at all.
+  type Seen = "rw" | "ro" | "masked" | "absent";
+  const seen = new Map<string, Seen>([["/", "ro"]]);
+  const plan = (parent: string, indent: string): Array<string> => {
+    const lines: Array<string> = [];
+    const above = seen.get(parent)!;
+    for (const path of children.get(parent) ?? []) {
+      const quoted = shellQuote(path);
+      let step: string | undefined;
+      let now: Seen;
+      if (above === "absent") {
+        now = "absent";
+      } else if (read(path)) {
+        now = write(path) ? "rw" : "ro";
+        const mount = now === "rw" ? "bind" : "ro-bind";
+        if (above === "masked") step = `show ${mount} ${quoted}`;
+        else if (now !== above || (now === "rw" && anchors.has(path))) {
+          step = `bind ${mount} ${quoted}`;
+        }
+      } else if (anyReadableBelow(path) || links.has(path)) {
+        now = "masked";
+        step = above === "masked" ? `pass ${quoted}` : `mask ${quoted}`;
+      } else {
+        now = "absent";
+        if (above !== "masked") step = `hide ${quoted}`;
+      }
+      seen.set(path, now);
+      const inner = now === "absent" ? [] : plan(path, step === undefined ? indent : `${indent}  `);
+      if (step === undefined) lines.push(...inner);
+      else if (inner.length === 0) lines.push(`${indent}${step}`);
+      else lines.push(`${indent}if ${step}; then`, ...inner, `${indent}fi`);
+    }
+    return lines;
+  };
+  const steps = plan("/", "");
+  const visible = (path: string) => {
+    const state = seen.get(path);
+    return state === "rw" || state === "ro";
+  };
+  // Below the folders searched on each run, what the steps above already hid.
+  const covered = (roots: ReadonlyArray<string>) =>
+    [...named]
+      .filter(
+        (path) =>
+          !visible(path) && roots.some((root) => path !== root && within(root, path) !== undefined),
+      )
+      .map((path) => `-path ${findPattern(path)}`);
+  const pruned = (prunes: ReadonlyArray<string>) =>
+    prunes.length === 0 ? "" : `\\( ${prunes.join(" -o ")} \\) -prune -o `;
+  const { tools } = files;
+  const runs = (script: string) => `-exec /bin/sh -c ${shellQuote(script)} "$denied" {} +`;
+  const hideAll = `for f; do printf '%s\\0' --ro-bind "$0" "$f"; done`;
+  const hideHistory = `for f; do n=\${f##*/}; n=\${n#.}; n=\${n%[Hh][Ii][Ss][Tt][Oo][Rr][Yy]}; case $n in *[!A-Za-z_]*) ;; *) printf '%s\\0' --ro-bind "$0" "$f";; esac; done`;
+  const dynamic: Array<string> = [];
+  // The home folder's hidden entries no rule names, unless a rule opens them all.
+  if (visible(home) && !read(NodePath.join(home, ".t3-bob-sandbox\0"))) {
+    const known = (children.get(home) ?? []).map(shellQuote);
+    dynamic.push(
+      `for f in ${shellQuote(home)}/.[!.]* ${shellQuote(home)}/..?*; do`,
+      known.length === 0 ? "" : `  case $f in ${known.join("|")}) continue ;; esac`,
+      `  hide "$f"`,
+      "done",
+    );
+  }
+  // Shell and REPL history at the top of the home folder, and in the hidden folders a command
+  // reads, four folders deep.
+  if (visible(home)) {
+    const history = `${shellQuote(home)}/*[Hh][Ii][Ss][Tt][Oo][Rr][Yy]`;
+    dynamic.push(
+      `for f in ${history} ${history.replace("/*", "/.*")}; do`,
+      `  [ -f "$f" ] && [ ! -L "$f" ] && /bin/sh -c ${shellQuote(hideHistory)} "$denied" "$f"`,
+      "done",
+    );
+  }
+  const historyRoots = [...named].filter((path) => {
+    const fromHome = within(home, path);
+    return (
+      fromHome !== undefined &&
+      fromHome.startsWith(".") &&
+      visible(path) &&
+      (NodePath.dirname(path) === home || !visible(NodePath.dirname(path)))
+    );
+  });
+  if (historyRoots.length > 0) {
+    dynamic.push(
+      `LC_ALL=C ${tools.find} ${historyRoots.map(shellQuote).join(" ")} -maxdepth 4 ${pruned(covered(historyRoots))}-type f -name '*[Hh][Ii][Ss][Tt][Oo][Rr][Yy]' ${runs(hideHistory)} 2>/dev/null`,
+    );
+  }
+  // `.env` files, but samples and those a rule names, wherever a command reads in the folders it
+  // may write. Every one, `node_modules` included, since a command may move a folder there.
+  const namedEnv = opened.filter((path) => NodePath.basename(path).startsWith(".env"));
+  const envFolders = [...new Set(input.envFolders ?? envRoots)].filter(
+    (root, _, all) =>
+      visible(root) && !all.some((other) => other !== root && within(other, root) !== undefined),
+  );
+  if (envFolders.length > 0) {
+    const prunes = [
+      ...envFolders.map((root) => `-path ${findPattern(NodePath.join(root, ".git"))}`),
+      ...covered(envFolders),
+    ];
+    const kept = [
+      ...["example", "sample", "template", "dist"].map((kind) => `! -name '.env*.${kind}'`),
+      ...namedEnv.map((path) => `! -path ${findPattern(path)}`),
+    ];
+    dynamic.push(
+      `LC_ALL=C ${tools.find} ${envFolders.map(shellQuote).join(" ")} ${pruned(prunes)}-type f -name '.env*' ${kept.join(" ")} ${runs(hideAll)} 2>/dev/null`,
+    );
+  }
+  if (files.network !== undefined) {
+    dynamic.push(
+      `for v in ${SECURE_EXEC_DROPPED.join(" ")}; do`,
+      `  if value=$(${tools.printenv} "$v"); then a --setenv "$v" "$value"; fi`,
+      "done",
+    );
+  }
+  // The sockets T3's tmux and Bob's relays fall back to in the temporary folders.
+  for (const folder of temporary.filter((path) => seen.get(path) === "rw")) {
+    dynamic.push(
+      `for f in ${shellQuote(folder)}/tmux-* ${shellQuote(folder)}/t3-bob-*; do bind ro-bind "$f"; done`,
+    );
+  }
+  const network = files.network;
+  const uid = NodeOS.userInfo().uid;
+  const gid = NodeOS.userInfo().gid;
+  const options = [
+    "--unshare-all",
+    "--unshare-user",
+    "--die-with-parent",
+    "--new-session",
+    ...(network === undefined ? [] : ["--share-net", "--uid", String(uid), "--gid", String(gid)]),
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+    ...(network?.resolvTarget === undefined
+      ? []
+      : ["--ro-bind", network.resolvConf, network.resolvTarget]),
+    "--seccomp",
+    "4",
+  ];
+  const start =
+    network === undefined
+      ? `exec 3<"$args" 4<${shellQuote(files.seccomp)} || exit 126
+${tools.rm} -f "$args"
+exec ${tools.bwrap} --args 3 -- "$@"`
+      : `exec ${network.pasta} --config-net --quiet -t none -u none -T none -U none --no-map-gw --dns-forward ${PASTA_RESOLVER} -- /bin/sh -c ${shellQuote(
+          `${[
+            ...network.routes.map(
+              (route) =>
+                `${network.ip} ${route.includes(":") ? "-6 " : ""}route add prohibit ${route}`,
+            ),
+            "true",
+          ].join(" && ")} || exit 126
+exec 3<"$1" 4<"$2" || exit 126
+${tools.rm} -f "$1"
+shift 2
+exec ${tools.bwrap} --args 3 -- "$@"`,
+        )} t3-bob-network "$args" ${shellQuote(files.seccomp)} "$@"`;
+  return `#!/bin/sh
+# Bob's commands in T3 Code's ${input.mode} sandbox, under Bubblewrap. Run with the command.
+denied=${shellQuote(files.denied)}
+ok=1 remounts=
+a() { printf '%s\\0' "$@" || ok=; }
+# Over what a command may not read: an empty folder no one opens, or a file no one reads.
+hide() {
+  if [ -L "$1" ] || [ ! -e "$1" ]; then return 1; fi
+  if [ -d "$1" ]; then a --perms 0000 --tmpfs "$1" --remount-ro "$1"; else a --ro-bind "$denied" "$1"; fi
+}
+# Over a folder holding something it may read: one it may pass through but not list.
+mask() {
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    a --perms 0111 --tmpfs "$1"
+    remounts="$remounts
+$1"
+  else
+    hide "$1"
+    return 1
+  fi
+}
+# Inside such a folder: a folder on the way, a link as it is, and what it may read or write.
+pass() {
+  if [ -L "$1" ]; then a --symlink "$(${tools.readlink} "$1")" "$1"; return 1; fi
+  if [ -d "$1" ]; then a --perms 0111 --dir "$1"; else return 1; fi
+}
+show() {
+  if [ -L "$2" ]; then a --symlink "$(${tools.readlink} "$2")" "$2"; return 1; fi
+  if [ -e "$2" ]; then a "--$1" "$2" "$2"; else return 1; fi
+}
+# Elsewhere, a path that may be written where its folder may not, or the other way round.
+bind() {
+  if [ -e "$2" ] && [ ! -L "$2" ]; then a "--$1" "$2" "$2"; else return 1; fi
+}
+here=$(pwd -P) || exit 126
+args=$(${tools.mktemp} ${shellQuote(NodePath.join(files.runs, "XXXXXXXXXX"))}) || exit 126
+{
+a ${options.map(shellQuote).join(" ")} --chdir "$here"
+${steps.join("\n")}
+${dynamic.filter((line) => line !== "").join("\n")}
+set -f
+IFS='
+'
+for f in $remounts; do a --remount-ro "$f"; done
+} >"$args"
+if [ -z "$ok" ]; then ${tools.rm} -f "$args"; exit 126; fi
+${start}
+`;
+}
+
+/** Whether a file holds exactly `content`. */
+function holds(path: string, content: string | Buffer): boolean {
+  try {
+    return NodeFS.readFileSync(path).equals(Buffer.from(content));
   } catch {
     return false;
   }
@@ -1382,9 +2157,9 @@ function executable(path: string): boolean {
  * Writes a file unless it already holds `content`, through a rename so no reader sees half, and
  * gives it `mode` either way.
  */
-function writeOnce(path: string, content: string, mode: number): void {
+function writeOnce(path: string, content: string | Buffer, mode: number): void {
   try {
-    if (NodeFS.readFileSync(path, "utf8") === content) {
+    if (NodeFS.readFileSync(path).equals(Buffer.from(content))) {
       NodeFS.chmodSync(path, mode);
       return;
     }

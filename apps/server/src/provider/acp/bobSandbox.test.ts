@@ -19,13 +19,25 @@ import {
 } from "./bobSandbox.ts";
 
 const available = bobSandboxAvailable(HostProcess.Platform.defaultValue());
+/**
+ * Bubblewrap's sandbox, which refuses what is there rather than names: a file it hides reads as
+ * `EACCES` and one it keeps read-only writes as `EROFS`, where Seatbelt says `EPERM` to both.
+ */
+const linux = HostProcess.Platform.defaultValue() === "linux";
+const unreadable = linux ? "EACCES" : "EPERM";
+const unwritable = linux ? "EROFS" : "EPERM";
 /** macOS's python3 can call the system's file functions, which the folder-clone test needs. */
 const pythonAvailable =
   NodeChildProcess.spawnSync("/usr/bin/python3", [
     "-c",
     "import ctypes; ctypes.CDLL(None).clonefile",
   ]).status === 0;
-const root = NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "bob-sb-")));
+// Linux's `/tmp` is a temporary folder every sandbox writes, so there the tests work beside them.
+const root = NodeFS.realpathSync(
+  NodeFS.mkdtempSync(NodePath.join(linux ? process.cwd() : NodeOS.tmpdir(), ".vitest-bob-sb-")),
+);
+// Probe scripts there are CommonJS, whatever the package beside them says.
+NodeFS.writeFileSync(NodePath.join(root, "package.json"), "{}");
 afterAll(() => NodeFS.rmSync(root, { recursive: true, force: true }));
 
 /**
@@ -181,6 +193,11 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     expect(run(`touch ${NodePath.join(home, "Library", "notes.txt")}`).status).toBe(0);
     // The temp folders stay writable, but not the sockets T3's tmux and Bob's relays fall back to.
     const tmp = NodePath.join(base, "tmp");
+    if (linux) {
+      // Bubblewrap keeps those that are there.
+      NodeFS.mkdirSync(NodePath.join(tmp, "tmux-501"));
+      NodeFS.writeFileSync(NodePath.join(tmp, "t3-bob-0123"), "");
+    }
     expect(run(`touch ${NodePath.join(tmp, "plain.txt")}`).status).toBe(0);
     expect(run(`mkdir -p ${tmp}/tmux-501 && touch ${tmp}/tmux-501/default`).status).not.toBe(0);
     expect(run(`touch ${NodePath.join(tmp, "t3-bob-0123")}`).status).not.toBe(0);
@@ -193,6 +210,8 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     expect(NodeFS.readFileSync(NodePath.join(workspace, "made.txt"), "utf8")).toBe("hi\n");
     expect(run(`echo hi > ${NodePath.join(base, "tmp", "t.txt")}`).status).toBe(0);
     expect(run("echo x > .git/config").status).not.toBe(0);
+    // Bubblewrap holds only the `.env` files that are there (FORK.md, Known gaps).
+    if (linux) NodeFS.writeFileSync(NodePath.join(workspace, ".env"), "SECRET=1");
     expect(run("echo x > .env").status).not.toBe(0);
     expect(run(`echo x > ${NodePath.join(home, "escaped.txt")}`).status).not.toBe(0);
     expect(NodeFS.existsSync(NodePath.join(home, "escaped.txt"))).toBe(false);
@@ -305,9 +324,15 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     NodeFS.mkdirSync(agents, { recursive: true });
     const dist = NodePath.join(workspace, "dist");
     // A fresh worktree has no `dist` yet: the rule lets commands create it, as a symlink too.
+    // Bubblewrap opens only a rule's folder that is there, so there another sandbox makes it.
+    const link = (target: string, at: string) => {
+      if (!linux) return run(`ln -s '${target}' '${at}'`).status;
+      NodeFS.symlinkSync(target, at);
+      return 0;
+    };
     const rules = { read: [], write: [dist], private: [] };
     sandbox.update(rules);
-    expect(run(`ln -s '${agents}' dist`).status).toBe(0);
+    expect(link(agents, dist)).toBe(0);
     // The next turn rebuilds the profile.
     sandbox.update(rules);
     run("echo pwned > dist/evil.plist");
@@ -315,7 +340,7 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     // Nor at a rule's folder outside the workspace, which the rule itself lets commands make.
     const out = NodePath.join(base, "out");
     sandbox.update({ read: [], write: [out], private: [] });
-    expect(run(`ln -s '${agents}' '${out}'`).status).toBe(0);
+    expect(link(agents, out)).toBe(0);
     sandbox.update({ read: [], write: [out], private: [] });
     run(`echo pwned > '${NodePath.join(out, "evil.plist")}'`);
     expect(NodeFS.existsSync(NodePath.join(agents, "evil.plist"))).toBe(false);
@@ -417,8 +442,10 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     NodeFS.mkdirSync(NodePath.join(workspace, "svc"));
     NodeFS.writeFileSync(NodePath.join(workspace, "svc", ".env"), "SECRET=1");
     const moved = NodePath.join(base, "tmp", "svc");
-    expect(run(`mv svc '${moved}'`).status).toBe(0);
+    // Under Bubblewrap the move fails at the `.env` file, which `mv` cannot copy, and leaves it.
+    expect(run(`mv svc '${moved}'`).status === 0).toBe(!linux);
     expect(run(`cat '${NodePath.join(moved, ".env")}'`).stdout).toBe("");
+    if (linux) expect(NodeFS.existsSync(NodePath.join(workspace, "svc", ".env"))).toBe(true);
   });
 
   it("keeps a credential store closed where its link leads", () => {
@@ -655,6 +682,7 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     const { home, sandbox, run } = setUp("workspace-write");
     const other = NodePath.join(home, "other");
     NodeFS.mkdirSync(NodePath.join(other, ".git", "hooks"), { recursive: true });
+    if (linux) NodeFS.writeFileSync(NodePath.join(other, ".env"), "SECRET=1");
     sandbox.update({ read: [], write: [other], private: [] });
     expect(run(`echo x > ${NodePath.join(other, "notes.md")}`).status).toBe(0);
     expect(run(`echo x > ${NodePath.join(other, ".git", "hooks", "pre-commit")}`).status).not.toBe(
@@ -671,7 +699,7 @@ describe.skipIf(!available)("makeBobSandbox", () => {
     NodeFS.writeFileSync(profile, "(version 1)\n(allow default)\n");
     expect(sandbox.ready()).toBe(false);
     expect(sandbox.ready()).toBe(true);
-    expect(NodeFS.readFileSync(profile, "utf8")).toContain("(deny default)");
+    expect(NodeFS.readFileSync(profile, "utf8")).toContain(linux ? "--args 3" : "(deny default)");
     // A shell Bob cannot run makes Bob fall back to /bin/sh, outside the sandbox.
     NodeFS.chmodSync(shell, 0o400);
     expect(sandbox.ready()).toBe(false);
@@ -764,6 +792,9 @@ describe.skipIf(!available)("bobProcessSandboxSpawn", () => {
     }
     NodeFS.writeFileSync(NodePath.join(workspace, "README.md"), "readme");
     NodeFS.writeFileSync(NodePath.join(workspace, ".bob", "mcp.json"), "{}");
+    // Bubblewrap lets Bob write its sign-in only where it is signed in, with the file there.
+    if (linux)
+      NodeFS.writeFileSync(NodePath.join(home, ".bob", "settings", "auth-secrets.json"), "{}");
     // A `bob` that is the probe itself, so the sandbox holds the process, not only its commands.
     const bob = NodePath.join(base, "bin", "bob");
     NodeFS.mkdirSync(NodePath.dirname(bob));
@@ -797,14 +828,16 @@ describe.skipIf(!available)("bobProcessSandboxSpawn", () => {
       "settings folder": "ok",
       "sign-in": "ok",
       trust: "ok",
-      settings: "EPERM",
-      "mcp servers": "EPERM",
-      workspace: "EPERM",
+      settings: unwritable,
+      "mcp servers": unwritable,
+      workspace: unwritable,
       temporary: "ok",
       "read workspace": "ok",
-      "project bob": "EPERM",
-      command: "exit 1",
-      "this machine": "EPERM",
+      "project bob": unreadable,
+      // dash says 2 where it cannot create a file.
+      command: linux ? "exit 2" : "exit 1",
+      // pasta's namespace has a loopback of its own, with nothing listening.
+      "this machine": linux ? "ECONNREFUSED" : "EPERM",
       socket: "EPERM",
       // Allowed, whether the address answers or the host has no network.
       "another machine": expect.not.stringMatching(/^EPERM$/),
@@ -859,7 +892,11 @@ process.stdout.write(JSON.stringify(outcomes));
       encoding: "utf8",
     });
     expect(probe.status, probe.stderr).toBe(0);
-    expect(JSON.parse(probe.stdout)).toEqual({ edit: "EPERM", create: "EPERM", temporary: "ok" });
+    expect(JSON.parse(probe.stdout)).toEqual({
+      edit: unwritable,
+      create: unwritable,
+      temporary: "ok",
+    });
     expect(NodeFS.readFileSync(NodePath.join(workspace, "README.md"), "utf8")).toBe("readme");
     expect(NodeFS.existsSync(NodePath.join(workspace, "made.txt"))).toBe(false);
     expect(NodeFS.readFileSync(NodePath.join(temporary, "t.txt"), "utf8")).toBe("x");
@@ -873,7 +910,7 @@ process.stdout.write(JSON.stringify(outcomes));
       cacheDir: root,
       stateDir: root,
     };
-    expect(bobProcessSandboxSpawn({ ...options, platform: "linux" })).toBeUndefined();
+    expect(bobProcessSandboxSpawn({ ...options, platform: "win32" })).toBeUndefined();
     expect(
       bobProcessSandboxSpawn({ ...options, platform: HostProcess.Platform.defaultValue() }),
     ).toBeUndefined();
@@ -881,8 +918,9 @@ process.stdout.write(JSON.stringify(outcomes));
 });
 
 describe("bobSandboxAvailable", () => {
-  it("needs macOS's sandbox-exec", () => {
-    expect(bobSandboxAvailable("linux")).toBe(false);
+  it("needs macOS's sandbox-exec or Linux's Bubblewrap", () => {
+    expect(bobSandboxAvailable("win32")).toBe(false);
+    expect(bobSandboxAvailable("freebsd")).toBe(false);
   });
 });
 
@@ -975,8 +1013,10 @@ describe("bobSandboxFolderSuggestion", () => {
     ]) {
       expect(suggest(path), path).toBeUndefined();
     }
-    // A folder that is there is offered as the disk spells it.
-    expect(suggest(".CACHE/tool/x")).toEqual({ kind: "write", folder: at(".cache/tool") });
+    // A folder that is there is offered as the disk spells it, on a disk blind to case.
+    if (NodeFS.existsSync(NodePath.join(home, ".CACHE"))) {
+      expect(suggest(".CACHE/tool/x")).toEqual({ kind: "write", folder: at(".cache/tool") });
+    }
     // Nor a path no rule could spell, though its folder would otherwise be offered to read.
     expect(suggest(".vercel\bx/auth.json")).toBeUndefined();
     expect(suggest(".vercel\uD800/auth.json")).toBeUndefined();
@@ -1053,6 +1093,8 @@ describe.skipIf(!available)("commandSandboxSpawn", () => {
     expect(inWorktree(`mkdir ${NodePath.join(home, "Library", "Caches", "tool")}`).status).toBe(0);
     // Not the base checkout, its git configuration, or where the worktree says its repository is.
     const gitDir = NodePath.join(repository, ".git", "worktrees", "ws");
+    // Bubblewrap keeps the one that is there; git reads it only where the repository says to.
+    if (linux) NodeFS.writeFileSync(NodePath.join(gitDir, "config.worktree"), "");
     for (const target of [
       NodePath.join(repository, "README.md"),
       NodePath.join(repository, ".git", "config"),
@@ -1104,8 +1146,8 @@ describe.skipIf(!available)("commandSandboxSpawn", () => {
         cacheDir: NodePath.join(root, "caches"),
         stateDir: NodePath.join(root, "state"),
       })!.args[1]!;
-    expect(profileOf(true)).toContain("(allow network-outbound)");
-    expect(profileOf(false)).not.toContain("network-outbound");
+    expect(profileOf(true)).toContain(linux ? "pasta" : "(allow network-outbound)");
+    expect(profileOf(false)).not.toContain(linux ? "pasta" : "network-outbound");
   });
 });
 
@@ -1113,7 +1155,7 @@ describe("commandSandboxSpawn without a sandbox", () => {
   it("gives none where the host has no sandbox", () => {
     expect(
       commandSandboxSpawn({
-        platform: "linux",
+        platform: "win32",
         command: "true",
         cwd: root,
         mode: "read-only",

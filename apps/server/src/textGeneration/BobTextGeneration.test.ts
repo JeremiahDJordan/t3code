@@ -24,7 +24,7 @@ import {
 
 import * as ServerConfig from "../config.ts";
 import * as TextGeneration from "./TextGeneration.ts";
-import { BOB_REVIEW_GUIDE_MACOS_ONLY, makeBobTextGeneration } from "./BobTextGeneration.ts";
+import { BOB_REVIEW_GUIDE_NO_HOST_SANDBOX, makeBobTextGeneration } from "./BobTextGeneration.ts";
 import {
   BOB_API_KEY_REQUIRED_MESSAGE,
   BOB_SSO_SIGN_IN_MESSAGE,
@@ -378,7 +378,10 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
             execute: "reject",
           });
           // Bob writing the checkout itself, as its own tools would, is stopped.
-          expect(report.wrote).toBe("EPERM");
+          // Seatbelt's refusal, or Bubblewrap's read-only mount.
+          expect(report.wrote).toBe(
+            HostProcess.Platform.defaultValue() === "linux" ? "EROFS" : "EPERM",
+          );
           expect(NodeFS.existsSync(NodePath.join(checkout, "notes.md"))).toBe(false);
 
           // In the checkout, left in Agent mode, where Bob starts, without MCP servers or subagents.
@@ -422,12 +425,12 @@ it.layer(BobTextGenerationTestLayer)("BobTextGeneration", (it) => {
   );
 
   it.effect("refuses a review guide without starting Bob where the host has no sandbox", () =>
-    withFakeAcpBob({ platform: "linux" }, (textGeneration, requestLogPath) =>
+    withFakeAcpBob({ platform: "win32" }, (textGeneration, requestLogPath) =>
       Effect.gen(function* () {
         const error = yield* Effect.flip(
           textGeneration.generateReviewGuide(reviewGuideInput(process.cwd(), "HEAD")),
         );
-        expect(error.detail).toBe(BOB_REVIEW_GUIDE_MACOS_ONLY);
+        expect(error.detail).toBe(BOB_REVIEW_GUIDE_NO_HOST_SANDBOX);
         expect(NodeFS.existsSync(requestLogPath)).toBe(false);
       }),
     ),
