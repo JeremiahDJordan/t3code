@@ -986,6 +986,16 @@ connect asking for T3 Connect sign-in; the `schedule_task` tool description stil
 an agent to suggest T3 Connect when a task has no webhook URL; the desktop Clerk bridge
 is still created, since it also owns deep links and the single-instance lock.
 
+### License: upstream's MIT, with the fork's changes copyright Jeremiah Jordan (owner, 2026-10-16)
+
+`LICENSE` keeps upstream's MIT notice, "Copyright (c) 2026 T3 Tools Inc.", and adds "Copyright (c)
+2026 Jeremiah Jordan (changes in this fork)". The fork's changes are MIT on the same terms. No
+source file carries its own header, so none is added. Code the project vendored keeps its own MIT
+`LICENSE` beside it (`apps/mobile/modules/t3-composer-editor`, `apps/mobile/modules/t3-source-text`,
+`native/libghostty-vt`, `apps/web/src/terminal/ghostty/fonts`), as do the marketing site's OFL
+fonts. MIT covers the code, not the T3 names and artwork, which a published fork must replace. Leave
+the `LICENSE` change out of any patch offered upstream.
+
 ### Pair the phone through Cloudflare Access with a service token (owner, 2026-10-07)
 
 A machine behind the owner's own Cloudflare Tunnel sits behind Cloudflare Access, which turns
