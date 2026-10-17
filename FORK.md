@@ -1049,6 +1049,10 @@ connect asking for T3 Connect sign-in; the `schedule_task` tool description stil
 an agent to suggest T3 Connect when a task has no webhook URL; the desktop Clerk bridge
 is still created, since it also owns deep links and the single-instance lock.
 
+`release.yml` builds with the flag off: its `relay_public_config` job reads `T3_CONNECT_ENABLED`
+from `forkFeatures.ts` and, while it is `false`, reads no relay state and asks for no relay or
+Clerk values, so the bundle is built with them empty.
+
 ### Talk to no T3 web service (owner, 2026-10-16)
 
 The owner's instruction: turn off everything that talks to T3's web services, remove T3's

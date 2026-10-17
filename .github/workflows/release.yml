@@ -380,6 +380,18 @@ jobs:
             args:
               - --filter=t3code-relay...
 
+      # Fork: the bundle needs relay and Clerk values only when the fork's
+      # T3_CONNECT_ENABLED flag is on; off, they stay empty and no relay state is read.
+      - id: connect
+        name: Read the fork's T3 Connect flag
+        run: |
+          enabled="$(node --input-type=module -e "const { T3_CONNECT_ENABLED } = await import('./packages/shared/src/forkFeatures.ts'); console.log(T3_CONNECT_ENABLED)")"
+          echo "enabled=$enabled" >> "$GITHUB_OUTPUT"
+
+      - name: Leave relay client tracing config empty
+        if: steps.connect.outputs.enabled != 'true'
+        run: ': > "$RUNNER_TEMP/relay-client-tracing.env"'
+
       # The deployed stack's outputs, read from Alchemy's state store without
       # planning or applying. Select the backend explicitly to avoid loading
       # the stack's unrelated provider credentials; suppress informational logs
@@ -387,6 +399,7 @@ jobs:
       # Redacted values are persisted as
       # {"__redacted__": "<value>"}; the token is masked before it is written.
       - name: Read production relay tracing config
+        if: steps.connect.outputs.enabled == 'true'
         shell: bash
         working-directory: infra/relay
         run: |
@@ -416,6 +429,7 @@ jobs:
 
       - id: public_config
         name: Resolve production relay public config
+        if: steps.connect.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
