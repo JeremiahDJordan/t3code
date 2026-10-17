@@ -375,6 +375,8 @@ interface CopyState {
   readonly source: string;
   readonly realSource: string;
   readonly destination: string;
+  /** Where the copy ends up once the staging folder is renamed; relative links resolve there. */
+  readonly finalDestination: string;
   readonly options: CopyOptions;
   readonly skipped: Array<{ path: string; reason: string }>;
   readonly linksIntoSource: Array<{ path: string; target: string }>;
@@ -412,10 +414,13 @@ function copyEntry(state: CopyState, segments: ReadonlyArray<string>, snapshot: 
   } else if (stat.isSymbolicLink()) {
     const target = NodeFS.readlinkSync(from);
     NodeFS.symlinkSync(target, to);
-    if (
-      NodePath.isAbsolute(target) &&
-      [state.source, state.realSource].some((root) => isInside(NodePath.resolve(target), root))
-    ) {
+    // A relative link can climb out of the copy into T3's folder too, such as
+    // `userdata/settings.json -> ../../.t3/settings-current.json`.
+    const resolved = NodePath.resolve(
+      NodePath.dirname(NodePath.join(state.finalDestination, ...segments)),
+      target,
+    );
+    if ([state.source, state.realSource].some((root) => isInside(resolved, root))) {
       state.linksIntoSource.push({ path: segments.join("/"), target });
     }
   } else if (stat.isFile()) {
@@ -597,6 +602,7 @@ function migrate(input: {
     source: input.source,
     realSource: NodeFS.realpathSync(input.source),
     destination: staging,
+    finalDestination: input.destination,
     options: input.options,
     skipped: [],
     linksIntoSource: [],

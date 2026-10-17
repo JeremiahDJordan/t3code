@@ -218,6 +218,28 @@ describe("removeT3Data", () => {
     expect(result.removed).not.toContain(env.t3Home);
   });
 
+  it("keeps a repository in T3's work folders, whose .git holds its only history", async () => {
+    const env = setup();
+    // A scratch project with a local-only commit, removed from Z6, so nothing refers to it.
+    const scratch = NodePath.join(env.t3Home, "scratch", "2026-10-16-repo");
+    NodeFS.mkdirSync(scratch, { recursive: true });
+    git(scratch, "init", "-q", "-b", "main");
+    NodeFS.writeFileSync(NodePath.join(scratch, "app.ts"), "only here\n");
+    git(scratch, "add", ".");
+    git(scratch, "commit", "-q", "-m", "local only");
+
+    const result = await remove(env);
+
+    expect(result.status).toBe("removed");
+    if (result.status !== "removed") return;
+    expect(git(scratch, "log", "--oneline")).toContain("local only");
+    expect(result.kept).toContainEqual({
+      path: scratch,
+      reason: "it is a git repository with its own history",
+    });
+    expect(result.removed).toContain(env.clean);
+  });
+
   it("keeps a referenced folder that is not a git checkout", async () => {
     const env = setup();
     const loose = NodePath.join(env.t3Home, "worktrees", "repo", "lost-git");
@@ -262,6 +284,57 @@ describe("removeT3Data", () => {
     // Only the parts of userdata that are not above a protected path go.
     expect(NodeFS.existsSync(NodePath.join(env.t3Home, "userdata", "other.json"))).toBe(false);
     expect(NodeFS.existsSync(NodePath.join(env.t3Home, "userdata", "settings.json"))).toBe(false);
+  });
+
+  it("keeps the files Z6's copied links still read, and not ones a link has left", async () => {
+    const root = NodeFS.realpathSync(
+      NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-clean-")),
+    );
+    roots.push(root);
+    const t3Home = NodePath.join(root, ".t3");
+    const userdata = NodePath.join(t3Home, "userdata");
+    NodeFS.mkdirSync(userdata, { recursive: true });
+    const settings = NodePath.join(t3Home, "settings-current.json");
+    NodeFS.writeFileSync(settings, '{"theme":"cinder"}');
+    NodeFS.symlinkSync(settings, NodePath.join(userdata, "settings.json"));
+    // Relative, but it climbs out of the copy back into T3's home.
+    const themes = NodePath.join(t3Home, "themes-current.json");
+    NodeFS.writeFileSync(themes, "{}");
+    NodeFS.symlinkSync("../../.t3/themes-current.json", NodePath.join(userdata, "themes.json"));
+    const keybindings = NodePath.join(t3Home, "keybindings-current.json");
+    NodeFS.writeFileSync(keybindings, "[]");
+    NodeFS.symlinkSync(keybindings, NodePath.join(userdata, "keybindings.json"));
+    const z6Home = NodePath.join(root, ".z6");
+    expect(migrateHomeFromT3({ t3Home, z6Home }).status).toBe("migrated");
+    const db = new NodeSqlite.DatabaseSync(NodePath.join(z6Home, "userdata", "statev2.sqlite"));
+    db.exec(`
+      CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, deleted_at TEXT, payload_json TEXT);
+      CREATE TABLE projection_projects (project_id TEXT, workspace_root TEXT, deleted_at TEXT);
+    `);
+    db.close();
+    // Z6 has since replaced one link with a file of its own.
+    NodeFS.rmSync(NodePath.join(z6Home, "userdata", "keybindings.json"));
+    NodeFS.writeFileSync(NodePath.join(z6Home, "userdata", "keybindings.json"), "[]");
+    const trashDir = NodePath.join(root, "Trash");
+    NodeFS.mkdirSync(trashDir);
+
+    const result = await removeT3Data({
+      z6Home,
+      z6UserData: undefined,
+      t3UserData: undefined,
+      homeDirectory: root,
+      trash: async (path) =>
+        NodeFS.renameSync(path, NodePath.join(trashDir, NodePath.basename(path))),
+    });
+
+    expect(result.status).toBe("removed");
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "userdata", "settings.json"), "utf8")).toBe(
+      '{"theme":"cinder"}',
+    );
+    expect(NodeFS.readFileSync(NodePath.join(z6Home, "userdata", "themes.json"), "utf8")).toBe(
+      "{}",
+    );
+    expect(NodeFS.existsSync(keybindings)).toBe(false);
   });
 
   it("matches stored paths through symlinks and, where the disk ignores it, case", async () => {

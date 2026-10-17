@@ -17,6 +17,7 @@ import {
   type T3DataKind,
   type T3MigrationMarker,
   describeT3Service,
+  isInside,
   nowIso,
   readT3MigrationMarker,
   t3DesktopInUse,
@@ -72,6 +73,24 @@ function markedLocations(paths: T3DataPaths): ReadonlyArray<MarkedLocation> {
     const marker = readT3MigrationMarker(markerDir);
     return marker === undefined ? [] : [{ markerDir, marker }];
   });
+}
+
+/**
+ * Where the symlinks the copy kept pointing into T3's folders point now. Their targets stay, or
+ * the Z6 file read through the link breaks; a link since removed or retargeted protects nothing.
+ */
+function liveLinkTargets(marked: ReadonlyArray<MarkedLocation>): Array<string> {
+  return marked.flatMap(({ markerDir, marker }) =>
+    (marker.linksIntoSource ?? []).flatMap(({ path }) => {
+      const link = NodePath.join(markerDir, ...path.split("/"));
+      try {
+        if (!NodeFS.lstatSync(link).isSymbolicLink()) return [];
+        return [NodePath.resolve(NodePath.dirname(link), NodeFS.readlinkSync(link))];
+      } catch {
+        return [];
+      }
+    }),
+  );
 }
 
 export function readT3DataState(paths: T3DataPaths): T3DataState {
@@ -399,6 +418,17 @@ type Decision =
   | { readonly path: string; readonly action: "keep"; readonly reason: string };
 
 async function decideCheckout(path: string): Promise<Decision> {
+  // A repository's own `.git` folder holds its only history; a linked worktree's `.git` is a
+  // file pointing at a repository elsewhere, which keeps its commits.
+  let gitEntry: NodeFS.Stats | undefined;
+  try {
+    gitEntry = NodeFS.lstatSync(NodePath.join(path, ".git"));
+  } catch {
+    gitEntry = undefined;
+  }
+  if (gitEntry === undefined || !gitEntry.isFile()) {
+    return { path, action: "keep", reason: "it is a git repository with its own history" };
+  }
   let status: string;
   try {
     status = await git(path, ["status", "--porcelain"]);
@@ -412,8 +442,8 @@ async function decideCheckout(path: string): Promise<Decision> {
 
 /**
  * What to do with everything in a T3 home. A protected path, and every folder above one, stays;
- * a git checkout is never split. In T3's work folders only clean git checkouts and empty folders
- * go; anything else there may be the user's work. Everything else in the home is T3's own.
+ * a git checkout is never split. In T3's work folders only clean linked worktrees and empty folders
+ * go; a repository's own history and anything else there may be the user's work. Everything else in the home is T3's own.
  */
 async function planHome(
   matcher: ReturnType<typeof pathMatcher>,
@@ -588,6 +618,7 @@ export async function removeT3Data(
       reason: `Nothing was removed: ${inUse}. Quit T3 Code and stop its server, then try again.`,
     };
   }
+  const linkTargets = liveLinkTargets(marked);
   let references: ReadonlyArray<string> = [];
   if (homes.length > 0) {
     const read = z6References({
@@ -596,7 +627,7 @@ export async function removeT3Data(
       t3Roots: homes,
     });
     if (!read.ok) return { status: "refused", reason: `Nothing was removed: ${read.reason}` };
-    references = read.paths;
+    references = [...read.paths, ...linkTargets];
   }
 
   const removed: Array<string> = [];
@@ -619,7 +650,12 @@ export async function removeT3Data(
 
   for (const { marker } of marked) {
     if (marker.kind !== "home") {
-      await moveAway(marker.source);
+      const source = realish(marker.source);
+      if (linkTargets.some((target) => isInside(realish(target), source))) {
+        kept.push({ path: marker.source, reason: "a link Z6 Code copied still points into it" });
+      } else {
+        await moveAway(marker.source);
+      }
       continue;
     }
     const matcher = pathMatcher(marker.source, references);

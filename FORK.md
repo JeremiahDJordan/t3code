@@ -933,13 +933,15 @@ server explicitly, so it copies itself, first thing in `main.ts`
   a path from every table of Z6's database except the event and receipt logs (conversation tables
   only where a row names T3's folder), skipping rows marked deleted, so thread worktrees
   (archived threads included), project roots and any other stored path count, plus paths in
-  Z6's settings files (such as a worktrees folder in `~/.t3`). Paths compare through symlinks
+  Z6's settings files (such as a worktrees folder in `~/.t3`), plus the current target of each
+  copied link in `linksIntoSource` that is still a link; a desktop profile such a link points
+  into stays whole. Paths compare through symlinks
   (`/tmp` and `/private/tmp`) and without case where the disk ignores case. A protected path and
   every folder above it stay, a git checkout is never split, and only the unprotected siblings
   go, so a referenced folder without `.git` is kept too. In `worktrees/`, `scratch/` and
-  `projects/` only clean, unreferenced git checkouts and empty folders go; a checkout with
-  uncommitted changes or one git cannot check, and loose files, stay as possibly the user's
-  work. Everything else in the home is T3's own and goes. Items go to the Trash (Electron's
+  `projects/` only clean, unreferenced linked worktrees and empty folders go; a repository whose
+  own `.git` holds its only history, a checkout with uncommitted changes or one git cannot check,
+  and loose files, stay as possibly the user's work. Everything else in the home is T3's own and goes. Items go to the Trash (Electron's
   `shell.trashItem`, macOS's `trash`, or the XDG trash), never deleted outright. It does not run
   `git worktree prune`, which would also forget unrelated worktrees (one on an unmounted drive,
   say); the record's `trashedCheckouts` names the checkouts git still lists. It reports what
