@@ -7,10 +7,19 @@ import {
 } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ProjectId, type OrchestrationV2ThreadShell, ProviderInstanceId } from "@t3tools/contracts";
 
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import * as PushDevices from "./PushDevices.ts";
 import * as PushGatewayClient from "./PushGatewayClient.ts";
 import * as PushGatewayPublisher from "./PushGatewayPublisher.ts";
@@ -176,6 +185,102 @@ describe("PushGatewayPublisher", () => {
       const deliverer = yield* h.deliverer;
       yield* deliverer.publish(THREAD, state("running"));
       assert.deepStrictEqual(h.cleared, [{ kind: "push", deviceId: "pixel", token: "fcm" }]);
+    }),
+  );
+});
+
+describe("PushGatewayPublisher wiring", () => {
+  const PROJECT = ProjectId.make("project");
+  const shell = {
+    id: THREAD,
+    projectId: PROJECT,
+    title: "Fix the build",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt" },
+    lineage: { rootThreadId: THREAD, parentThreadId: null, relationshipToParent: null },
+    status: "running",
+    activityRunStatus: null,
+    pendingRuntimeRequest: null,
+    pendingBackgroundTasks: [],
+    latestRunCompletedAt: null,
+    archivedAt: null,
+    updatedAt: DateTime.makeUnsafe(NOW),
+  } as unknown as OrchestrationV2ThreadShell;
+
+  it.effect("publishes a thread's activity and repaints a phone after it registers", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const sent: Array<ReadonlyArray<PushGatewayDelivery>> = [];
+      const replayed = yield* Deferred.make<void>();
+      const registrations = yield* PubSub.unbounded<PushDevices.PushDeviceRegistration>();
+      const devices = [device({ activityPushToken: "la" })];
+      const layer = Layer.mergeAll(
+        Layer.succeed(
+          PushDevices.PushDevices,
+          PushDevices.PushDevices.of({
+            register: () => Effect.void,
+            registerLiveActivity: () => Effect.void,
+            unregister: () => Effect.void,
+            listDeliverable: Effect.sync(() => [...devices]),
+            clearPushToken: () => Effect.void,
+            clearActivityPushToken: () => Effect.void,
+            registrations: Stream.fromPubSub(registrations),
+          }),
+        ),
+        Layer.succeed(
+          PushGatewayClient.PushGatewayClient,
+          PushGatewayClient.PushGatewayClient.of({
+            send: (deliveries) =>
+              Effect.gen(function* () {
+                sent.push(deliveries);
+                if (sent.length === 2) yield* Deferred.succeed(replayed, undefined);
+                return deliveries.map(() => ({ ok: true, status: 200 }));
+              }),
+          }),
+        ),
+        Layer.mock(ServerEnvironment.ServerEnvironment)({
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("env")),
+        }),
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: () => Effect.succeed(shell),
+          getShellSnapshot: () =>
+            Effect.succeed({
+              schemaVersion: 2,
+              snapshotSequence: 1,
+              threads: [],
+              archivedThreads: [],
+            }),
+          streamDomainEvents: Stream.never,
+        }),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () => Effect.succeed(Option.some({ id: PROJECT, title: "Project" } as never)),
+          snapshot: Effect.succeed({ projects: [] } as never),
+        }),
+      );
+      yield* Effect.gen(function* () {
+        const publisher = yield* PushGatewayPublisher.make({
+          url: "https://push.example.test",
+          credential: Redacted.make("secret"),
+        });
+        yield* publisher.start();
+        yield* publisher.publishThread(THREAD);
+        assert.deepStrictEqual(
+          sent[0]?.map((delivery) => [delivery.kind, delivery.token]),
+          [["liveactivity", "la"]],
+        );
+
+        // A new card registers: the publisher repaints it at once, without a publish.
+        devices[0] = { ...devices[0]!, activityPushToken: "new-card" };
+        yield* PubSub.publish(registrations, {
+          kind: "live-activity" as const,
+          deviceId: "iphone",
+        });
+        yield* Deferred.await(replayed);
+        assert.deepStrictEqual(
+          sent[1]?.map((delivery) => [delivery.kind, delivery.token]),
+          [["liveactivity", "new-card"]],
+        );
+      }).pipe(Effect.provide(layer), Effect.scoped);
     }),
   );
 });
