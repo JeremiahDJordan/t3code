@@ -8,6 +8,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   ThreadId,
@@ -102,6 +103,36 @@ describe("command permissions", () => {
         );
         expect(registry.get(check.permissionAtom(env))).toBe(true);
         yield* check.authorize(registry, env);
+      }),
+    ),
+  );
+
+  it.effect("lets a read-only session register its phone for pushes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        for (const method of [
+          WS_METHODS.pushDevicesRegister,
+          WS_METHODS.pushDevicesRegisterLiveActivity,
+          WS_METHODS.pushDevicesUnregister,
+        ]) {
+          const push = createCommandPermissions(runtime, method);
+          registry.set(sessions(env), AsyncResult.success(grant(false)));
+          expect(registry.get(push.permissionAtom(env))).toBe(false);
+          expect((yield* push.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+          registry.set(
+            sessions(env),
+            AsyncResult.success({
+              ...grant(false),
+              scopes: [AuthOrchestrationReadScope],
+              permissions: [AuthOrchestrationReadScope],
+            }),
+          );
+          expect(registry.get(push.permissionAtom(env))).toBe(true);
+          yield* push.authorize(registry, env);
+        }
       }),
     ),
   );

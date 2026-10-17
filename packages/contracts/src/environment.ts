@@ -139,6 +139,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
       servers, which may still publish, so only an explicit false skips.
    */
   agentActivityPublishing: Schema.optionalKey(Schema.Boolean),
+  /** Fork: the server pushes through the owner's push gateway, so phones register their push
+      tokens with it (`pushDevices.register`). Absent when no gateway is configured. */
+  pushGateway: Schema.optionalKey(Schema.Boolean),
   projectCloneTracking: Schema.optionalKey(Schema.Boolean),
   /** Server keeps agents' check-ins and waits and streams each thread's
       (`subscribeThreadCheckIns`, `checkIns.cancel`). Absent on servers without them, where

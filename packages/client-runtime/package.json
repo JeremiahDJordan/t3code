@@ -199,6 +199,10 @@
       "types": "./src/state/checkIns.ts",
       "default": "./src/state/checkIns.ts"
     },
+    "./state/pushDevices": {
+      "types": "./src/state/pushDevices.ts",
+      "default": "./src/state/pushDevices.ts"
+    },
     "./state/deviceHubAccess": {
       "types": "./src/state/deviceHubAccess.ts",
       "default": "./src/state/deviceHubAccess.ts"

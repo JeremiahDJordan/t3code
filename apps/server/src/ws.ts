@@ -222,6 +222,7 @@ import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolve
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as BackgroundCommands from "./checkIns/BackgroundCommands.ts";
 import * as CheckInScheduler from "./checkIns/CheckInScheduler.ts";
+import * as PushDevices from "./push/PushDevices.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -1256,6 +1257,7 @@ const layerWsRpc = (
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const checkInScheduler = yield* CheckInScheduler.CheckInScheduler;
+      const pushDevices = yield* PushDevices.PushDevices;
       const backgroundCommands = yield* BackgroundCommands.BackgroundCommands;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
@@ -2836,6 +2838,11 @@ const layerWsRpc = (
         [WS_METHODS.subscribeThreadCheckIns]: (input) => checkInScheduler.stream(input.threadId),
         [WS_METHODS.checkInCancel]: (input) =>
           checkInScheduler.cancel(input.checkInId).pipe(Effect.map((cancelled) => ({ cancelled }))),
+        [WS_METHODS.pushDevicesRegister]: (input) => pushDevices.register(currentSessionId, input),
+        [WS_METHODS.pushDevicesRegisterLiveActivity]: (input) =>
+          pushDevices.registerLiveActivity(currentSessionId, input),
+        [WS_METHODS.pushDevicesUnregister]: (input) =>
+          pushDevices.unregister(currentSessionId, input.deviceId),
         [WS_METHODS.subscribeThreadBackgroundCommands]: (input) =>
           backgroundCommands.stream(input.threadId),
         [WS_METHODS.subscribeBackgroundCommandThreads]: () => backgroundCommands.runningThreads,

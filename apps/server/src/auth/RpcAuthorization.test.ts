@@ -36,6 +36,16 @@ describe("RPC authorization scopes", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });
 
+  it("lets a session that reads threads register its phone for their pushes", () => {
+    for (const method of [
+      WS_METHODS.pushDevicesRegister,
+      WS_METHODS.pushDevicesRegisterLiveActivity,
+      WS_METHODS.pushDevicesUnregister,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+  });
+
   it("requires operate access to stop a workflow", () => {
     expect(requiredScopeForRpcMethod(ORCHESTRATION_V2_WS_METHODS.stopWorkflow)).toBe(
       AuthOrchestrationOperateScope,

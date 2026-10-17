@@ -20,6 +20,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { requireEnvironmentScope } from "../auth/http.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
+import { readPushGatewayConfig } from "../push/PushGatewayConfig.ts";
 import * as CloudLink from "./CloudLink.ts";
 
 const refuse = () =>
@@ -63,7 +64,7 @@ export const relayClientInstall = () =>
     }),
   );
 
-/** Agent activity is published only through T3 Connect's relay. */
+/** Without T3 Connect's relay or a push gateway, agent activity goes nowhere. */
 export const layerAgentAwarenessRelay = Layer.succeed(
   AgentAwarenessRelay.AgentAwarenessRelay,
   AgentAwarenessRelay.AgentAwarenessRelay.of({
@@ -75,23 +76,30 @@ export const layerAgentAwarenessRelay = Layer.succeed(
 );
 
 /**
- * Wraps the server environment layer so the descriptor never advertises agent
- * activity publishing, which a stored link and opt-in would otherwise claim.
+ * Wraps the server environment layer so the descriptor never advertises the relay's agent
+ * activity publishing, which a stored link and opt-in would otherwise claim. A configured push
+ * gateway publishes instead, so phones register with it and arm Live Activities for it.
  */
 export const withoutAgentActivityPublishing = <ROut, E, RIn>(
   layer: Layer.Layer<ROut | ServerEnvironment.ServerEnvironment, E, RIn>,
 ) =>
   Layer.effect(
     ServerEnvironment.ServerEnvironment,
-    Effect.map(ServerEnvironment.ServerEnvironment, (environment) =>
-      ServerEnvironment.ServerEnvironment.of({
+    Effect.gen(function* () {
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      const pushGateway = (yield* readPushGatewayConfig) !== null;
+      return ServerEnvironment.ServerEnvironment.of({
         ...environment,
         getDescriptor: environment.getDescriptor.pipe(
           Effect.map((descriptor) => ({
             ...descriptor,
-            capabilities: { ...descriptor.capabilities, agentActivityPublishing: false },
+            capabilities: {
+              ...descriptor.capabilities,
+              agentActivityPublishing: pushGateway,
+              ...(pushGateway ? { pushGateway: true } : {}),
+            },
           })),
         ),
-      }),
-    ),
+      });
+    }),
   ).pipe(Layer.provideMerge(layer));

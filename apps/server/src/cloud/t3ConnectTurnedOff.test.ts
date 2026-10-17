@@ -9,6 +9,7 @@ import {
 } from "@t3tools/contracts";
 import { T3_CONNECT_DISABLED_MESSAGE } from "@t3tools/shared/forkFeatures";
 import { describe, expect, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
@@ -124,15 +125,11 @@ describe("T3 Connect turned off", () => {
     }),
   );
 
-  it.effect("never advertises agent activity publishing", () =>
-    Effect.gen(function* () {
-      const descriptor = yield* Effect.flatMap(
-        ServerEnvironment.ServerEnvironment,
-        (environment) => environment.getDescriptor,
-      );
-      expect(descriptor.capabilities.agentActivityPublishing).toBe(false);
-      expect(descriptor.capabilities.threadPullRequestLinking).toBe(true);
-    }).pipe(
+  const descriptorWith = (config: Record<string, string>) =>
+    Effect.flatMap(
+      ServerEnvironment.ServerEnvironment,
+      (environment) => environment.getDescriptor,
+    ).pipe(
       Effect.provide(
         T3ConnectTurnedOff.withoutAgentActivityPublishing(
           Layer.mock(ServerEnvironment.ServerEnvironment)({
@@ -140,8 +137,27 @@ describe("T3 Connect turned off", () => {
               capabilities: { agentActivityPublishing: true, threadPullRequestLinking: true },
             } as unknown as ExecutionEnvironmentDescriptor),
           }),
-        ),
+        ).pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown(config)))),
       ),
-    ),
+    );
+
+  it.effect("never advertises the relay's agent activity publishing", () =>
+    Effect.gen(function* () {
+      const descriptor = yield* descriptorWith({});
+      expect(descriptor.capabilities.agentActivityPublishing).toBe(false);
+      expect(descriptor.capabilities.pushGateway).toBeUndefined();
+      expect(descriptor.capabilities.threadPullRequestLinking).toBe(true);
+    }),
+  );
+
+  it.effect("advertises publishing through a configured push gateway", () =>
+    Effect.gen(function* () {
+      const descriptor = yield* descriptorWith({
+        T3CODE_PUSH_GATEWAY_URL: "https://push.example.test",
+        T3CODE_PUSH_GATEWAY_CREDENTIAL: "credential",
+      });
+      expect(descriptor.capabilities.agentActivityPublishing).toBe(true);
+      expect(descriptor.capabilities.pushGateway).toBe(true);
+    }),
   );
 });

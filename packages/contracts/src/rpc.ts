@@ -366,6 +366,12 @@ import {
 } from "./scheduledTask.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
+  PushDeviceError,
+  PushDeviceRegistrationInput,
+  PushDeviceUnregistrationInput,
+  PushLiveActivityRegistrationInput,
+} from "./pushGateway.ts";
+import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
   ProjectCloneListEvent,
@@ -577,6 +583,9 @@ export const WS_METHODS = {
   worktreeSetupCancel: "worktreeSetup.cancel",
   subscribeThreadCheckIns: "subscribeThreadCheckIns",
   checkInCancel: "checkIns.cancel",
+  pushDevicesRegister: "pushDevices.register",
+  pushDevicesRegisterLiveActivity: "pushDevices.registerLiveActivity",
+  pushDevicesUnregister: "pushDevices.unregister",
   subscribeThreadBackgroundCommands: "subscribeThreadBackgroundCommands",
   subscribeBackgroundCommandThreads: "subscribeBackgroundCommandThreads",
   backgroundCommandStop: "backgroundCommands.stop",
@@ -1391,6 +1400,21 @@ const WsCheckInCancelRpc = Rpc.make(WS_METHODS.checkInCancel, {
   error: Schema.Union([CheckInError, EnvironmentAuthorizationError]),
 });
 
+const WsPushDevicesRegisterRpc = Rpc.make(WS_METHODS.pushDevicesRegister, {
+  payload: PushDeviceRegistrationInput,
+  error: Schema.Union([PushDeviceError, EnvironmentAuthorizationError]),
+});
+
+const WsPushDevicesRegisterLiveActivityRpc = Rpc.make(WS_METHODS.pushDevicesRegisterLiveActivity, {
+  payload: PushLiveActivityRegistrationInput,
+  error: Schema.Union([PushDeviceError, EnvironmentAuthorizationError]),
+});
+
+const WsPushDevicesUnregisterRpc = Rpc.make(WS_METHODS.pushDevicesUnregister, {
+  payload: PushDeviceUnregistrationInput,
+  error: Schema.Union([PushDeviceError, EnvironmentAuthorizationError]),
+});
+
 /**
  * A thread's background commands that are running or whose end the agent has not been told
  * yet: the whole list first, then again after every change.
@@ -2063,6 +2087,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsWorktreeSetupCancelRpc,
   WsSubscribeThreadCheckInsRpc,
   WsCheckInCancelRpc,
+  WsPushDevicesRegisterRpc,
+  WsPushDevicesRegisterLiveActivityRpc,
+  WsPushDevicesUnregisterRpc,
   WsSubscribeThreadBackgroundCommandsRpc,
   WsSubscribeBackgroundCommandThreadsRpc,
   WsBackgroundCommandStopRpc,

@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput } from "./git.ts";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthSettingsWriteScope,
   AuthSourceControlWriteScope,
   type AuthEnvironmentScope,
@@ -46,6 +47,10 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.scheduledTasksRunNow]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRotateWebhookToken]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: AuthOrchestrationOperateScope,
+  // Fork: a phone's push registration. A session that can read threads may hear about them.
+  [WS_METHODS.pushDevicesRegister]: AuthOrchestrationReadScope,
+  [WS_METHODS.pushDevicesRegisterLiveActivity]: AuthOrchestrationReadScope,
+  [WS_METHODS.pushDevicesUnregister]: AuthOrchestrationReadScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 
