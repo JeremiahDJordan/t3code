@@ -319,9 +319,24 @@ symlinked to a file named otherwise stays readable. T3's caches, the sandbox's f
 program among them, are never writable.
 When a command T3 let into the sandbox fails with a denial (`EPERM`, a name that does not
 resolve and the like), its next run asks, so the user can let it out.
-Bubblewrap on Linux waits for a host to test on; without a sandbox every mode asks before every
-command but those the user's rules allow, since two reviews showed a command that looks like a
-read can still run code, through a git `textconv` driver or `file --compile`.
+On Linux the same rules run under Bubblewrap (`bubblewrapScript`), which mounts instead of
+matching paths, so the profile is a shell script the sandbox's shell runs before each command.
+It applies the rules to every path they name: what a command may not read is covered by a
+placeholder no one opens (an empty folder, or for one holding a folder it may read, a folder it
+may pass through but not list, holding only that, as `~/.local` holds `bin`), and each path whose
+writing differs from its folder's is mounted again read-only or writable. What Seatbelt matches
+by name it finds on each run: the home folder's hidden entries, history files four folders deep,
+and every `.env` file in the folders commands may write, `node_modules` included, since a command
+may move a folder there (about 0.3 s in a 280,000-file checkout). A mount cannot be moved or
+removed, which anchors the workspace and T3's folders as Seatbelt's unlink rule does, and a
+folder moved within the workspace carries its mounts along; a move out of it copies, and stops
+at a `.env` it cannot read. Each command gets its own namespaces, so it sees only its own
+processes and no network at all, and a seccomp filter refuses Unix sockets, io_uring and the
+kernel's keyrings. `/run/user/<uid>`, the session's sockets and keyring, is hidden too. Bubblewrap
+refuses with `Permission denied` and `Read-only file system`, which the next run's ask learns too.
+Without either sandbox, as on Windows, every mode asks before every command but those the
+user's rules allow, since two reviews showed a command that looks like a read can still run
+code, through a git `textconv` driver or `file --compile`.
 
 `wrapBobRuntime` answers Bob itself, allow once, for what `reviewBobPermission` allows in the
 thread's mode while a prompt runs and the user has not stopped it; everything else reaches the
@@ -571,7 +586,14 @@ so Bob's commands share this one. T3 answers Bob's requests itself: allow once a
 `reviewBobCommand` finds only reads, decline everything else, never Always allow. The session
 keeps `--disable-mcp` and `--disable-subagents`, as Claude's has neither: MCP tools can act over
 the network, where the sandbox does not reach, and a subagent's calls would come to T3 only as
-replayed steps. Linux and Windows still refuse.
+replayed steps. On Linux the process runs under the same Bubblewrap profile, inside pasta's
+network namespace: pasta forwards no port in either direction and does not map this machine to
+its gateway, T3 adds a `prohibit` route for each address of this machine, its tailnet's and its
+container bridges' included, and the namespace's resolver is pasta's forward to this machine's,
+which is all of this machine a command reaches; the seccomp filter keeps Unix sockets out, the
+name resolver's included, which glibc then skips for DNS. `~/.bob` is read-only there, so T3
+makes Bob's `db/`, `logs/` and an empty `trustedFolders.json` before starting it. Windows still
+refuses.
 
 The network stays open to commands that Bob's own approvals let through without asking T3; with
 Bob's defaults those only read, and credential stores stay unreadable, but a user who approved
@@ -1227,8 +1249,8 @@ generic, a candidate upstream PR.
 
 A script runs a command without spending an agent: `await exec(command, { workspace, timeoutMs,
 env })` gives `{ exitCode, stdout, stderr, timedOut }`, through `/bin/sh -c` in the workspace's
-worktree or the base checkout. On macOS it runs under Bob's command profile, factored into
-`commandSandboxSpawn`: a workspace writable (with its commits) unless the coordinator is
+worktree or the base checkout. On macOS and Linux it runs under Bob's command profile, factored
+into `commandSandboxSpawn`: a workspace writable (with its commits) unless the coordinator is
 Supervised or in plan mode, the base checkout always read-only, build tools' caches writable,
 credentials unreadable, and the network, to other machines only, in Full access alone; without a
 sandbox it runs only in Full access, unsandboxed. Commands are timed out (10 minutes, at most 60),
@@ -1239,9 +1261,18 @@ included, since commands may not be idempotent; one cut short runs again. Design
 
 ### Known gaps
 
-- Bob writes review guides on macOS only; elsewhere it refuses, as Grok and Cursor do, until
-  Linux has a sandbox for a whole process (Bubblewrap waits for a host to test on). Each guide
-  leaves its checkout's path in Bob's `trustedFolders.json`, since `--trust` writes it.
+- Bob writes review guides on macOS and Linux; on Windows it refuses, as Grok and Cursor do.
+  Each guide leaves its checkout's path in Bob's `trustedFolders.json`, since `--trust` writes it.
+- Bubblewrap holds what is there when a command starts, where Seatbelt refuses names. A command
+  in the workspace can create a `.env`, a `.mcp.json`, or a `.git`, `.claude`, `.vscode` or other
+  agent's settings folder that is not there yet, and a worktree's `config.worktree` (which git
+  reads only when the repository's own configuration says to); outside T3, an agent that trusts
+  such a file would then run what it says. A rule's folder that is not there yet cannot be
+  created, nor Bob's sign-in file in a review guide's sandbox. History files more than four
+  folders down a hidden folder stay readable, and `.env` files in the temporary folders are not
+  searched, though one moved there from the workspace stays behind.
+- Under Bubblewrap a command's background processes end with it, as its PID namespace does.
+  The seccomp filter is written for x86-64 and arm64; other Linux hosts get no sandbox.
 - Stop cannot end a background command whose `<cwd>/.t3/jobs/<id>` folder was deleted,
   by `git clean -fdx` say: T3 kills its tmux session, but the wrapper's detached child
   keeps running. Keeping the process group in the command's row would fix it.

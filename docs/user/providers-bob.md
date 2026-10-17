@@ -43,10 +43,11 @@ every mode and outside T3 Code's sandbox, so use Bob only in projects you trust,
 before running their build. When Bob writes thread titles, branch names, commit messages or
 pull request text, it works in a folder of T3 Code's own, so that never trusts a project.
 
-On macOS, Bob can also write pull request [review guides](./source-control.md#review-guides). It
-reads the pull request's temporary checkout and runs Git's read commands there, with all of
-Bob in a read-only sandbox, so nothing changes and the checkout's own Bob setup never runs. On
-other systems, choose another review guide model.
+On macOS and Linux, Bob can also write pull request
+[review guides](./source-control.md#review-guides). It reads the pull request's temporary
+checkout and runs Git's read commands there, with all of Bob in a read-only sandbox, so nothing
+changes and the checkout's own Bob setup never runs. On Linux this needs Bubblewrap and pasta
+(the `bubblewrap` and `passt` packages). On Windows, choose another review guide model.
 
 After Bob has run in a project, its skills and MCP prompts appear in the composer's `/`
 menu. When a thread moves to another folder, such as picking a branch that lives in another
@@ -70,12 +71,12 @@ offers Bob's Ask mode and your custom modes (`custom_modes.yaml`); turns use Age
 mode unless you pick another. A custom mode from one project is skipped in projects
 that don't define it.
 
-Tool approvals follow [Permission modes](./permission-modes.md). On macOS, outside **Full
-access**, Bob's commands run in a sandbox, as Codex's do: they read anywhere but the hidden
+Tool approvals follow [Permission modes](./permission-modes.md). On macOS, and on Linux with
+Bubblewrap installed, outside **Full access**, Bob's commands run in a sandbox, as Codex's do: they read anywhere but the hidden
 files and folders in your home folder and app data in `~/Library`, where tools keep
 credentials, apart from toolchain folders such as `~/.cargo` or `~/.config/git` and the `bin`
 folders on your `PATH`; they write only in the project and temporary folders, with `.git` and
-agent settings kept read-only, and reach no network, not even servers on your Mac. They cannot
+agent settings kept read-only, and reach no network, not even servers on your computer. They cannot
 read the project's `.env` files, apart from samples such as `.env.example` (one that is a symlink
 to a file named otherwise stays readable), nor see environment
 variables named like credentials, such as `GH_TOKEN` or `OPENAI_API_KEY`, whose names hold
@@ -147,8 +148,11 @@ an **Always allow** you pick turns auto-approval back on for that task only. Bob
 you turn on **Allow outside workspace tool requests** in Bob's settings; text files you attach
 reach Bob inside your message, so it can still read them.
 
-Without a sandbox, for now on Linux, every mode but **Full access** asks before every command,
-apart from those your rules let run without asking.
+Without a sandbox, on Windows or on Linux without Bubblewrap, every mode but **Full access**
+asks before every command, apart from those your rules let run without asking. On Linux the
+sandbox holds the `.env` files and agent settings that are there when a command starts, so a
+command can create one that is not, and processes a command leaves running in the background
+end with it.
 
 Choose the reviewer in the Bob instance's **Auto mode reviewer** setting under
 **Settings → Providers**. **Apple's on-device model** is the default; it needs Apple
