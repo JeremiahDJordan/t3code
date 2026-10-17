@@ -4,6 +4,8 @@ import {
   AgentSessionProjectCandidate,
   DEFAULT_SERVER_SETTINGS,
   ForwardCompatibleArray,
+  OrchestrationV2ThreadStreamItem,
+  OrchestrationV2TurnItem,
   ProjectId,
   ProjectSettingsOverrides,
   type ServerSettings,
@@ -27,6 +29,8 @@ import {
   agentSessionScanForUpstreamClient,
   FORK_PROJECT_SETTING_KEYS,
   settingsPatchFromUpstreamClient,
+  threadStreamItemForUpstreamClient,
+  turnItemForUpstreamClient,
 } from "./upstreamClientCompatibility.ts";
 
 /** Sources and providers as upstream clients decode them: their lists end before Bob. */
@@ -216,5 +220,73 @@ describe("settingsPatchFromUpstreamClient", () => {
     const patch: ServerSettingsPatch = { enableAgentCheckIns: false };
 
     expect(settingsPatchFromUpstreamClient(patch, current)).toBe(patch);
+  });
+});
+
+describe("approvals in upstream clients", () => {
+  const now = "2026-10-16T12:00:00.000Z";
+  const approval = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem))({
+    id: "item-1",
+    threadId: "thread-1",
+    runId: null,
+    nodeId: "node-1",
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 1,
+    status: "waiting",
+    title: null,
+    startedAt: now,
+    completedAt: null,
+    updatedAt: now,
+    type: "approval_request",
+    requestId: "request-1",
+    requestKind: "command",
+    options: [
+      { decision: "cancel", label: "Cancel" },
+      { decision: "acceptForSession", label: "Always allow for this task" },
+      { decision: "acceptAlways", optionId: "rule:thread", label: "Always allow in this thread" },
+      { decision: "acceptAlways", optionId: "rule:project", label: "Always allow in this project" },
+      { decision: "accept", label: "Approve" },
+    ],
+  });
+  const labels = (item: OrchestrationV2TurnItem) =>
+    item.type === "approval_request" ? item.options?.map((option) => option.label) : undefined;
+
+  it("offers only the answers an upstream client can send as labelled", () => {
+    // Upstream clients key buttons by decision and answer without an option id, so the rule
+    // choices would show as clashing "Always allow" buttons that each approve once.
+    expect(labels(turnItemForUpstreamClient(approval))).toEqual([
+      "Cancel",
+      "Always allow for this task",
+      "Approve",
+    ]);
+  });
+
+  it("adapts approvals in a thread subscription's events and leaves other items alone", () => {
+    const item = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadStreamItem))({
+      kind: "event",
+      sequence: 7,
+      event: {
+        id: "event-1",
+        type: "turn-item.updated",
+        threadId: "thread-1",
+        occurredAt: now,
+        payload: Schema.encodeSync(Schema.toCodecJson(OrchestrationV2TurnItem))(approval),
+      },
+    });
+    const adapted = threadStreamItemForUpstreamClient(item);
+    const payload =
+      adapted.kind === "event" && adapted.event.type === "turn-item.updated"
+        ? adapted.event.payload
+        : undefined;
+    expect(Schema.is(OrchestrationV2TurnItem)(payload) ? labels(payload) : payload).toEqual([
+      "Cancel",
+      "Always allow for this task",
+      "Approve",
+    ]);
+    const plain = { ...approval, options: [{ decision: "accept" as const, label: "Approve" }] };
+    expect(turnItemForUpstreamClient(plain)).toBe(plain);
   });
 });

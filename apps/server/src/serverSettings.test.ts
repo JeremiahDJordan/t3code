@@ -553,10 +553,8 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           })
           .pipe(Effect.flip);
         assert.equal(refused.providerInstanceId, WORKFLOW_PROVIDER_INSTANCE_ID);
-        assert.include(
-          refused.message,
-          operation === "create" ? "create-provider-instance" : "update-provider-instance",
-        );
+        // One operation name for both, which upstream clients can decode.
+        assert.equal(refused.operation, "create-provider-instance");
         assert.include(refused.message, "reserved for the workflow engine");
       }
       // A whole-map patch gets past the mutation guard; normalization drops it.

@@ -78,8 +78,11 @@ rebuilding its features on the new base rather than porting them. Tag
   from before the move. Rebuild the desktop and mobile apps from this branch.
 - **Upstream clients** that can connect cannot decode `bob` in the onboarding scan, a
   closed list. This fork's clients add `clientBobSupport=1` to their connection; for any
-  other client the server leaves Bob's sources out of the scan and keeps a project's fork
-  settings when the client writes that project's row. Usage needs no adaptation: upstream
+  other client the server leaves Bob's sources out of the scan, keeps a project's fork
+  settings when the client writes that project's row, and drops the rule choices from
+  approval cards, since those clients key buttons by decision and answer without an option id,
+  so several "Always allow" rule buttons would clash and each approve once. Usage needs no
+  adaptation: upstream
   clients skip usage entries with unknown providers (pingdotgg/t3code#10076), which is
   also why the usage contract keeps upstream's version number. Not yet retested on V2:
   whether app.t3.codes and the App Store 2.0 app can drive Bob. On V1, the web client read
@@ -758,6 +761,10 @@ without the fork's project keys. So when a client without `clientBobSupport` wri
 resets a project's row, the server keeps that row's `enableAgentCheckIns` and
 `checkInRepeatLimitHours` (`upstreamClientCompatibility.ts`; review 9). A new fork-only
 project setting goes in its `FORK_PROJECT_SETTING_KEYS`.
+
+Settings errors name their operation from upstream's closed list too: refusing the workflow
+engine's reserved instance id reports `create-provider-instance` for a create or an upsert, so an
+upstream client still decodes the error.
 
 ### Don't restructure upstream code for the fork (reviews 1 and 2)
 

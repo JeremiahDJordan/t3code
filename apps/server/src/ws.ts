@@ -99,6 +99,7 @@ import {
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
+  type OrchestrationV2ThreadProjection,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -263,6 +264,9 @@ import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import {
   agentSessionScanForUpstreamClient,
   settingsPatchFromUpstreamClient,
+  threadProjectionForUpstreamClient,
+  threadStreamItemForUpstreamClient,
+  turnItemForUpstreamClient,
 } from "./upstreamClientCompatibility.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 
@@ -1188,6 +1192,9 @@ const layerWsRpc = (
   ServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
+      // Upstream clients get thread content they can show truthfully (`upstreamClientCompatibility`).
+      const projectionForClient = (projection: OrchestrationV2ThreadProjection) =>
+        clientSupportsBob ? projection : threadProjectionForUpstreamClient(projection);
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
@@ -1868,6 +1875,11 @@ const layerWsRpc = (
             : readWorkflowScript({ scriptPath: input.scriptPath }),
         [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>
           threadManagement.getTurnItem(input).pipe(
+            Effect.map((result) =>
+              clientSupportsBob || result.item === null
+                ? result
+                : { ...result, item: turnItemForUpstreamClient(result.item) },
+            ),
             Effect.mapError(
               (cause) =>
                 new OrchestrationV2GetThreadProjectionError({
@@ -1928,11 +1940,13 @@ const layerWsRpc = (
                 })
                 .pipe(
                   Effect.map((snapshot) =>
-                    projectThreadProjectionForWire(
-                      buildBoundedThreadProjection({
-                        projection: snapshot.projection,
-                        snapshotSequence: snapshot.snapshotSequence,
-                      }).projection,
+                    projectionForClient(
+                      projectThreadProjectionForWire(
+                        buildBoundedThreadProjection({
+                          projection: snapshot.projection,
+                          snapshotSequence: snapshot.snapshotSequence,
+                        }).projection,
+                      ),
                     ),
                   ),
                   Effect.mapError(
@@ -2002,7 +2016,9 @@ const layerWsRpc = (
                   ),
                   Effect.map((result) => ({
                     ...result,
-                    projection: projectThreadProjectionForWire(result.projection),
+                    projection: projectionForClient(
+                      projectThreadProjectionForWire(result.projection),
+                    ),
                   })),
                   Effect.catchTags({
                     AttachmentClaimError: (cause) =>
@@ -2045,6 +2061,9 @@ const layerWsRpc = (
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
               Effect.andThen(subscribeOrchestrationV2Thread(input)),
+              Effect.map((stream) =>
+                clientSupportsBob ? stream : Stream.map(stream, threadStreamItemForUpstreamClient),
+              ),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>

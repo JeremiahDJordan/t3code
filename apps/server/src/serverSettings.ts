@@ -177,8 +177,8 @@ function ensureProviderInstanceMutationAllowed(
     return Effect.fail(
       new ServerSettingsError({
         settingsPath,
-        operation:
-          mutation.operation === "create" ? "create-provider-instance" : "update-provider-instance",
+        // Upstream clients decode a closed list of operations without an update one.
+        operation: "create-provider-instance",
         providerInstanceId: mutation.instanceId,
         detail: "the id is reserved for the workflow engine",
       }),
