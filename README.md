@@ -1,6 +1,8 @@
-# T3 Code
+# Z6 Code
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+Z6 Code is Jeremiah Jordan's fork of [T3 Code](https://github.com/pingdotgg/t3code) by T3 Tools. It adds IBM Bob Shell as a provider, check-ins and background commands for every provider, and workflows, and it talks to no T3 web service. [FORK.md](./FORK.md) records how it differs from upstream and why. The fork is not made or supported by T3 Tools: report problems with it [here](#support), not upstream.
+
+T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a mobile app, a web app and an Electron-based desktop app.
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, IBM Bob Shell, and Google Antigravity. If they're set up on your computer, T3 Code can control them.
 
@@ -85,11 +87,9 @@ yay -S t3code-nightly-bin
 
 The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
 
-## Some notes
+## Support
 
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
+Report bugs and feature requests in this fork's [issues](https://github.com/JeremiahDJordan/t3code/issues), and security problems privately as [SECURITY.md](./.github/SECURITY.md) describes. A problem that also happens in upstream T3 Code, without this fork's changes, belongs in [upstream's tracker](https://github.com/pingdotgg/t3code/issues) as well. Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a PR.
 
 ## Documentation
 
@@ -136,7 +136,3 @@ vp i
 ```
 
 Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
-
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
-
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).

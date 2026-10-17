@@ -1,5 +1,10 @@
-blank_issues_enabled: false
+# Fork: Z6 Code takes feature requests as blank issues here, reports security problems privately,
+# and refers problems that are upstream's own to T3 Code's tracker.
+blank_issues_enabled: true
 contact_links:
-  - name: Feature request
-    url: https://github.com/pingdotgg/t3code/discussions/categories/ideas
-    about: Suggest an improvement or new capability in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/JeremiahDJordan/t3code/security/advisories/new
+    about: Report it privately, as .github/SECURITY.md describes. Do not open a public issue.
+  - name: A problem in upstream T3 Code
+    url: https://github.com/pingdotgg/t3code/issues
+    about: A problem that also happens in T3 Code without this fork's changes belongs upstream.

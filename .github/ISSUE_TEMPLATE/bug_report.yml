@@ -8,8 +8,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use this form for broken behavior, regressions, crashes, or reliability problems.
-        Feature requests belong in [Discussions](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+        Use this form for broken behavior, regressions, crashes, or reliability problems in
+        Z6 Code, this fork of T3 Code. Open a blank issue for a feature request, and report
+        security problems privately as [SECURITY.md](https://github.com/JeremiahDJordan/t3code/security/policy) describes.
         Search existing issues first and keep the report focused on one problem.
 
   - type: checkboxes
@@ -85,8 +86,8 @@ body:
     id: version
     attributes:
       label: Version or commit
-      description: Release version, commit SHA, or branch name if known.
-      placeholder: main @ abc1234
+      description: Branch and commit SHA you built, if known.
+      placeholder: bob-shell-v2 @ abc1234
 
   - type: input
     id: environment

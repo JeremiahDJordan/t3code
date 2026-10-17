@@ -1,5 +1,18 @@
 # Contributing
 
+## This fork
+
+This repository is Z6 Code, Jeremiah Jordan's fork of [T3 Code](https://github.com/pingdotgg/t3code).
+Report bugs and propose changes in [this repository's issues](https://github.com/JeremiahDJordan/t3code/issues),
+and report security problems privately as [SECURITY.md](.github/SECURITY.md) describes. Open pull
+requests against the `bob-shell-v2` branch. [FORK.md](FORK.md) records how the fork meets upstream and
+the decisions behind its shape; read it before changing shared code.
+
+A problem that also happens in upstream T3 Code, without this fork's changes, belongs
+[upstream](https://github.com/pingdotgg/t3code/issues) as well. The rest of this guide is upstream's
+policy for its own repository. Its standards for scope and evidence apply here too; its routes (Ideas
+discussions, automated triage, vouching and exemption lists) are upstream's.
+
 ## Developer setup
 
 See the [development runbook](docs/operations/development.md#first-checkout) for the initial checkout,
