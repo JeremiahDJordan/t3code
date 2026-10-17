@@ -9,7 +9,7 @@ import * as Notifications from "expo-notifications";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AppState, Platform } from "react-native";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { type EnvironmentId, PUSH_GATEWAY_ANDROID_USER_ID } from "@t3tools/contracts";
 import {
   type RelayDeviceRegistrationRequest,
   type RelayAgentActivitySnapshotResponse,
@@ -41,6 +41,16 @@ import { getAgentLiveActivities, startAgentLiveActivity } from "./agentLiveActiv
 import { resolveCloudPublicConfig } from "../cloud/publicConfig";
 import { supportsAgentAwarenessPush } from "./capabilities";
 import { makeRelayDeviceRegistrationRequest, resolveApsEnvironment } from "./registrationPayload";
+import {
+  isPushGatewayMode,
+  pushGatewayEnvironmentIds,
+  pushGatewayRegistrationInput,
+  registerDeviceWithPushGateways,
+  registerLiveActivityWithPushGateways,
+  setPushGatewayTransport,
+  type PushGatewayTransport,
+  watchPushGatewayEnvironments,
+} from "./pushGatewayRegistration";
 
 const REMOTE_ACTIVITY_REGISTRATION_RETRY_MS = 15_000;
 
@@ -169,6 +179,13 @@ export function setAgentAwarenessRelayTokenProvider(
   provider: (() => Promise<string | null>) | null,
   identity?: string,
 ): void {
+  // Fork: with push through the owner's gateway nobody signs in to the relay, and the sign-out
+  // reset CloudAuthProvider runs at every launch would end live cards and stop registration.
+  if (isPushGatewayMode()) {
+    relayTokenProvider = null;
+    relayTokenProviderIdentity = null;
+    return;
+  }
   const isExistingIdentity =
     provider !== null &&
     !shouldRegisterAgentAwarenessDeviceForProvider(relayTokenProviderIdentity, identity);
@@ -455,10 +472,11 @@ function unregisterDeviceWithRelay(input: {
 }
 
 function environmentPublishesAgentActivity(environmentId: EnvironmentId): boolean {
-  return (
-    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
-      .agentActivityPublishing !== false
-  );
+  const capabilities = appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)
+    ?.environment.capabilities;
+  // Fork: through the gateway, only a server that has one ever repaints the card.
+  if (isPushGatewayMode()) return capabilities?.pushGateway === true;
+  return capabilities?.agentActivityPublishing !== false;
 }
 
 export function armAgentAwarenessLiveActivityForLocalWork(input: {
@@ -466,7 +484,7 @@ export function armAgentAwarenessLiveActivityForLocalWork(input: {
   readonly threadTitle: string;
   readonly projectTitle: string;
 }): void {
-  if (!canRegisterRemoteLiveActivities() || !relayTokenProvider) {
+  if (!canRegisterRemoteLiveActivities() || (!relayTokenProvider && !isPushGatewayMode())) {
     return;
   }
   if (!environmentPublishesAgentActivity(input.environmentId)) {
@@ -558,6 +576,10 @@ function registerLiveActivityWithRelay(
   body: RelayLiveActivityRegistrationRequest,
 ): Effect.Effect<boolean, unknown, ManagedRelay.ManagedRelayClient> {
   return Effect.gen(function* () {
+    // Fork: the card's token goes to each server that pushes through a gateway.
+    if (isPushGatewayMode()) {
+      return yield* Effect.promise(() => registerLiveActivityWithPushGateways(body));
+    }
     if (!readRelayConfig()) return false;
     const token = yield* relayToken("read-live-activity-registration-relay-token");
     if (!token) {
@@ -697,8 +719,10 @@ function registerDevice(
       logRegistrationDebug("device registration skipped; platform does not support it");
       return;
     }
-    // Fork: without a relay there is nowhere to register, so do not ask APNs or FCM for a token.
-    if (!readRelayConfig()) {
+    // Fork: without a relay or a server with a push gateway there is nowhere to register, so do
+    // not ask APNs or FCM for a token.
+    const gatewayMode = isPushGatewayMode();
+    if (gatewayMode ? pushGatewayEnvironmentIds().length === 0 : !readRelayConfig()) {
       setRegistrationStatus("unknown");
       return;
     }
@@ -733,6 +757,13 @@ function registerDevice(
         relayTokenProviderIdentity,
         preferences.liveActivitiesEnabled !== false,
       );
+    } else if (gatewayMode) {
+      // Fork: gateway messages carry this fixed identity; the phone has no relay account.
+      configureAndroidAgentNotifications(
+        deviceId,
+        PUSH_GATEWAY_ANDROID_USER_ID,
+        preferences.liveActivitiesEnabled !== false,
+      );
     }
     const pushTokenRegistration = yield* nativePushTokenRegistration(input?.observedPushToken);
     logRegistrationDebug("device registration local state ready", {
@@ -743,27 +774,72 @@ function registerDevice(
       Platform.OS === "android"
         ? Constants.expoConfig?.android?.package?.trim()
         : Constants.expoConfig?.ios?.bundleIdentifier?.trim();
-    yield* registerDeviceWithRelay(
-      makeRelayDeviceRegistrationRequest({
-        deviceId,
-        label:
-          Constants.deviceName?.trim() ||
-          (Platform.OS === "android" ? "Android device" : "iOS device"),
-        ...(Platform.OS === "android"
-          ? { platform: "android" as const, androidApiLevel: Number(Platform.Version) }
-          : { platform: "ios" as const, iosMajorVersion: iosMajorVersion() }),
-        appVersion: Constants.expoConfig?.version,
-        ...(bundleId ? { bundleId } : {}),
-        ...(Platform.OS === "ios"
-          ? { apsEnvironment: resolveApsEnvironment(Constants.expoConfig?.extra?.appVariant) }
-          : {}),
-        ...(pushTokenRegistration.pushToken ? { pushToken: pushTokenRegistration.pushToken } : {}),
-        notificationsEnabled: pushTokenRegistration.notificationsEnabled,
-        preferences,
-      }),
-      expectedGeneration,
-    );
+    const registration = makeRelayDeviceRegistrationRequest({
+      deviceId,
+      label:
+        Constants.deviceName?.trim() ||
+        (Platform.OS === "android" ? "Android device" : "iOS device"),
+      ...(Platform.OS === "android"
+        ? { platform: "android" as const, androidApiLevel: Number(Platform.Version) }
+        : { platform: "ios" as const, iosMajorVersion: iosMajorVersion() }),
+      appVersion: Constants.expoConfig?.version,
+      ...(bundleId ? { bundleId } : {}),
+      ...(Platform.OS === "ios"
+        ? { apsEnvironment: resolveApsEnvironment(Constants.expoConfig?.extra?.appVariant) }
+        : {}),
+      ...(pushTokenRegistration.pushToken ? { pushToken: pushTokenRegistration.pushToken } : {}),
+      notificationsEnabled: pushTokenRegistration.notificationsEnabled,
+      preferences,
+    });
+    yield* gatewayMode
+      ? registerDeviceWithGateways(registration, expectedGeneration)
+      : registerDeviceWithRelay(registration, expectedGeneration);
   });
+}
+
+/** Fork: the relay's registration body, sent to each server with a push gateway instead. */
+function registerDeviceWithGateways(
+  body: RelayDeviceRegistrationRequest,
+  expectedGeneration: number,
+): Effect.Effect<void> {
+  return Effect.gen(function* () {
+    const input = pushGatewayRegistrationInput(body);
+    if (input === null || expectedGeneration !== deviceRegistrationGeneration) {
+      if (input === null) setRegistrationStatus("unknown");
+      return;
+    }
+    const outcome = yield* Effect.promise(() => registerDeviceWithPushGateways(input));
+    if (expectedGeneration !== deviceRegistrationGeneration) return;
+    if (outcome === "registered") {
+      setRegistrationStatus("registered");
+      // A card's token needs the device registered first.
+      runRegistrationInBackground(
+        refreshActiveLiveActivityRemoteRegistration(),
+        "live activity registration with push gateways failed",
+      );
+    } else if (outcome === "none") {
+      setRegistrationStatus("unknown");
+    } else if (registrationStatus !== "registered") {
+      setRegistrationStatus("failed");
+    }
+  });
+}
+
+/**
+ * Fork: with T3 Connect off, registers with every connected server that pushes through the
+ * owner's gateway, on the relay path's triggers (foreground, token rotation, preference changes)
+ * and whenever such a server appears. Returns the cleanup.
+ */
+export function startAgentAwarenessPushGateway(transport: PushGatewayTransport): () => void {
+  if (!isPushGatewayMode() || !canRegisterPushNotifications()) return () => {};
+  setPushGatewayTransport(transport);
+  ensurePushTokenListener();
+  ensureAppStateListener();
+  const register = () =>
+    enqueueDeviceRegistration({}, "device registration with push gateways failed");
+  const stop = watchPushGatewayEnvironments(register);
+  register();
+  return stop;
 }
 
 function registerDeviceForCurrentUser(): Effect.Effect<
@@ -1016,7 +1092,7 @@ function registerLiveActivityPushTokenValue(input: {
 }
 
 function scheduleActiveLiveActivityRegistrationRetry(): void {
-  if (activeLiveActivityRegistrationRetry || !relayTokenProvider) {
+  if (activeLiveActivityRegistrationRetry || (!relayTokenProvider && !isPushGatewayMode())) {
     return;
   }
 
@@ -1035,7 +1111,7 @@ export function refreshActiveLiveActivityRemoteRegistration(): Effect.Effect<
   ManagedRelay.ManagedRelayClient
 > {
   return Effect.gen(function* () {
-    if (!canRegisterRemoteLiveActivities() || !relayTokenProvider) {
+    if (!canRegisterRemoteLiveActivities() || (!relayTokenProvider && !isPushGatewayMode())) {
       return;
     }
 

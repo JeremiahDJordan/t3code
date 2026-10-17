@@ -21,6 +21,7 @@ import { useWorkspaceEnvironments } from "../../state/workspace";
 import { relayEnvironmentDiscovery } from "../../state/relay";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { relayManagedEnvironmentIds } from "./environmentSections";
+import { unregisterFromPushGateway } from "../agent-awareness/pushGatewayRegistration";
 
 export interface RelayEnvironmentView {
   readonly environment: RelayClientEnvironmentRecord;
@@ -102,7 +103,9 @@ export function useConnectionController() {
     [registerEnvironment],
   );
   const removeEnvironment = useCallback(
-    (environmentId: EnvironmentId) => removeEnvironmentMutation(environmentId),
+    // Fork: tell the server's push gateway to stop first, while the connection still exists.
+    (environmentId: EnvironmentId) =>
+      unregisterFromPushGateway(environmentId).then(() => removeEnvironmentMutation(environmentId)),
     [removeEnvironmentMutation],
   );
   const retryEnvironment = useCallback(
@@ -111,7 +114,9 @@ export function useConnectionController() {
   );
   const setEnvironmentEnabled = useCallback(
     (environmentId: EnvironmentId, enabled: boolean) =>
-      setEnvironmentEnabledMutation({ environmentId, enabled }),
+      (enabled ? Promise.resolve() : unregisterFromPushGateway(environmentId)).then(() =>
+        setEnvironmentEnabledMutation({ environmentId, enabled }),
+      ),
     [setEnvironmentEnabledMutation],
   );
   const updateEnvironment = useCallback(

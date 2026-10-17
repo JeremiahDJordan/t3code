@@ -27,6 +27,8 @@ import {
   supportsAndroidLiveUpdateSettings,
 } from "../agent-awareness/androidNotifications";
 import { setLiveActivityUpdatesEnabled } from "../agent-awareness/liveActivityPreferences";
+import { isPushGatewayMode } from "../agent-awareness/pushGatewayRegistration";
+import { PushGatewayNotificationsSettings } from "./PushGatewayNotificationsSettings";
 import { requestAgentNotificationPermission } from "../agent-awareness/notificationPermissions";
 import {
   getAgentAwarenessRegistrationStatus,
@@ -58,6 +60,8 @@ function useDeviceRegistered(): boolean {
 }
 
 export function SettingsNotificationsRouteScreen() {
+  // Fork: with T3 Connect off, pushes come through each server's own push gateway.
+  if (isPushGatewayMode()) return <PushGatewayNotificationsSettings />;
   if (!hasCloudPublicConfig()) {
     return (
       <SettingsScreen title="Notifications">
