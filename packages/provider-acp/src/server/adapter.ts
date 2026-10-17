@@ -639,13 +639,18 @@ function makeProviderThread(input: {
   };
 }
 
-function acpMcpToolCallOutput(rawOutput: unknown): unknown {
+export function acpMcpToolCallOutput(rawOutput: unknown): unknown {
   const record = unknownRecord(rawOutput);
   if (record === undefined) return rawOutput;
   if (!("result" in record) && !("error" in record)) return rawOutput;
   const result = unknownRecord(record.result);
+  // Bob reports an MCP call's text content as a plain string `result`; readers parse it.
   const resultOutput =
-    result === undefined ? undefined : (result.structuredContent ?? result.content ?? undefined);
+    typeof record.result === "string"
+      ? record.result
+      : result === undefined
+        ? undefined
+        : (result.structuredContent ?? result.content ?? undefined);
   const errorMessage = unknownRecord(record.error)?.message;
   if (typeof errorMessage !== "string") {
     return resultOutput ?? rawOutput;
