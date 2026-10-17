@@ -1,5 +1,12 @@
 # Mobile notifications
 
+In this build, push notifications are off. They need a push gateway, and the default build has
+none: upstream's goes through T3 Connect, which is turned off
+([Remote access](./remote-access.md#t3-connect)), and **Settings → Notifications** says push is
+off. Direct, LAN, Tailscale and Cloudflare Tunnel connections work as usual while the app is open,
+but nothing alerts you in the background. To get push, build the apps against your own push
+gateway; the rest of this page describes notifications in such a build.
+
 Sign in to T3 Connect, link your environments, and enable **Device Notifications** in **Settings → Notifications** to receive alerts when an agent finishes, fails, needs approval, or asks for input. Tap a notification to open its thread. Your environment must have agent activity publishing enabled.
 
 Enable **Ongoing Agent Activity** on Android or **Live Activity Updates** on iOS to follow work without opening the app. Finished results remain visible for up to 15 minutes. You can dismiss an Android activity card without disabling alerts; turn off ongoing activity in Settings to stop future cards.

@@ -12,7 +12,9 @@ browser.
 
 You can add more computers before continuing:
 
-- **T3 Connect** connects computers that are signed in to your account.
+- **T3 Connect** says it is turned off in this build
+  ([Remote access](./remote-access.md#t3-connect)); use **Add a computer**. With it
+  turned on, it connects computers that are signed in to your account.
   [Install the CLI](./install.md#command-line) and run `t3 connect` on each
   computer you want to add, then start T3 Code or run `t3 serve` so the
   computer stays available.
