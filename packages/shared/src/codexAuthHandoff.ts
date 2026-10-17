@@ -1,4 +1,4 @@
-import { desktopLinkScheme, desktopPageToLink } from "./forkIdentity.ts";
+import { desktopLinkScheme } from "./forkIdentity.ts";
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { providerAuthReturnUrl } from "./providerAuthReturnUrl.ts";
@@ -127,7 +127,7 @@ export function codexAuthDeliveryUrl(input: CodexAuthHandoff, callbackUrl: strin
     returnHash: url.hash,
   };
   url.hash = `codex-auth=${encodeURIComponent(encodeDelivery(delivery))}`;
-  return desktopPageToLink(url.toString());
+  return url.toString();
 }
 
 export function readCodexAuthDelivery(value: string) {

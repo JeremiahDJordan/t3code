@@ -15,6 +15,7 @@ import {
   type DirectoryRecord,
 } from "@electron/asar";
 
+import { DESKTOP_DEV_LINK_SCHEME, DESKTOP_LINK_SCHEME } from "@t3tools/shared/forkIdentity";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
@@ -2779,7 +2780,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "Z6 Code",
-          schemes: ["z6code", "z6code-dev"],
+          schemes: [DESKTOP_LINK_SCHEME, DESKTOP_DEV_LINK_SCHEME],
         },
         {
           name: "Web site URL",
@@ -2836,7 +2837,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "Z6 Code",
-          schemes: ["z6code", "z6code-dev"],
+          schemes: [DESKTOP_LINK_SCHEME, DESKTOP_DEV_LINK_SCHEME],
         },
       ],
       desktop: {

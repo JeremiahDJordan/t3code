@@ -11,19 +11,16 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
-import { desktopLinkScheme } from "@t3tools/shared/forkIdentity";
+import { DESKTOP_DEV_LINK_SCHEME, DESKTOP_LINK_SCHEME } from "@t3tools/shared/forkIdentity";
 
 export const DESKTOP_HOST = "app";
-const DESKTOP_PRODUCTION_SCHEME = "t3code";
-const DESKTOP_DEVELOPMENT_SCHEME = "t3code-dev";
+// Fork: the page's origin is the fork's link scheme, so no address the page hands out can open
+// T3 Code (`packages/shared/src/forkIdentity.ts`).
+const DESKTOP_PRODUCTION_SCHEME = DESKTOP_LINK_SCHEME;
+const DESKTOP_DEVELOPMENT_SCHEME = DESKTOP_DEV_LINK_SCHEME;
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;
-}
-
-/** The scheme the operating system routes to this app; the renderer's origin keeps its own. */
-export function getDesktopLinkScheme(isDevelopment: boolean): string {
-  return desktopLinkScheme(isDevelopment);
 }
 
 function getDesktopOrigin(isDevelopment: boolean): string {

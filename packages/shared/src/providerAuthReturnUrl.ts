@@ -1,12 +1,13 @@
+import { DESKTOP_DEV_LINK_SCHEME, DESKTOP_LINK_SCHEME } from "./forkIdentity.ts";
 import { isLoopbackHost } from "./preview.ts";
 
 export function providerAuthReturnUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
   try {
     const url = new URL(value);
-    // The desktop page's own origin, or the fork's link scheme that routes back to it.
+    // The fork's desktop page origin (`forkIdentity.ts`).
     const desktop =
-      ["t3code:", "t3code-dev:", "z6code:", "z6code-dev:"].includes(url.protocol) &&
+      [`${DESKTOP_LINK_SCHEME}:`, `${DESKTOP_DEV_LINK_SCHEME}:`].includes(url.protocol) &&
       url.host === "app";
     const web =
       ["http:", "https:"].includes(url.protocol) &&
