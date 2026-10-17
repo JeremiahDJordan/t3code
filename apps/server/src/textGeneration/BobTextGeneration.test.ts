@@ -77,6 +77,8 @@ function withFakeAcpBob<A, E, R>(
     );
     const bobTemporaryFolder = NodePath.join(tempDir, "tmp");
     NodeFS.mkdirSync(bobTemporaryFolder);
+    const home = NodePath.join(tempDir, "home");
+    NodeFS.mkdirSync(home);
     const requestLogPath = NodePath.join(bobTemporaryFolder, "requests.ndjson");
     const argvLogPath = NodePath.join(bobTemporaryFolder, "argv.log");
     const binaryPath = writeFakeCli({
@@ -94,7 +96,8 @@ function withFakeAcpBob<A, E, R>(
     const workingFolder = NodePath.join(host.paths.providerStatusCacheDir, "bob-text-generation");
     const textGeneration = yield* makeBobTextGeneration(
       decodeBobSettings({ binaryPath, authMethod: input.authMethod ?? "sso" }),
-      { ...(input.environment ?? process.env), TMPDIR: bobTemporaryFolder },
+      // A home of the test's own: a review guide's sandbox makes Bob's state in `~/.bob`.
+      { ...(input.environment ?? process.env), HOME: home, TMPDIR: bobTemporaryFolder },
     ).pipe(
       Effect.provideService(
         HostProcess.Platform,
