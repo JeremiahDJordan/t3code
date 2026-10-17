@@ -126,7 +126,7 @@ describe("DesktopClerk", () => {
       name: "packaged Windows",
       isDevelopment: false,
       platform: "win32" as const,
-      userData: "/tmp/app-data/t3code-v2",
+      userData: "/tmp/app-data/z6code",
     },
     {
       name: "development",

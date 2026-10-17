@@ -41,6 +41,7 @@ import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogSt
 import * as DesktopSecureChannelKeys from "./app/DesktopSecureChannelKeys.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
 import * as DesktopCliCommand from "./app/DesktopCliCommand.ts";
+import * as DesktopT3Data from "./app/DesktopT3Data.ts";
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
 import * as DesktopAssets from "./app/DesktopAssets.ts";
 import * as DesktopBackendConfiguration from "./backend/DesktopBackendConfiguration.ts";
@@ -86,6 +87,9 @@ if (process.argv.includes("--version")) {
   }
   Electron.app.exit(0);
 }
+
+// Z6 Code: copy T3 Code's data on the first start, before anything below reads it.
+if (!process.argv.includes("--version")) DesktopT3Data.migrateOnFirstStart();
 
 const layerDesktopEnvironment = Layer.unwrap(
   Effect.gen(function* () {
@@ -211,6 +215,7 @@ const layerDesktopApplication = Layer.mergeAll(
   DesktopApplicationMenu.layer,
   DesktopLinuxUrlHandler.layer,
   DesktopCliCommand.layer,
+  DesktopT3Data.layer,
   layerDesktopSsh,
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),

@@ -7,9 +7,11 @@ import {
   resolveWindowsEnvironment,
   setWindowsPath,
 } from "@t3tools/shared/shell";
+import { T3_HOME_DIRNAME, defaultZ6Home, migrateHomeFromT3 } from "@t3tools/shared/t3DataMigration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as NodeOS from "node:os";
 
 function logPathHydrationWarning(message: string, error?: unknown): void {
@@ -116,10 +118,47 @@ export const expandHomePath = Effect.fn(function* (input: string) {
   return input;
 });
 
-export const resolveBaseDir = Effect.fn(function* (raw: string | undefined) {
+export class T3HomeMigrationError extends Schema.TaggedError<T3HomeMigrationError>()(
+  "T3HomeMigrationError",
+  { reason: Schema.String, cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
+/**
+ * The default home is Z6 Code's `~/.z6`, copied once from T3 Code's `~/.t3` when it is missing
+ * (`@t3tools/shared/t3DataMigration`). An explicit `--base-dir` or `T3CODE_HOME` is used as is.
+ * Pass `migrateFromT3: false` where a missing home must stay missing, such as dev state.
+ */
+export const resolveBaseDir = Effect.fn(function* (
+  raw: string | undefined,
+  options?: { readonly migrateFromT3?: boolean },
+) {
   const { join, resolve } = yield* Path.Path;
   if (!raw || raw.trim().length === 0) {
-    return join(yield* HostProcess.HomeDirectory, ".t3");
+    const homeDirectory = yield* HostProcess.HomeDirectory;
+    const z6Home = defaultZ6Home(homeDirectory);
+    // Tests never copy the developer's real home, whatever environment they hand the code.
+    const realHomeUnderTest =
+      process.env.VITEST !== undefined && homeDirectory === NodeOS.homedir();
+    if (options?.migrateFromT3 !== false && !realHomeUnderTest) {
+      const result = yield* Effect.try({
+        try: () => migrateHomeFromT3({ t3Home: join(homeDirectory, T3_HOME_DIRNAME), z6Home }),
+        catch: (cause) =>
+          new T3HomeMigrationError({
+            reason: cause instanceof Error ? cause.message : String(cause),
+            cause,
+          }),
+      });
+      if (result.status === "migrated") {
+        process.stderr.write(
+          `[server] Copied T3 Code's data from ${result.marker.source} to ${z6Home}. T3 Code's folder was left as is; \`t3 t3-data remove\` moves it to the Trash.\n`,
+        );
+      }
+    }
+    return z6Home;
   }
   return resolve(yield* expandHomePath(raw.trim()));
 });

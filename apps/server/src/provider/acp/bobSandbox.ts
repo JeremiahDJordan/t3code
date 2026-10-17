@@ -825,7 +825,7 @@ function within(root: string, path: string): string | undefined {
 }
 
 /** Folders where agents keep their transcripts and credentials, which a card never opens. */
-const AGENT_FOLDERS = [".claude", ".codex", ".cursor", ".gemini", ".agents", ".bob", ".t3"];
+const AGENT_FOLDERS = [".claude", ".codex", ".cursor", ".gemini", ".agents", ".bob", ".t3", ".z6"];
 /** Folders a card offers to let commands write in: caches, and the toolchains' own. */
 const WRITABLE_PARENTS = ["Library/Caches", ".cache", "go", ...HOME_READABLE];
 

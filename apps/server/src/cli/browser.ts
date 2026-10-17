@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { Z6_HOME_DIRNAME } from "@t3tools/shared/t3DataMigration";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -41,7 +42,7 @@ const runStep = Effect.fn("browserSetup.runStep")(function* (
 
 /**
  * Under `sudo` the process home is root's, so an unspecified home falls back to
- * the invoking user's `~/.t3`.
+ * the invoking user's `~/.z6`.
  */
 const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (explicit: Option.Option<string>) {
   const env = yield* HostProcess.Environment;
@@ -55,7 +56,7 @@ const setupBaseDir = Effect.fn("browserSetup.baseDir")(function* (explicit: Opti
     .pipe(Effect.orElseSucceed(() => ""));
   const home = entry.trim().split(":")[5];
   const path = yield* Path.Path;
-  return home ? path.join(home, ".t3") : yield* resolveBaseDir(undefined);
+  return home ? path.join(home, Z6_HOME_DIRNAME) : yield* resolveBaseDir(undefined);
 });
 
 const aptOffers = Effect.fn("browserSetup.aptOffers")(function* (name: string) {

@@ -94,6 +94,7 @@ const SECRET_SEGMENTS = new Set([
   ".docker",
   ".bob",
   ".t3",
+  ".z6",
   ".password-store",
   ".terraform.d",
   "keychains",
@@ -123,6 +124,7 @@ const PROTECTED_SEGMENTS = new Set([
   ".githooks",
   ".bob",
   ".t3",
+  ".z6",
   ".agents",
   ".claude",
   ".codex",
@@ -141,9 +143,10 @@ function namesSecret(path: string): boolean {
   const segments = segmentsOf(path).map((segment) => segment.toLowerCase());
   return segments.some(
     (segment, index) =>
-      // T3's worktrees, other threads' workspaces, live in T3's home beside its settings.
+      // T3's worktrees, other threads' workspaces, live in its home (Z6 Code's `.z6`, or `.t3`)
+      // beside its settings.
       (SECRET_SEGMENTS.has(segment) &&
-        !(segment === ".t3" && segments[index + 1] === "worktrees")) ||
+        !((segment === ".t3" || segment === ".z6") && segments[index + 1] === "worktrees")) ||
       SECRET_NAMES.some((name) => name.test(segment)) ||
       // ~/.config/gh, ~/.config/gcloud and the like hold tokens.
       (segment === ".config" && ["gh", "gcloud", "op", "hub"].includes(segments[index + 1] ?? "")),
@@ -330,7 +333,9 @@ class Places {
     const fromHome = within(this.realHome, resolved);
     if (fromHome !== undefined) {
       const first = segmentsOf(fromHome)[0] ?? "";
-      const worktrees = segmentsOf(fromHome).slice(0, 2).join("/") === ".t3/worktrees";
+      const worktrees = [".t3/worktrees", ".z6/worktrees"].includes(
+        segmentsOf(fromHome).slice(0, 2).join("/"),
+      );
       if ((first.startsWith(".") && !worktrees) || first === "Library") return true;
     }
     if (shallow) return false;

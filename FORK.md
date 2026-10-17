@@ -833,14 +833,70 @@ An upstream client given `cinder` as a server's default theme falls back to its 
 ### Name the fork's builds Z6 Code (owner, 2026-10-16)
 
 The desktop app and the owner's own iPhone builds are **Z6 Code**, so they stand apart from T3's
-apps on the same Mac or phone. The desktop's `productName` sets the bundle's name; the bundle id,
-the data folder (`t3code-v2`) and the safe-storage key (`t3code Safe Storage`) stay upstream's, so
-the renamed app keeps its data. It is still the same app to macOS, so an older copy under another
-name should go; `scripts/install-desktop-macos.sh` names any it finds. The in-app name
+apps on the same Mac or phone. The desktop's `productName` sets the bundle's name. The in-app name
 (`APP_BASE_NAME` and the window title) stays T3 Code: upstream reworks it often and every change
 would conflict. The iPhone icon is the `.icon` package in `assets/fork`, white Z6 on Ember's accent
 (`#b5552b`), and `z6-ios-1024.png` is its Icon Composer export (`ictool --export-image`), which
 Expo uses for its fallback icon and splash.
+
+**Its own data, copied from T3 Code once (owner, 2026-10-16).** Z6 Code and T3 Code can be
+installed and run at once without sharing state. The fork's builds (desktop, and the `t3`
+server and CLI built from this branch) use `~/.z6` for the server home and `z6code` for the
+desktop's Electron profile, against T3's `~/.t3` and `t3code-v2`; the names live in
+`packages/shared/src/t3DataMigration.ts`. The first start that finds a Z6 location missing copies
+T3's into it (`migrateHomeFromT3`, `migrateDesktopUserDataFromT3`), then neither app reads the
+other's folders. The server copies in `resolveBaseDir`'s default branch (`os-jank.ts`), so `serve`
+and every CLI command get it; the desktop passes its home to its server explicitly, so it copies
+itself, first thing in `main.ts` (`DesktopT3Data.migrateOnFirstStart`). An explicit `T3CODE_HOME`
+or `--base-dir`, dev state (`--dev-url`, a worktree's `.t3`) and `t3 app` never copy.
+
+- The copy is staged beside the destination and renamed into place, so a crash never leaves a
+  half copy that later starts count as done. Each SQLite file is snapshot with `VACUUM INTO` from
+  a read-only connection (`immutable` when it has no journal, so no `-wal`/`-shm` appear beside
+  T3's). Nothing under T3's folders is written.
+- It refuses while T3 Code runs on the source: a server holding `server-owner.sqlite`'s lock (or a
+  live pre-lock `server-runtime.json`), or a T3 desktop whose `SingletonLock` names a live pid.
+  Copied mid-turn, T3's interrupted runs would continue in both apps (restart continuation). The
+  desktop shows why and quits; the CLI fails with the same message. Nothing is created, so the
+  next start tries again.
+- Left out: `worktrees/` (git records their absolute paths, so the copied threads keep using them
+  under `~/.t3/worktrees`), `runtime/`, `tools/`, `caches/`, `source/`, `bin/`, `dev/`, logs,
+  sockets and lock or pid files, `environment-id` and `anonymous-id`, and the T3 Connect and
+  tunnel secrets (`secrets/cloud-*`, `secrets/secure-channel-x25519`). Z6 is a separate
+  environment: with T3's id, clients would merge the two servers into one entry and the relay
+  would hand one tunnel to both. So phones and browsers pair with Z6 again, and `connect link`
+  runs again for T3 Connect. Chromium's caches and `Singleton*` files stay out of the profile
+  copy. `migrated-from-t3.json` in each copy records the source, the time and what was left out.
+- **Shared keychain key.** The staged package name stays `t3code`, so both apps use the
+  `t3code Safe Storage` key, and the copied safeStorage files (`connection-catalog.json`,
+  `secure-channel-keys.json`, `saved-environments.json`) still decrypt. A new name would give Z6
+  a new key and lose the saved connections. macOS may ask once whether Z6 may use the key.
+- Made distinct for running side by side: the bundle id (`org.zanson.z6code` in
+  `build-desktop-artifact.ts`, `install-desktop-macos.sh`, and the Windows app user model id),
+  the Electron profile, and with it Chromium's single-instance lock, the desktop's CLI command
+  (`z6`, at `~/.z6/bin/z6`, with its own marker so it never takes over T3's `t3` link), and the
+  background service (`z6code.service`, `org.zanson.z6code.service`). The desktop's backend port
+  is scanned from 3773 and `serve` takes the next free one, so ports do not collide.
+- Left shared, on purpose: the `t3code://` scheme, which is also the renderer's origin and the
+  sign-in callback upstream's Clerk instance allows (each app registers itself as the handler when
+  it starts, so a sign-in link goes to the one started last); Tailscale Serve's default port 443
+  (set another in one app's Settings when both serve); the in-app name; Linux's desktop entry and
+  WM class (the fork builds no Linux desktop app); and `~/.t3` on SSH and WSL hosts, where the
+  desktop runs upstream's server.
+- **Removing T3's folders** (`packages/shared/src/t3DataCleanup.ts`). The desktop asks once, after
+  the start that copied (Keep, or Move to Trash), and Settings → General shows the old folders with
+  **Move to Trash** while they remain; servers have `t3 t3-data status` and `t3 t3-data remove`.
+  Removal refuses while T3 Code or a T3 server runs on those folders, or T3's background service
+  is installed.
+  It keeps every `~/.t3/worktrees` checkout that Z6's database uses (a thread's `worktreePath`,
+  archived threads included, or a project root), has uncommitted changes, or git cannot check,
+  and keeps everything when Z6's database cannot be read. The rest goes to the Trash (Electron's
+  `shell.trashItem`, macOS's `trash`, or the XDG trash), never deleted outright, and git prunes
+  the trashed worktrees. It reports what moved and what stayed and why, and records it in the
+  markers.
+- `scripts/install-desktop-macos.sh` also quits an older build at the same path that still has
+  T3's bundle id, since it holds `~/.t3` and would block the copy. The same-bundle-id check names
+  only earlier Z6 copies now; T3 Code itself may stay.
 
 ### Turn T3 Connect off by default (owner, 2026-10-16)
 
@@ -1093,6 +1149,17 @@ run `vp i` before testing (upstream adds dependencies the dev server needs).
 - `apps/server/src/ws.ts`: `readClientSupportsBob`, the adapted `agentSessionsScan`, and
   `serverUpdateSettings`, which adapts the patch before both of its branches; losing it lets
   an upstream app quietly turn a project's check-ins back on.
+- Z6 Code's own data: the default home in `os-jank.ts` (`resolveBaseDir`) and desktop
+  `DesktopStatePaths.ts`, `Z6_DESKTOP_USER_DATA_DIRNAME` in `DesktopUserData.ts`, the
+  `migrateOnFirstStart` call in desktop `main.ts`, `migrateFromT3: devUrl === undefined` in
+  `cli/config.ts`, `DESKTOP_APP_ID` in `build-desktop-artifact.ts`, `COMMAND_NAME` in
+  `DesktopCliShim.ts`, `BOOT_SERVICE_NAME` and `BOOT_SERVICE_LAUNCHD_LABEL` in
+  `cloud/bootService.ts`, `.z6` beside `.t3` in `bobAutoReview.ts` and `bobSandbox.ts`, and the
+  cleanup's wiring (`DesktopT3Data.layer` in `main.ts`, its prompt in `DesktopApp.ts`, the
+  `t3Data` IPC methods and bridge, `T3DataSettingsRow` in `SettingsPanels.tsx`, `t3DataCommand`
+  in `binCli.ts`). Losing a default sends Z6 back onto T3's folders; `t3DataMigration.test.ts`,
+  `t3DataCleanup.test.ts` and `os-jank.baseDir.test.ts` cover the shared parts. If upstream adds
+  a file to its home that is process state or an identity, add it to `homeSkipRule`.
 - Usage: `BobDriver`'s `usage` reader and `BobDriver` in `BUILT_IN_USAGE_DRIVERS`
   (`builtInDrivers.ts`), without which Bob vanishes from the Usage page, and `credits` on
   provider-core's `UsageRecord`. `usage/usageAggregation.ts`: records carrying `credits` skip
@@ -1166,14 +1233,14 @@ cd apps/server && vp test run src/orchestration-v2/Adapters/BobAdapterV2 \
   src/serverSettings src/orchestration-v2/SteeringCompletion
 cd ../../packages/client-runtime && vp test run src/state/threadExecution \
   src/state/checkIns src/state/entities src/authorization
-cd ../shared && vp test run src/usage
+cd ../shared && vp test run src/usage src/t3DataMigration src/t3DataCleanup
 cd ../provider-core && vp test run src/server/failure src/server/usageLimits
 cd ../provider-acp && vp test run
 cd ../../apps/server && vp test run src/workflow src/orchestration-v2/StructuredResult \
   src/orchestration-v2/ResultPattern \
   src/orchestration-v2/DelegatedCompletionDelivery src/mcp/OrchestratorMcpService \
   src/secureChannel src/auth src/startupAccess src/cli src/orchestration-v2/ThreadLaunchService \
-  src/cloud
+  src/os-jank.baseDir src/cloud
 cd ../../packages/shared && vp test run src/secureChannel src/remote
 cd ../client-runtime && vp test run src/connection src/state/workflowCard
 cd ../../apps/web && vp test run src/hostedPairing src/components/settings/pairingUrls src/cloud

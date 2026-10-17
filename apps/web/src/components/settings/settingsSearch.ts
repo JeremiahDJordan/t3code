@@ -544,9 +544,16 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "cli-command",
-    title: "t3 command",
+    title: "z6 command",
     to: "/settings/general",
     searchTerms: ["cli terminal shell path install command line"],
+    desktopOnly: true,
+  },
+  {
+    id: "t3-data",
+    title: "Old T3 Code data",
+    to: "/settings/general",
+    searchTerms: ["t3 code migrate migration copy folder remove trash cleanup ~/.t3"],
     desktopOnly: true,
   },
   {

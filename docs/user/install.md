@@ -86,6 +86,16 @@ terminal, open **Settings → General → About** and choose **Install** next to
 terminal afterwards. **Remove** takes it off again. If you already have `t3`
 from npm, it stays as it is.
 
+### Z6 Code, this fork's build
+
+Z6 Code keeps its own data in `~/.z6` (and its app profile in `z6code`), so it can run beside
+T3 Code. The first time it starts, it copies T3 Code's `~/.t3` there, then leaves T3 Code's
+folders alone; quit T3 Code first, or Z6 Code asks you to. Threads keep using their worktrees in
+`~/.t3/worktrees`. Pair your phone and browsers with Z6 Code again, and run `connect link` again
+for T3 Connect. Its command is `z6`. To remove T3 Code's old folders, choose **Move to Trash**
+next to **Old T3 Code data** in **Settings → General**, or run `t3 t3-data remove` on a server.
+Worktrees Z6 Code still uses, or with uncommitted changes, are kept.
+
 ### Windows Subsystem for Linux
 
 Choose a WSL distro in **Settings → Connections** to run agents and projects

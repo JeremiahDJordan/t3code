@@ -194,7 +194,8 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
 
   const path = yield* Path.Path;
   const configuredBaseDir = Option.getOrUndefined(flags.baseDir) ?? environment.t3Home;
-  const baseDir = yield* resolveBaseDir(configuredBaseDir);
+  // Only finds a running desktop app, which made its home itself.
+  const baseDir = yield* resolveBaseDir(configuredBaseDir, { migrateFromT3: false });
   const allowDevFallback = Option.isNone(flags.baseDir) && !environment.t3Home?.trim();
   const rawWorkspaceRoot =
     Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcess.WorkingDirectory);

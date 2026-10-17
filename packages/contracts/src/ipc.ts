@@ -323,6 +323,24 @@ export const DesktopCliCommandStateSchema = Schema.Struct({
 });
 export type DesktopCliCommandState = typeof DesktopCliCommandStateSchema.Type;
 
+/** T3 Code folders a Z6 Code build copied its data from, and the last cleanup of them. */
+export const DesktopT3DataStateSchema = Schema.Struct({
+  locations: Schema.Array(
+    Schema.Struct({
+      kind: Schema.Literals(["home", "desktop-user-data"]),
+      path: Schema.String,
+    }),
+  ),
+  lastCleanup: Schema.NullOr(
+    Schema.Struct({
+      at: Schema.String,
+      removed: Schema.Array(Schema.String),
+      kept: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
+    }),
+  ),
+});
+export type DesktopT3DataState = typeof DesktopT3DataStateSchema.Type;
+
 export interface DesktopUpdateActionResult {
   accepted: boolean;
   completed: boolean;
@@ -1176,6 +1194,10 @@ export interface DesktopBridge {
     getState: () => Promise<DesktopCliCommandState>;
     install: () => Promise<DesktopCliCommandState>;
     uninstall: () => Promise<DesktopCliCommandState>;
+  };
+  t3Data?: {
+    getState: () => Promise<DesktopT3DataState>;
+    remove: () => Promise<DesktopT3DataState>;
   };
   webLinks?: {
     setReady: (ready: boolean) => Promise<void>;

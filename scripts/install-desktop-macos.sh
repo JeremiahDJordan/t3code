@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs a local desktop build on macOS: quits the running T3 Code, replaces its app in
+# Installs a local desktop build on macOS: quits the running Z6 Code, replaces its app in
 # /Applications with the one in a build's zip, and opens it again.
 #
 #   scripts/install-desktop-macos.sh [--detach] [path/to/T3-Code-<version>-<arch>.zip]
@@ -17,7 +17,7 @@
 # phones and browsers reconnect once the app is back.
 set -eu
 
-bundle_id="com.t3tools.t3code"
+bundle_id="org.zanson.z6code"
 quit_timeout_seconds=60
 launch_timeout_seconds=30
 # Long enough for the agent that started a detached install to finish its reply.
@@ -29,9 +29,9 @@ fail() {
   exit 1
 }
 
-# Process ids of the running app, from Launch Services by bundle id.
+# Process ids of the running app with bundle id $1 (this build's by default), from Launch Services.
 app_pids() {
-  asns="$(lsappinfo find bundleid="$bundle_id")"
+  asns="$(lsappinfo find bundleid="${1:-$bundle_id}")"
   [ -n "$asns" ] || return 0
   # shellcheck disable=SC2086 # One argument per running copy.
   lsappinfo info -only pid $asns | sed -n 's/.*pid = \([0-9][0-9]*\).*/\1/p'
@@ -110,9 +110,16 @@ incoming="$target.installing"
 rm -rf "$incoming"
 ditto "$staging/$app_name" "$incoming"
 
+# A build from before Z6 Code had its own bundle id (com.t3tools.t3code) may sit at this path;
+# it runs on T3 Code's data, which this build copies on its first start, so quit it too.
+installed_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$target/Contents/Info.plist" 2>/dev/null || true)"
 pids="$(app_pids)"
-if [ -n "$pids" ]; then
-  printf 'Quitting T3 Code...\n'
+if [ -n "$installed_id" ] && [ "$installed_id" != "$bundle_id" ]; then
+  pids="$pids $(app_pids "$installed_id")"
+fi
+pids="$(printf '%s\n' $pids | sort -u | tr '\n' ' ')"
+if [ -n "${pids# }" ]; then
+  printf 'Quitting %s...\n' "$app_name"
   # Electron treats SIGTERM as a normal quit, so T3 still stops its server cleanly. Unlike
   # AppleScript, it needs no Automation permission, which nobody could grant from a phone.
   # shellcheck disable=SC2086 # One argument per process.
@@ -122,7 +129,7 @@ if [ -n "$pids" ]; then
   while any_alive $pids; do
     if [ "$waited" -ge "$quit_timeout_seconds" ]; then
       rm -rf "$incoming"
-      fail "T3 Code is still running after ${quit_timeout_seconds}s. Quit it, then run this again."
+      fail "$app_name is still running after ${quit_timeout_seconds}s. Quit it, then run this again."
     fi
     sleep 1
     waited=$((waited + 1))
@@ -150,9 +157,12 @@ while [ -z "$(app_pids)" ]; do
   waited=$((waited + 1))
 done
 printf 'Started %s.\n' "$target"
+if [ -n "$installed_id" ] && [ "$installed_id" != "$bundle_id" ]; then
+  printf 'It replaced a build with bundle id %s. Z6 Code now keeps its own data and copied T3 Code'"'"'s on this first start.\n' "$installed_id"
+fi
 
-# An app renamed by a later build (T3 Code (Alpha), T3 Code (Beta), Z6 Code) keeps the bundle id,
-# so an older copy stays beside it; macOS may then open either one. Say so rather than delete it.
+# An app renamed by a later build keeps the bundle id, so an older copy stays beside it; macOS may
+# then open either one. Say so rather than delete it. T3 Code itself has its own id and may stay.
 for other in /Applications/*.app; do
   [ "$other" = "$target" ] && continue
   other_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$other/Contents/Info.plist" 2>/dev/null || true)"

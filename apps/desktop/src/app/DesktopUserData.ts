@@ -1,3 +1,4 @@
+import { Z6_DESKTOP_USER_DATA_DIRNAME } from "@t3tools/shared/t3DataMigration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -41,7 +42,7 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     const path = yield* Path.Path;
     const names = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
-      : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
+      : { current: Z6_DESKTOP_USER_DATA_DIRNAME, legacy: "T3 Code (Alpha)" };
     const destinationPath = path.join(input.appDataDirectory, names.current);
     const legacyPath = path.join(input.appDataDirectory, names.legacy);
     const inspect = (resourcePath: string) =>

@@ -350,6 +350,8 @@ export const resolveServerConfig = (
       Option.getOrUndefined(
         resolveOptionPrecedence(explicitBaseDir, Option.fromUndefinedOr(bootstrap?.t3Home)),
       ),
+      // Dev state lives in `<home>/dev`, never the copy's `userdata`.
+      { migrateFromT3: devUrl === undefined },
     );
     const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
     const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));

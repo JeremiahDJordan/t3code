@@ -31,6 +31,7 @@ import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopState from "./DesktopState.ts";
+import * as DesktopT3Data from "./DesktopT3Data.ts";
 import * as DesktopRemoteUpdates from "../updates/DesktopRemoteUpdates.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
@@ -189,6 +190,8 @@ const bootstrap = Effect.gen(function* () {
   );
 
   yield* snapShot.initialize;
+  // Z6 Code: once, after a start that copied T3 Code's data, offer to remove T3's folders.
+  yield* Effect.forkScoped((yield* DesktopT3Data.DesktopT3Data).promptAfterMigration);
 
   if (!settings.localEnvironmentEnabled) {
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");

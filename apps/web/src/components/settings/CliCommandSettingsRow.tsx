@@ -35,7 +35,7 @@ export function CliCommandSettingsRow() {
           toastManager.add(
             stackedThreadToast({
               type: "error",
-              title: action === "install" ? "Could not install t3" : "Could not remove t3",
+              title: action === "install" ? "Could not install z6" : "Could not remove z6",
               description: error instanceof Error ? error.message : "Something went wrong.",
             }),
           );
@@ -48,12 +48,12 @@ export function CliCommandSettingsRow() {
   if (!bridge || !state?.supported) return null;
   const installed = state.installedPath !== null;
   const description = state.shadowedBy
-    ? `Another t3 at ${state.shadowedBy} runs first in a new terminal. Remove it to use T3 Code's.`
+    ? `Another z6 at ${state.shadowedBy} runs first in a new terminal. Remove it to use this app's.`
     : !installed
-      ? "Run T3 Code's CLI as `t3` from any terminal."
+      ? "Run this app's CLI as `z6` from any terminal."
       : state.onPath
         ? `Installed at ${state.installedPath}. Open a new terminal to use it.`
-        : `Installed at ${state.installedPath}, which is not on your PATH yet. Add its folder to your PATH to run \`t3\`.`;
+        : `Installed at ${state.installedPath}, which is not on your PATH yet. Add its folder to your PATH to run \`z6\`.`;
 
   return (
     <SettingsRow

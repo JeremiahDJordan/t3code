@@ -12,9 +12,9 @@
 // reviewer was judging by.
 //
 // Sources, read-only:
-//   trace  $T3CODE_TRACE_FILE, else ~/.t3/userdata/logs/server.trace.ndjson   --trace PATH
+//   trace  $T3CODE_TRACE_FILE, else ~/.z6/userdata/logs/server.trace.ndjson   --trace PATH
 //          plus its rotated backups (.1 to .$T3CODE_TRACE_MAX_FILES, default 10)
-//   db     ~/.t3/userdata/statev2.sqlite, for the user's messages (Node 22.5+)   --t3-db PATH, --no-db
+//   db     ~/.z6/userdata/statev2.sqlite, for the user's messages (Node 22.5+)   --t3-db PATH, --no-db
 // Other flags: --since DAYS, --thread ID, --messages N (default 3), --all (every decision, not just
 //   the reviewer's), --json (the joined records, one JSON document).
 //
@@ -33,7 +33,7 @@ const argv = process.argv.slice(2);
 const opt = (name) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined);
 const flag = (name) => argv.includes(name);
 const HOME = NodeOS.homedir();
-const USERDATA = NodePath.join(process.env.T3CODE_HOME ?? NodePath.join(HOME, ".t3"), "userdata");
+const USERDATA = NodePath.join(process.env.T3CODE_HOME ?? NodePath.join(HOME, ".z6"), "userdata");
 const TRACE =
   opt("--trace") ??
   process.env.T3CODE_TRACE_FILE ??

@@ -23,6 +23,7 @@ import { projectCommand } from "./cli/project.ts";
 import { runDefaultServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 import { updateCommand } from "./cli/update.ts";
 import { uninstallCommand } from "./cli/uninstall.ts";
+import { t3DataCommand } from "./cli/t3Data.ts";
 import { serviceLauncherCommand } from "./cli/serviceLauncher.ts";
 import { claudeHistoryCommand } from "./cli/claudeHistory.ts";
 import { sshHelperCommand } from "./cli/sshHelper.ts";
@@ -116,6 +117,7 @@ export const makeCli = ({
       serviceCommand,
       updateCommand,
       uninstallCommand,
+      t3DataCommand,
       serviceLauncherCommand,
       claudeHistoryCommand,
       sshHelperCommand,

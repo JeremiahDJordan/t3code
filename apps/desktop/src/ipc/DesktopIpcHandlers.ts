@@ -87,6 +87,7 @@ import {
   installCliCommand,
   uninstallCliCommand,
 } from "./methods/cliCommand.ts";
+import { getT3DataState, removeT3Data } from "./methods/t3Data.ts";
 
 export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers")(function* () {
   const ipc = yield* DesktopIpc.DesktopIpc;
@@ -169,6 +170,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(getCliCommandState);
   yield* ipc.handle(installCliCommand);
   yield* ipc.handle(uninstallCliCommand);
+  yield* ipc.handle(getT3DataState);
+  yield* ipc.handle(removeT3Data);
   for (const previewMethod of PreviewIpc.methods) {
     yield* ipc.handle(previewMethod);
   }

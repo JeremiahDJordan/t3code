@@ -351,6 +351,14 @@
       "types": "./src/devHome.ts",
       "import": "./src/devHome.ts"
     },
+    "./t3DataMigration": {
+      "types": "./src/t3DataMigration.ts",
+      "import": "./src/t3DataMigration.ts"
+    },
+    "./t3DataCleanup": {
+      "types": "./src/t3DataCleanup.ts",
+      "import": "./src/t3DataCleanup.ts"
+    },
     "./devProxy": {
       "types": "./src/devProxy.ts",
       "import": "./src/devProxy.ts"

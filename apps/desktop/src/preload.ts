@@ -280,6 +280,10 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     install: () => ipcRenderer.invoke(IpcChannels.CLI_COMMAND_INSTALL_CHANNEL),
     uninstall: () => ipcRenderer.invoke(IpcChannels.CLI_COMMAND_UNINSTALL_CHANNEL),
   },
+  t3Data: {
+    getState: () => ipcRenderer.invoke(IpcChannels.T3_DATA_GET_STATE_CHANNEL),
+    remove: () => ipcRenderer.invoke(IpcChannels.T3_DATA_REMOVE_CHANNEL),
+  },
   onUpdateState: (listener) => {
     const wrappedListener = (_event: Electron.IpcRendererEvent, state: unknown) => {
       if (typeof state !== "object" || state === null) return;

@@ -105,7 +105,7 @@ so.
   never read for either. A long message is read for those sentences before the reviewer sees
   it shortened. What the reviewer takes from each message, each call Auto answers or asks
   about, and your answer, are kept in T3 Code's trace file,
-  `~/.t3/userdata/logs/server.trace.ndjson`. When it finds the call requested and not risky,
+  `~/.z6/userdata/logs/server.trace.ndjson`. When it finds the call requested and not risky,
   the call runs; otherwise, when you have written nothing it can judge against, or when it
   does not answer within a few seconds, you are asked. To have Auto ask before every web
   search, fetch, GitHub read and skill in one thread, pick **Always ask** in the **Auto
