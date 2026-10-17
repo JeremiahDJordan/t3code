@@ -21,7 +21,9 @@ You can add more computers before continuing:
 - **Add a computer** connects directly to a server on your network or tailnet.
   Start the server with `t3 serve`, then run `t3 pair --tailscale` and paste
   the pairing link. You can also run `t3 serve --host <address>` and use
-  `t3 pair` when the server is already reachable on your network.
+  `t3 pair` when the server is already reachable on your network. Here `t3` is
+  `node apps/server/dist/bin.mjs` in a [source checkout](./install.md#command-line),
+  or `z6` where the desktop app is installed.
 
 Saved computers and computers discovered through T3 Connect are selected by
 default. Uncheck any you do not want to set up; this does not disconnect them.

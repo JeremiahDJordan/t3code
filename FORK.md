@@ -1132,10 +1132,13 @@ or allow it with its reason.
 #### Left as they are
 
 `apps/marketing` (upstream's site) and `infra/relay` (upstream's relay service) are not part of
-the shipped apps and keep upstream's addresses. User docs and CLI help still show `npx t3`
-commands (`t3 pair`, `t3 serve`, the welcome wizard), which run upstream's npm package if a user
-types them; they contact nothing themselves. The preview tool's `t3.chat` example URL is
-upstream's chat product, not a T3 Code service.
+the shipped apps and keep upstream's addresses. The README, install guide and welcome wizard
+send people to a source checkout (`node apps/server/dist/bin.mjs`) or the desktop's `z6`, since
+`npx t3` and upstream's installers install upstream's package. Other user docs still write the
+command as `t3`, which the install guide explains; the host-browser setup's client fallback
+(`serverBrowserStream.ts`, used only when a server sends no command) and upstream's triage
+playbook still say `npx t3`. The preview tool's `t3.chat` example URL is upstream's chat
+product, not a T3 Code service.
 
 #### Mobile
 

@@ -15,20 +15,22 @@ launch T3 Code and configure providers afterwards.
 
 ## Command line
 
+Build the server from a checkout of this fork, with git, Node.js 24 and `vp`
+([Install vp](../../README.md#install-vp); [Install from source](../../FORK.md#install-from-source)
+has the full requirements):
+
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+git clone -b bob-shell-v2 https://github.com/JeremiahDJordan/t3code.git
+cd t3code && vp i && vp run --filter t3 build
+node apps/server/dist/bin.mjs
 ```
 
-On Windows, in PowerShell:
-
-```powershell
-irm https://t3.codes/install.ps1 | iex
-```
-
-This installs the `t3` binary to `~/.local/bin`. If your shell reports `command not found`
-afterwards, that directory is not on your `PATH` yet; the installer prints the
-line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
-`T3CODE_VERSION` to pin an exact version.
+On these pages, `t3` stands for `node apps/server/dist/bin.mjs` in that checkout, or for `z6`
+where the desktop app installed [its command](#the-z6-command). Upstream's
+`curl -fsSL https://t3.codes/install.sh | sh` and `npx t3` install upstream's T3 Code, not this
+fork. The checkout's own `scripts/install.sh` and `scripts/install.ps1` install the `t3` binary to
+`~/.local/bin`, but only from a release source you name, as above. Set `T3CODE_CHANNEL=nightly` to
+install the nightly train, or `T3CODE_VERSION` to pin an exact version.
 
 | Task                                             | Command                                                                 |
 | ------------------------------------------------ | ----------------------------------------------------------------------- |
@@ -47,49 +49,25 @@ If `t3` or `t3 start` reports an already running server, connect to that server
 instead. Stop it before starting a replacement, or use a different `--base-dir`
 for an independent server.
 
-To try T3 Code once without installing it, run `npx t3@latest` instead (needs
-Node.js for `npx`).
-
-### Intel Macs
-
-There is no `t3` executable for Intel Macs (the desktop app is available). To
-run a server there, build it from source with Node.js 24 and `vp`
-([Install vp](https://github.com/pingdotgg/t3code#install-vp)):
-
-```bash
-git clone https://github.com/pingdotgg/t3code
-cd t3code && vp i && vp run build:desktop
-node apps/server/dist/bin.mjs
-```
-
-`t3 update` and the background service do not apply to a server run this way;
-update it with `git pull` and a rebuild.
+`t3 update` and the background service do not apply to a server run from a checkout; update it
+with `git pull --rebase`, `vp i` and a rebuild.
 
 ## Desktop app
 
-Download a release from [GitHub Releases](https://github.com/pingdotgg/t3code/releases),
-or use a package manager:
+Build the desktop app from the same checkout: on an Apple silicon Mac,
+`vp run dist:desktop:dmg:arm64` writes a `.dmg` to `release/`, and
+[Install from source](../../FORK.md#install-from-source) covers installing and signing it. The
+fork builds no Linux desktop app. The package-manager installs upstream documents (`winget`,
+Homebrew, `.deb`, AUR) install upstream's T3 Code.
 
-| Platform           | Install                            |
-| ------------------ | ---------------------------------- |
-| Windows            | `winget install T3Tools.T3Code`    |
-| macOS              | `brew install --cask t3-code`      |
-| Debian, Ubuntu     | `sudo apt install ./T3-Code-*.deb` |
-| Arch Linux         | `yay -S t3code-bin`                |
-| Arch Linux nightly | `yay -S t3code-nightly-bin`        |
+### The `z6` command
 
-The `.deb` updates itself like the other desktop builds. It asks for your
-password to install each update. If your desktop has no password prompt, the
-update fails. Download the new `.deb` and install it the same way.
-
-### The `t3` command
-
-The desktop app includes the `t3` command-line tool. To run it from any
+The desktop app includes the `z6` command-line tool. To run it from any
 terminal, open **Settings → General → About** and choose **Install** next to
-**t3 command**. On macOS and Linux it adds a `t3` link to a folder on your
+**z6 command**. On macOS and Linux it adds a `z6` link to a folder on your
 `PATH`; on Windows it adds the app's command folder to your `PATH`. Open a new
-terminal afterwards. **Remove** takes it off again. If you already have `t3`
-from npm, it stays as it is.
+terminal afterwards. **Remove** takes it off again. T3 Code's own `t3`, if you
+have it, stays as it is.
 
 ### Z6 Code, this fork's build
 
@@ -126,18 +104,9 @@ command cannot reach the app, start or update the desktop app and try again.
 
 ## Mobile app
 
-Install T3 Code from the
-[App Store](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824) or
-[Google Play](https://play.google.com/store/apps/details?id=com.t3tools.t3code).
-The phone connects to a server on another machine. Follow
-[remote access](./remote-access.md) to link it through T3 Connect or a pairing URL.
-
-Store links and QR codes are also available in **Settings → General → Mobile app**
-on web and desktop. The store apps work with both stable and Nightly servers. Test builds are optional:
-
-- **iPhone and iPad:** TestFlight is invite-only.
-- **Android:** download an APK from the
-  [Android beta releases](https://github.com/pingdotgg/t3code/releases?q=android-beta-).
+Z6 Code has no store apps; build the mobile app from the same checkout (`apps/mobile`). The phone
+connects to a server on another machine. Follow [remote access](./remote-access.md) to pair it
+with a pairing URL.
 
 If the app crashes during launch, open Settings → Diagnostics on the next launch
 that succeeds. It lists startup crashes from the last 7 days with the error and

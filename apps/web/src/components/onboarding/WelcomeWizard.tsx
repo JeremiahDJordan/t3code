@@ -106,6 +106,9 @@ import { formatRelativeTime } from "../../timestampFormat";
 
 type WizardStep = "connection" | "agents" | "import";
 const NO_ENVIRONMENTS: readonly EnvironmentId[] = [];
+// Fork: upstream's commands run its `t3` npm package; the fork publishes none, so its CLI runs
+// from a source checkout (FORK.md, "Install from source") or as the desktop app's `z6`.
+const SOURCE_CLI = "node apps/server/dist/bin.mjs";
 
 const AGENT_ONBOARDING_THREAD_ID = ThreadId.make("onboarding-agent-setup");
 const ONBOARDING_STAGES = ["Connect", "Agents", "Projects"] as const;
@@ -546,7 +549,7 @@ function ConnectAccountOption({
             <p className="text-sm text-muted-foreground">
               Run this on each computer you want to connect.
             </p>
-            <CommandBlock command="npx t3 connect" className="mt-3" />
+            <CommandBlock command={`${SOURCE_CLI} connect`} className="mt-3" />
             <p className="mt-3 text-xs text-muted-foreground">
               Keep T3 Code running. Select the computers you want to set up above.
             </p>
@@ -653,11 +656,12 @@ function PairingForm({
           </div>
           <CollapsiblePanel>
             <p className="pt-3 text-sm text-muted-foreground">
-              Run this on the computer with your code.
+              Run this in the Z6 Code checkout on the computer with your code, or{" "}
+              <code className="font-mono">z6 pair</code> where the desktop app is installed.
             </p>
-            <CommandBlock command="npx t3 pair" className="mt-2" />
+            <CommandBlock command={`${SOURCE_CLI} pair`} className="mt-2" />
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Start T3 Code first, or run <code className="font-mono">npx t3 serve</code>. Add{" "}
+              Start the app first, or run <code className="font-mono">{SOURCE_CLI} serve</code>. Add{" "}
               <code className="font-mono">--tailscale</code> to use your tailnet.
             </p>
           </CollapsiblePanel>

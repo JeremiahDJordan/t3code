@@ -5,8 +5,9 @@ to keep a terminal open.
 
 ## Manage the service
 
-Install the `t3` CLI first ([Install T3 Code](./install.md#command-line)), then
-run these commands on the machine that will host T3 Code:
+Install the `t3` CLI first ([Install T3 Code](./install.md#command-line); in a source checkout
+it is `node apps/server/dist/bin.mjs`), then run these commands on the machine that will host
+T3 Code:
 
 | Task                            | Command                |
 | ------------------------------- | ---------------------- |

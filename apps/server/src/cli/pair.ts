@@ -68,7 +68,8 @@ export class NoRunningServerError extends Schema.TaggedError<NoRunningServerErro
     return [
       "No running T3 Code server found.",
       ...this.checkedStatePaths.map((statePath) => `  checked ${statePath}`),
-      "Start one with `npx t3 serve`, or connect this machine with T3 Connect: `npx t3 connect`.",
+      // Fork: no npm package and T3 Connect is off, so it names the source-built CLI only.
+      "Start one with `t3 serve` (`node apps/server/dist/bin.mjs serve` in a source checkout).",
     ].join("\n");
   }
 }
