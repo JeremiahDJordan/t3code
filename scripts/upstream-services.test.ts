@@ -89,11 +89,6 @@ const ALLOWED_TEXT: ReadonlyArray<{
     text: "hello@t3.codes",
     reason: "Linux package maintainer field; the fork builds no Linux desktop app",
   },
-  {
-    path: "scripts/build-desktop-artifact.ts",
-    text: '"https://t3.codes"',
-    reason: "Linux package homepage field; the fork builds no Linux desktop app",
-  },
 ];
 
 const REPO_ROOT = NodePath.resolve(import.meta.dirname, "..");

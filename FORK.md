@@ -1163,7 +1163,7 @@ allow list: Markdown and docs, `.github`, `.agents`, `.repos`, `apps/marketing`,
 `packaging`, tests and fixtures, a few named files whose text contacts nothing (the triage
 playbook, `apps/web/vercel.ts`, the repository's own `t3.json`, the t3.json schema's `$id`, the
 desktop's Linux metadata) and named strings in a file (the GNOME extension's uuid, the stack
-rebase's committer email, the Linux package's maintainer and homepage). A second test fails on an
+rebase's committer email, the Linux package's maintainer). A second test fails on an
 allowed string that no longer occurs. A hit means: gate the new code path behind configuration,
 or allow it with its reason.
 

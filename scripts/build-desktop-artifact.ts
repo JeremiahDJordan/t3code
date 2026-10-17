@@ -3760,8 +3760,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     packageManager: rootPackageJson.packageManager,
     description: `${APP_PRODUCT_NAME} is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.`,
     license: "MIT",
-    homepage: "https://t3.codes",
-    author: "T3 Tools",
+    // Fork: the Windows and Linux publisher fields name the fork and its author.
+    homepage: "https://github.com/JeremiahDJordan/t3code",
+    author: "Jeremiah Jordan",
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
       options.platform,
