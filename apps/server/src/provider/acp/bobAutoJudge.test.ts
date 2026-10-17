@@ -21,6 +21,7 @@ import {
   bobAutoJudgement,
   type BobAutoJudgeModel,
   makeAppleBobAutoJudge,
+  bobAutoReviewerMissing,
   makeBobAutoJudgeForSettings,
   makeEndpointBobAutoJudge,
   makeModelBobAutoJudge,
@@ -461,6 +462,19 @@ describe("makeModelBobAutoJudge", () => {
         model,
       }).judge,
     );
+  });
+
+  it("leaves Auto no reviewer when Apple's model is picked off a Mac, and says so", () => {
+    const common = {
+      settings: { autoReviewer: "apple" as const, autoReviewEndpoint: "", autoReviewModel: "" },
+      environment: {},
+      cacheDir: "/nowhere",
+      httpClient: HttpClient.make(() => Effect.never),
+    };
+    assert.isUndefined(makeBobAutoJudgeForSettings({ ...common, platform: "linux" }).judge);
+    assert.include(bobAutoReviewerMissing(common.settings, "linux"), "runs only on a Mac");
+    assert.isUndefined(bobAutoReviewerMissing(common.settings, "darwin"));
+    assert.isUndefined(bobAutoReviewerMissing({ autoReviewer: "model" }, "linux"));
   });
 });
 

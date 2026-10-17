@@ -34,8 +34,10 @@ import {
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
   MINIMUM_BOB_VERSION,
+  withBobHostNotices,
 } from "./BobProvider.ts";
 import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
+import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
 
 const decodeBobSettings = Schema.decodeSync(BobSettings);
 
@@ -46,6 +48,32 @@ function bobAuthSecrets(
 ): string {
   return JSON.stringify({ [`bob.auth.tokens-${gatewayUrl}`]: JSON.stringify(login) });
 }
+
+describe("withBobHostNotices", () => {
+  it.effect("says what this host lacks, after what the status says, and keeps Bob ready", () =>
+    Effect.gen(function* () {
+      const checking = yield* buildInitialBobProviderSnapshot(decodeBobSettings({ enabled: true }));
+      const ready: ServerProviderDraft = { ...checking, status: "ready", message: undefined };
+      expect(withBobHostNotices(ready, [undefined, undefined])).toBe(ready);
+      const warned = withBobHostNotices(ready, ["Install Bubblewrap.", undefined]);
+      // Ready is what puts Bob in the model picker; Ask and Agent work without these.
+      expect(warned.status).toBe("ready");
+      expect(warned.message).toBe("Install Bubblewrap.");
+      const unconfirmed = withBobHostNotices({ ...ready, message: "Sign-in unconfirmed." }, [
+        "Install Bubblewrap.",
+        "Choose a reviewer.",
+      ]);
+      expect(unconfirmed.message).toBe(
+        "Sign-in unconfirmed. Install Bubblewrap. Choose a reviewer.",
+      );
+      // A Bob that cannot run, or is off, keeps the status that says so.
+      const broken = { ...ready, status: "error" as const, message: "Bob is not installed." };
+      expect(withBobHostNotices(broken, ["Install Bubblewrap."])).toBe(broken);
+      const disabled = yield* buildInitialBobProviderSnapshot(decodeBobSettings({}));
+      expect(withBobHostNotices(disabled, ["Install Bubblewrap."])).toBe(disabled);
+    }),
+  );
+});
 
 describe("buildInitialBobProviderSnapshot", () => {
   it.effect("is disabled by default because Bob is opt-in", () =>

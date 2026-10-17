@@ -149,7 +149,8 @@ you turn on **Allow outside workspace tool requests** in Bob's settings; text fi
 reach Bob inside your message, so it can still read them.
 
 Without a sandbox, on Windows or on Linux without Bubblewrap, every mode but **Full access**
-asks before every command, apart from those your rules let run without asking. On Linux the
+asks before every command, apart from those your rules let run without asking. On Linux, Bob's
+status under **Settings → Providers** says what the sandbox is missing. On Linux the
 sandbox holds the `.env` files and agent settings that are there when a command starts, so a
 command can create one that is not, and processes a command leaves running in the background
 end with it.
@@ -163,7 +164,8 @@ and **Reviewer model**, and put a key, if the endpoint needs one, in the instanc
 `BOB_AUTO_REVIEW_API_KEY` environment variable. **A provider's model** asks a model of one of
 your providers, chosen in **Reviewer's model**, or the text generation model until you choose
 one. Bob can review itself: T3 Code asks a separate Bob in Ask mode, which costs Bobcoins for
-each call it reviews. On Linux, where Apple's model can't run, choose one of these; for a local
+each call it reviews. On Linux, where Apple's model can't run, Auto has no reviewer until you
+choose one of these, and Bob's status says so; for a local
 model, set one up through a provider such as Pi. A provider's model starts for each call it
 reviews, so a call can wait several seconds. Only Auto sends your messages to the reviewer;
 for a Bob agent on a delegated task, that includes your messages in the thread where the work

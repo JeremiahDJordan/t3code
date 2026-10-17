@@ -52,9 +52,11 @@ import { makeAcpNativeLoggerFactory } from "@t3tools/provider-acp/server/nativeL
 import {
   type BobAutoJudge,
   askProviderModel,
+  bobAutoReviewerMissing,
   makeBobAutoJudgeForSettings,
 } from "../acp/bobAutoJudge.ts";
 import * as ProviderInstanceRegistry from "../ProviderInstanceRegistry.ts";
+import { bobSandboxMissing } from "../acp/bobSandbox.ts";
 import {
   type AdoptableBobRelay,
   bobRelayHasTurn,
@@ -69,6 +71,7 @@ import {
   enrichBobSnapshot,
   makeBobCommandCatalog,
   makeBobUsageLimitsRefresh,
+  withBobHostNotices,
   withBobSessionHostStatus,
 } from "../BobProvider.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -230,6 +233,14 @@ export const BobDriver: ProviderDriver<
                 Effect.map((tmuxAvailable) => withBobSessionHostStatus(snapshot, tmuxAvailable)),
               )
             : Effect.succeed(snapshot),
+        ),
+        Effect.flatMap((snapshot) =>
+          Effect.map(HostProcess.Platform, (platform) =>
+            withBobHostNotices(snapshot, [
+              bobSandboxMissing(platform),
+              bobAutoReviewerMissing(effectiveConfig, platform),
+            ]),
+          ),
         ),
         Effect.map(stampIdentity),
         Effect.provideService(HttpClient.HttpClient, httpClient),

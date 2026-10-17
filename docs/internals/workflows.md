@@ -136,7 +136,7 @@ ended, so one a Stop or restart cut short runs again on Retry, and one that fini
 even when it failed or timed out, because commands may not be idempotent (owner, 2026-10-14). The
 run that finishes drops its rows, since only a failed or stopped run is retried.
 
-On macOS a command runs under the profile of Bob's commands (`commandSandboxSpawn` in
+On macOS and Linux a command runs under the profile of Bob's commands (`commandSandboxSpawn` in
 [`bobSandbox.ts`](../../apps/server/src/provider/acp/bobSandbox.ts)), so both keep one set of
 credential, `.env` and T3-state rules. A command in a workspace may write its worktree; one in the
 base checkout may not, since that is the starting thread's working copy, holding the user's

@@ -11,6 +11,7 @@ import { afterAll, describe, expect, it } from "vite-plus/test";
 import {
   bobProcessSandboxSpawn,
   bobSandboxAvailable,
+  bobSandboxMissing,
   bobSandboxFolderSuggestion,
   commandSandboxSpawn,
   makeBobSandbox,
@@ -921,6 +922,21 @@ describe("bobSandboxAvailable", () => {
   it("needs macOS's sandbox-exec or Linux's Bubblewrap", () => {
     expect(bobSandboxAvailable("win32")).toBe(false);
     expect(bobSandboxAvailable("freebsd")).toBe(false);
+  });
+
+  it("says what a Linux host lacks for it, and nothing elsewhere", () => {
+    expect(bobSandboxMissing("darwin")).toBeUndefined();
+    expect(bobSandboxMissing("win32")).toBeUndefined();
+    if (linux) {
+      // Missing exactly when there is no sandbox, or none for review guides.
+      expect(bobSandboxMissing("linux") === undefined).toBe(
+        available &&
+          ["/usr/bin/pasta", "/bin/pasta"].some((path) => NodeFS.existsSync(path)) &&
+          ["/usr/bin/ip", "/bin/ip", "/usr/sbin/ip", "/sbin/ip"].some((path) =>
+            NodeFS.existsSync(path),
+          ),
+      );
+    }
   });
 });
 

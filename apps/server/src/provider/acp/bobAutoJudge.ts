@@ -906,7 +906,20 @@ export function makeModelBobAutoJudge(options: {
 export const BOB_AUTO_REVIEW_API_KEY_ENV = "BOB_AUTO_REVIEW_API_KEY";
 
 /**
- * The judge a Bob instance's settings pick, and how to stop it: Apple's model, an endpoint with
+ * Why Auto has no reviewer though the settings name one, for Bob's provider status: Apple's
+ * model, the default, off a Mac.
+ */
+export function bobAutoReviewerMissing(
+  settings: Pick<BobSettings, "autoReviewer">,
+  platform: NodeJS.Platform,
+): string | undefined {
+  return settings.autoReviewer === "apple" && platform !== "darwin"
+    ? "Apple's on-device model, Bob's Auto reviewer, runs only on a Mac, so in Auto every web search, fetch and GitHub read asks you. Choose another in Auto mode reviewer."
+    : undefined;
+}
+
+/**
+ * The judge a Bob instance's settings pick, and how to stop it: Apple's model on a Mac, an endpoint with
  * both its URL and model set, a provider's model when T3 can reach the providers, or none, so the
  * calls left to it ask.
  */
@@ -921,7 +934,7 @@ export function makeBobAutoJudgeForSettings(input: {
   readonly log?: (message: string) => void;
 }): { readonly judge: BobAutoJudge | undefined; readonly close: Effect.Effect<void> } {
   const { settings } = input;
-  if (settings.autoReviewer === "apple") {
+  if (settings.autoReviewer === "apple" && input.platform === "darwin") {
     const apple = makeAppleBobAutoJudge({
       cacheDir: input.cacheDir,
       platform: input.platform,

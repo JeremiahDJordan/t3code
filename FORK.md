@@ -334,6 +334,10 @@ at a `.env` it cannot read. Each command gets its own namespaces, so it sees onl
 processes and no network at all, and a seccomp filter refuses Unix sockets, io_uring and the
 kernel's keyrings. `/run/user/<uid>`, the session's sockets and keyring, is hidden too. Bubblewrap
 refuses with `Permission denied` and `Read-only file system`, which the next run's ask learns too.
+A Linux host missing Bubblewrap, a tool the profile runs, user namespaces or, for review guides,
+pasta gets a note in Bob's provider status message, which stays ready so Bob remains in the
+model picker (`bobSandboxMissing`, owner, 2026-10-17), and a
+probe that found nothing runs again after 30 seconds, so installing the package needs no restart.
 Without either sandbox, as on Windows, every mode asks before every command but those the
 user's rules allow, since two reviews showed a command that looks like a read can still run
 code, through a git `textconv` driver or `file --compile`.
@@ -367,7 +371,8 @@ OpenAI-compatible endpoint, or one of the environment's providers' models throug
 generation, by the instance's `autoReviewer` setting. The last, which the owner asked for
 (2026-10-17) so Linux, where Apple's model cannot run, has a reviewer, and a local model among
 them through Pi, is the instance's `autoReviewModelSelection` or, without one, the text
-generation model. It answers by a text generation operation every provider has
+generation model. Off a Mac the default, Apple's model, is no reviewer, and Bob's provider
+status says to choose another (owner, 2026-10-17). It answers by a text generation operation every provider has
 (`generateJson`), in a folder of T3's provider cache so no project's instructions reach it, and
 Bob's runs as a Bob of its own in Ask mode, as Bob's text generation does. The registry gives each
 driver it builds a view of the others for this. Each prompt starts that provider's CLI, so a

@@ -294,6 +294,29 @@ export function withBobSessionHostStatus<A extends ServerProviderDraft>(
 }
 
 /**
+ * What this host lacks for Bob, such as its sandbox or Auto's reviewer, said in a working Bob's
+ * status message, after anything it already says. The status itself stays: clients offer only a
+ * ready provider in the model picker, and Bob works without these.
+ */
+export function withBobHostNotices<A extends ServerProviderDraft>(
+  snapshot: A,
+  notices: ReadonlyArray<string | undefined>,
+): A {
+  const said = notices.filter((notice) => notice !== undefined);
+  if (
+    said.length === 0 ||
+    !snapshot.enabled ||
+    (snapshot.status !== "ready" && snapshot.status !== "warning")
+  ) {
+    return snapshot;
+  }
+  return {
+    ...snapshot,
+    message: [snapshot.message, ...said].filter(Boolean).join(" "),
+  };
+}
+
+/**
  * The model option that picks the Bob mode a thread's turns run in. The ACP adapter routes this
  * id to `session/set_mode`.
  */

@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off
 /**
  * The sandbox Bob's commands run in, outside Full access, as Codex runs its own.
  *
@@ -1517,7 +1517,8 @@ export function commandSandboxSpawn(input: {
 /**
  * The programs Bubblewrap's profile runs, from the system's own folders, never the `PATH` a user's
  * environment sets; none where one is missing or Bubblewrap cannot make namespaces here, as in a
- * container that forbids them. Probed once.
+ * container that forbids them. Probed once, and again a while after a probe that found none, so a
+ * host where the user installs what is missing gets its sandbox without restarting T3.
  */
 interface BubblewrapTools {
   readonly bwrap: string;
@@ -1528,7 +1529,11 @@ interface BubblewrapTools {
   readonly printenv: string;
   readonly arch: keyof typeof SECCOMP_ARCHES;
 }
-let bubblewrapProbe: { readonly tools: BubblewrapTools | undefined } | undefined;
+let bubblewrapProbe:
+  | { readonly tools: BubblewrapTools; readonly missing?: undefined }
+  | { readonly tools?: undefined; readonly missing: string; readonly at: number }
+  | undefined;
+const BUBBLEWRAP_REPROBE_MS = 30_000;
 
 const SYSTEM_FOLDERS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 
@@ -1539,33 +1544,74 @@ function systemTool(name: string): string | undefined {
 }
 
 function bubblewrapTools(): BubblewrapTools | undefined {
-  if (bubblewrapProbe !== undefined) return bubblewrapProbe.tools;
+  if (
+    bubblewrapProbe?.tools !== undefined ||
+    (bubblewrapProbe !== undefined && Date.now() - bubblewrapProbe.at < BUBBLEWRAP_REPROBE_MS)
+  ) {
+    return bubblewrapProbe.tools;
+  }
+  bubblewrapProbe = probeBubblewrap();
+  return bubblewrapProbe.tools;
+}
+
+const WITHOUT_SANDBOX =
+  "Without it, Bob asks before every command your rules don't allow, outside Full access, and writes no review guides.";
+
+function probeBubblewrap(): NonNullable<typeof bubblewrapProbe> {
+  const at = Date.now();
   const arch = HostProcess.Architecture.defaultValue();
-  const [bwrap, find, mktemp, readlink, rm, printenv] = [
-    "bwrap",
-    "find",
-    "mktemp",
-    "readlink",
-    "rm",
-    "printenv",
-  ].map(systemTool);
-  const tools =
-    (arch === "x64" || arch === "arm64") &&
-    bwrap !== undefined &&
-    find !== undefined &&
-    mktemp !== undefined &&
-    readlink !== undefined &&
-    rm !== undefined &&
-    printenv !== undefined &&
-    NodeChildProcess.spawnSync(
-      bwrap,
-      ["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", "--", "/bin/true"],
-      { stdio: "ignore", timeout: 10_000 },
-    ).status === 0
-      ? { bwrap, find, mktemp, readlink, rm, printenv, arch }
-      : undefined;
-  bubblewrapProbe = { tools };
-  return tools;
+  if (arch !== "x64" && arch !== "arm64") {
+    return {
+      at,
+      missing: `Bob's sandbox on Linux needs an x86-64 or arm64 machine. ${WITHOUT_SANDBOX}`,
+    };
+  }
+  const bwrap = systemTool("bwrap");
+  if (bwrap === undefined) {
+    return {
+      at,
+      missing: `Install Bubblewrap (the bubblewrap package) and pasta (the passt package) for Bob's sandbox. ${WITHOUT_SANDBOX}`,
+    };
+  }
+  const names = ["find", "mktemp", "readlink", "rm", "printenv"] as const;
+  const [find, mktemp, readlink, rm, printenv] = names.map(systemTool);
+  if (
+    find === undefined ||
+    mktemp === undefined ||
+    readlink === undefined ||
+    rm === undefined ||
+    printenv === undefined
+  ) {
+    return {
+      at,
+      missing: `Bob's sandbox needs ${names.join(", ")} in /usr/bin or /bin. ${WITHOUT_SANDBOX}`,
+    };
+  }
+  const started = NodeChildProcess.spawnSync(
+    bwrap,
+    ["--unshare-all", "--die-with-parent", "--ro-bind", "/", "/", "--", "/bin/true"],
+    { stdio: "ignore", timeout: 10_000 },
+  );
+  if (started.status !== 0) {
+    return {
+      at,
+      missing: `Bubblewrap could not start a sandbox here, as when unprivileged user namespaces are turned off; on Ubuntu 24.04 and later, AppArmor restricts them. ${WITHOUT_SANDBOX}`,
+    };
+  }
+  return { tools: { bwrap, find, mktemp, readlink, rm, printenv, arch } };
+}
+
+/**
+ * What this Linux host lacks for Bob's sandbox, or for the one review guides run in, which also
+ * needs pasta, for Bob's provider status; none where nothing is missing or the host is not Linux.
+ */
+export function bobSandboxMissing(platform: NodeJS.Platform): string | undefined {
+  if (platform !== "linux") return undefined;
+  if (bubblewrapTools() === undefined) return bubblewrapProbe?.missing;
+  if (systemTool("pasta") === undefined || systemTool("ip") === undefined) {
+    return "Install pasta (the passt package) and ip (iproute2) for Bob to write review guides.";
+  }
+  return undefined;
 }
 
 /**
