@@ -154,7 +154,35 @@ If that port is already in use, choose another with
 ### Cloudflare Tunnel with Access
 
 To reach the machine through your own Cloudflare account, run a Cloudflare Tunnel to the
-server and put its hostname behind Cloudflare Access:
+server and put its hostname behind Cloudflare Access.
+
+#### Set it up with the script
+
+From a Z6 Code checkout, with an API token from **My Profile → API Tokens** that has
+**Account: Cloudflare Tunnel Edit**, **Account: Access: Apps and Policies Edit**,
+**Account: Access: Service Tokens Edit**, **Zone: Zone Read** and **Zone: DNS Edit** for the
+hostname's zone:
+
+```bash
+export CLOUDFLARE_API_TOKEN=...   # keep it out of the command line
+export CLOUDFLARE_ACCOUNT_ID=...
+node scripts/cloudflare-tunnel.ts setup --hostname t3.example.com --email you@example.com
+```
+
+It creates the tunnel, its route to `http://localhost:3773`, the hostname's DNS record, and an
+Access application for the whole hostname that lets in your email and a new service token. It
+prints the service token's client ID and secret once; Cloudflare doesn't show the secret again,
+so copy it to the phone or a password manager. It then prints the `cloudflared` install command,
+the pairing command and what to enter on the phone.
+
+Running it again changes only what's missing or different. `--rotate-service-token` issues a
+new secret, `--secure-channel` routes the hostname to the
+[end-to-end encrypted gateway](#cloudflare-tunnel-end-to-end-encrypted) on port 3774, and
+`--port` picks another port. `status --hostname t3.example.com` shows what exists and whether
+`cloudflared` is connected; `teardown --hostname t3.example.com --yes` deletes it all (stop
+`cloudflared` first).
+
+#### Set it up by hand
 
 1. In Cloudflare Zero Trust, create a tunnel, install `cloudflared` on the machine with the
    command Cloudflare shows, and give the tunnel a public hostname, such as `t3.example.com`,
@@ -187,6 +215,8 @@ so the hostname looks like nothing runs there.
    instead.
 2. Give the tunnel a public hostname that points at `http://localhost:3774`, the gateway's port,
    not the port T3 Code serves on. Pick a hostname that says nothing about T3 Code.
+   [The setup script](#set-it-up-with-the-script) does this, with Access, when given
+   `--secure-channel`.
 3. Create a pairing link and choose **End-to-end encrypted tunnel** under **Share**, or run:
 
    ```bash

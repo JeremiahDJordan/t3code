@@ -1182,6 +1182,19 @@ pointing to the encrypted route; the owner chose this over an authenticated WebV
 carry no Access headers either, so they don't connect over a plain Access route; the user guide
 says so.
 
+### Script the Cloudflare Tunnel and Access setup (owner, 2026-10-17)
+
+`scripts/cloudflare-tunnel.ts` (`setup`, `status`, `teardown`) does the dashboard steps from
+the user guide through Cloudflare's REST API with plain `fetch`, rather than Terraform,
+alchemy or `cloudflared` login, so it needs nothing beyond the repo and an API token in the
+environment. Each resource is found by name (the Access application by hostname) and reused,
+so a rerun repairs drift and writes nothing otherwise. Access uses reusable policies (an email
+allow and a `non_identity` service-token policy) linked to one self-hosted application for
+the whole hostname. The service token's secret is printed once, when it is created or
+rotated, and never stored; the tunnel token is printed in the `cloudflared service install`
+command, which the script doesn't run. Teardown deletes only a CNAME that points at a tunnel.
+It is fork tooling and stays out of any upstream patch.
+
 ### End-to-end encrypted channel inside a Cloudflare Tunnel (owner, 2026-10-07)
 
 Machines reached through a Cloudflare Tunnel carry T3 traffic Cloudflare can't read or change. A
