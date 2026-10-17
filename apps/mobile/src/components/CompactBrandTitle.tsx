@@ -1,10 +1,10 @@
+import { APP_MARK, APP_PRODUCT_NAME } from "@t3tools/shared/forkIdentity";
 import { NATIVE_WORKSPACE_COLUMNS_SUPPORTED } from "../native/NativeWorkspaceColumns";
 import Constants from "expo-constants";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import { Platform, View } from "react-native";
 
 import { AppText as Text } from "./ui/AppText";
-import { T3Wordmark } from "./T3Wordmark";
 import { IPAD_HOME_TITLE_OFFSET } from "../lib/layoutMetrics";
 import { resolveMobileStageLabel } from "../lib/mobileBranding";
 import { useAndroidControlSizing } from "./ui/useAndroidControlSizing";
@@ -27,13 +27,20 @@ export function CompactBrandTitle(
   return (
     <View
       aria-level={1}
-      accessibilityLabel={props.accessibilityLabel ?? "T3 Code, Threads"}
+      accessibilityLabel={props.accessibilityLabel ?? `${APP_PRODUCT_NAME}, Threads`}
       accessible
       role="heading"
       className="flex-row items-center gap-1.5"
       style={[{ marginLeft: titleOffset }, Platform.OS === "android" && { gap: 5.25 * scale }]}
     >
-      <T3Wordmark colorClassName="accent-icon" height={Math.round(15 * scale)} />
+      {/* Fork: the fork's mark, as text until it has artwork of its own. */}
+      <Text
+        allowFontScaling={props.allowFontScaling}
+        className="font-t3-bold text-icon"
+        style={{ fontSize: 21 * scale, letterSpacing: -0.5 * scale }}
+      >
+        {APP_MARK}
+      </Text>
       <Text
         allowFontScaling={props.allowFontScaling}
         className="font-t3-medium text-foreground-muted"

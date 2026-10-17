@@ -15,7 +15,7 @@ import {
   type DirectoryRecord,
 } from "@electron/asar";
 
-import { APP_DEV_SCHEME, APP_SCHEME } from "@t3tools/shared/forkIdentity";
+import { APP_DEV_SCHEME, APP_ID, APP_PRODUCT_NAME, APP_SCHEME } from "@t3tools/shared/forkIdentity";
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
@@ -58,7 +58,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 // Z6 Code, the fork's build, has its own bundle id so macOS keeps it apart from T3 Code.
-const DESKTOP_APP_ID = "org.zanson.z6code";
+const DESKTOP_APP_ID = APP_ID;
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -2681,7 +2681,7 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 
 export function resolveDesktopProductName(version: string): string {
   // Fork: nightly takes the fork's name too, so its .app never lands on upstream's nightly.
-  const productName = desktopPackageJson.productName ?? "T3 Code";
+  const productName = desktopPackageJson.productName ?? APP_PRODUCT_NAME;
   return resolveDesktopUpdateChannel(version) === "nightly"
     ? `${productName} (Nightly)`
     : productName;
@@ -2762,10 +2762,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       extendInfo: {
         // macOS 26 offers Messages/Mail codes in every text field unless opted out.
         NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac: true,
-        NSLocalNetworkUsageDescription:
-          "T3 Code connects to devices on your local network for remote environments and commands run by terminals and coding agents.",
-        NSScreenCaptureUsageDescription:
-          "T3 Code captures the active window when you use the window capture shortcut.",
+        // Fork: permission prompts name the fork's app.
+        NSLocalNetworkUsageDescription: `${APP_PRODUCT_NAME} connects to devices on your local network for remote environments and commands run by terminals and coding agents.`,
+        NSScreenCaptureUsageDescription: `${APP_PRODUCT_NAME} captures the active window when you use the window capture shortcut.`,
         // macOS lists an app under Default web browser only when it opens web
         // pages as documents as well as http and https links (see protocols).
         CFBundleDocumentTypes: [
@@ -2779,7 +2778,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       },
       protocols: [
         {
-          name: "Z6 Code",
+          name: APP_PRODUCT_NAME,
           schemes: [APP_SCHEME, APP_DEV_SCHEME],
         },
         {
@@ -2836,7 +2835,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       maintainer: "T3 Tools <hello@t3.codes>",
       protocols: [
         {
-          name: "Z6 Code",
+          name: APP_PRODUCT_NAME,
           schemes: [APP_SCHEME, APP_DEV_SCHEME],
         },
       ],
@@ -3759,8 +3758,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description:
-      "T3 Code is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.",
+    description: `${APP_PRODUCT_NAME} is an open-source desktop app for coding agents. Work with your existing agent subscriptions, review code changes, and run commands in your projects. Connect from desktop, web, or mobile to continue working remotely.`,
     license: "MIT",
     homepage: "https://t3.codes",
     author: "T3 Tools",

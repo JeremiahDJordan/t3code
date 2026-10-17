@@ -1,10 +1,2 @@
-import Constants from "expo-constants";
-
-const appVariant = Constants.expoConfig?.extra?.appVariant;
-
-export const T3_CODE_BRAND_MARK_SOURCE =
-  appVariant === "development"
-    ? require("../../../../assets/dev/blueprint-ios-1024.png")
-    : appVariant === "preview"
-      ? require("../../../../assets/nightly/nightly-ios-1024.png")
-      : require("../../../../assets/prod/black-ios-1024.png");
+// Fork: every variant shows the Z6 icon, as its app icon does (app.config.ts).
+export const T3_CODE_BRAND_MARK_SOURCE = require("../../../../assets/fork/z6-ios-1024.png");

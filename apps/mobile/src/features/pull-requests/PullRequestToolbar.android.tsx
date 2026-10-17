@@ -1,3 +1,4 @@
+import { APP_PRODUCT_NAME } from "@t3tools/shared/forkIdentity";
 import { useNavigation, useNavigationState } from "@react-navigation/native";
 import { useCallback, useEffect, useRef } from "react";
 import { BackHandler, Keyboard, View, type TextInputInstance } from "react-native";
@@ -72,7 +73,7 @@ export function PullRequestToolbar(props: { readonly onRequestVisibility?: () =>
               brand={
                 <CompactBrandTitle
                   allowFontScaling={false}
-                  accessibilityLabel="T3 Code, Pull requests"
+                  accessibilityLabel={`${APP_PRODUCT_NAME}, Pull requests`}
                 />
               }
               onPress={() =>

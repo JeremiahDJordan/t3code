@@ -1,3 +1,4 @@
+import { APP_PRODUCT_NAME } from "@t3tools/shared/forkIdentity";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -138,7 +139,7 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
   if (!wasQuitting) {
     yield* electronDialog.showErrorBox(
-      "T3 Code failed to start",
+      `${APP_PRODUCT_NAME} failed to start`,
       `Stage: ${stage}\n${message}${detail}`,
     );
   }

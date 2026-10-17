@@ -1,3 +1,4 @@
+import { APP_PRODUCT_NAME } from "@t3tools/shared/forkIdentity";
 import { useNavigation } from "@react-navigation/native";
 import { use, useCallback, useMemo } from "react";
 import { Platform, View, useWindowDimensions } from "react-native";
@@ -42,7 +43,9 @@ function WorkspaceRootTitle(props: {
     <View style={{ width: props.maxWidth, minHeight: 32, justifyContent: "center" }}>
       <WorkspaceConnectionTitle
         brand={
-          <CompactBrandTitle accessibilityLabel={`T3 Code, ${TAB_TITLES[state.selectedTab]}`} />
+          <CompactBrandTitle
+            accessibilityLabel={`${APP_PRODUCT_NAME}, ${TAB_TITLES[state.selectedTab]}`}
+          />
         }
         maxWidth={props.maxWidth}
         onPress={props.onOpenEnvironments}
@@ -116,7 +119,7 @@ function WorkspaceRootContent() {
           />
         ) : (
           <AndroidScreenHeader
-            title="T3 Code"
+            title={APP_PRODUCT_NAME}
             titleContent={renderHeaderTitle()}
             actions={[
               {

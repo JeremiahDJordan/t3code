@@ -868,12 +868,22 @@ An upstream client given `cinder` as a server's default theme falls back to its 
 
 ### Name the fork's builds Z6 Code (owner, 2026-10-16)
 
-The desktop app and the owner's own iPhone builds are **Z6 Code**, so they stand apart from T3's
-apps on the same Mac or phone. The desktop's `productName` sets the bundle's name. The in-app name
-(`APP_BASE_NAME` and the window title) stays T3 Code: upstream reworks it often and every change
-would conflict. The iPhone icon is the `.icon` package in `assets/fork`, white Z6 on Ember's accent
-(`#b5552b`), and `z6-ios-1024.png` is its Icon Composer export (`ictool --export-image`), which
-Expo uses for its fallback icon and splash.
+The desktop app and every mobile build are **Z6 Code**, so they stand apart from T3's apps on the
+same Mac or phone. The desktop's `productName` sets the bundle's name. The iPhone icon is the
+`.icon` package in `assets/fork`, white Z6 on Ember's accent (`#b5552b`), and `z6-ios-1024.png` is
+its Icon Composer export (`ictool --export-image`), which Expo uses for its fallback icon and splash.
+
+**The app calls itself Z6 Code (owner, 2026-10-17).** For a public release the name the app shows
+for itself comes from `APP_PRODUCT_NAME` in `packages/shared/src/forkIdentity.ts`: the desktop's
+window title, About panel, menus and startup and update dialogs (`DesktopEnvironment.ts`'s
+`APP_BASE_NAME`), the web's `APP_BASE_NAME` (`branding.ts`), the sidebar and welcome-wizard marks,
+the label each client gives the server when it pairs, the mobile header, About screen, Live
+Activity title and crash report, the "Sent by" line, the mobile and macOS permission prompts, and
+the macOS permission helper. `index.html` keeps a marked copy. The "T3" glyph in the brand marks
+is the text `APP_MARK` until the fork has a wordmark. Prose elsewhere still says T3 Code
+(error messages, settings and onboarding copy): changing every string would conflict with each
+upstream edit to it. "T3 Code" that means upstream stays: the data copied from T3 Code, T3 Connect,
+the default theme's name, and a remote environment's server, which may be upstream's.
 
 **Its own data, copied from T3 Code once (owner, 2026-10-16).** Z6 Code and T3 Code can be
 installed and run at once without sharing state. The fork's builds (desktop, and the `t3`
@@ -969,9 +979,9 @@ server explicitly, so it copies itself, first thing in `main.ts`
   favicons, kept elsewhere, start empty. The server's CORS list allows both apps' desktop pages
   (`httpCors.ts`), so an upstream desktop app can still connect.
 - Left shared, on purpose: Tailscale Serve's default port 443
-  (set another in one app's Settings when both serve); the in-app name; Linux's desktop entry and
-  WM class (the fork builds no Linux desktop app); and `~/.t3` on SSH and WSL hosts, where the
-  desktop runs upstream's server.
+  (set another in one app's Settings when both serve); Linux's desktop entry and WM class (the
+  fork builds no Linux desktop app); and `~/.t3` on SSH and WSL hosts, where the desktop runs
+  upstream's server.
 - **Removing T3's folders** (`packages/shared/src/t3DataCleanup.ts`). The desktop asks once, after
   the start that copied (Keep, or Move to Trash), and Settings → General shows the old folders with
   **Move to Trash** while they remain; servers have `t3 t3-data status` and `t3 t3-data remove`.
