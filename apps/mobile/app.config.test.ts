@@ -116,5 +116,45 @@ describe("the fork's Expo config", () => {
     expect(config.ios?.bundleIdentifier).toBe("org.zanson.t3code");
     expect(config.ios?.appleTeamId).toBeUndefined();
     expect(clerkPlugin(config)?.appleSignIn).toBe(false);
+    // The keychain group its earlier builds stored saved connections under.
+    expect(config.ios?.entitlements?.["keychain-access-groups"]).toEqual([
+      "$(AppIdentifierPrefix)com.t3tools.t3code",
+    ]);
+    expect(plugin(config, "expo-widgets")).toBeUndefined();
+  });
+});
+
+function plugin(config: ExpoConfig, name: string) {
+  const entry = config.plugins?.find(
+    (candidate): candidate is [string, Record<string, unknown>] =>
+      Array.isArray(candidate) && candidate[0] === name,
+  );
+  return entry?.[1];
+}
+
+describe("the fork's app identity", () => {
+  it.each([
+    ["production", "Z6 Code", "org.zanson.z6code", "z6code"],
+    ["preview", "Z6 Code Preview", "org.zanson.z6code.preview", "z6code-preview"],
+    ["development", "Z6 Code Dev", "org.zanson.z6code.dev", "z6code-dev"],
+  ])("names the %s build %s with id %s", async (variant, name, id, scheme) => {
+    const config = await loadConfig({ APP_VARIANT: variant });
+
+    expect(config.name).toBe(name);
+    expect(config.scheme).toBe(scheme);
+    expect(config.ios?.bundleIdentifier).toBe(id);
+    expect(config.android?.package).toBe(id);
+    expect(config.ios?.entitlements?.["keychain-access-groups"]).toEqual([
+      `$(AppIdentifierPrefix)${id}`,
+    ]);
+    expect(plugin(config, "expo-widgets")).toMatchObject({
+      bundleIdentifier: `${id}.widgets`,
+      groupIdentifier: `group.${id}`,
+    });
+    expect(plugin(config, "expo-sharing")).toMatchObject({
+      ios: { enabled: true, extensionBundleIdentifier: `${id}.sharing`, appGroupId: `group.${id}` },
+    });
+    expect(config.ios?.icon).toBe("../../assets/fork/app-icon.icon");
+    expect(JSON.stringify(config)).not.toMatch(/T3 Code|com\.t3tools/);
   });
 });

@@ -1145,10 +1145,19 @@ or an EAS environment. `app.config.test.ts` evaluates the config both ways.
   Apple are added only when T3 Connect is on with a Clerk publishable key. As on desktop, the
   domain is the key's Frontend API host. `eas.json` has no App Store Connect app id: add
   `submit.production.ios.ascAppId` for the owner's app.
-- **Left as they are:** the `com.t3tools.t3code*` bundle ids of non-Personal-Team builds, the
-  native modules' Gradle groups and podspec homepages, and the sample hosts in showcase
-  screenshots. These are names that are never contacted. `pingdotgg/t3code` appears only in test
-  fixtures.
+- **Its own ids (owner, 2026-10-17).** Every build is Z6 Code under the fork's ids, from
+  `MOBILE_APP_VARIANTS` in `packages/shared/src/forkIdentity.ts`: `org.zanson.z6code`, `.dev` and
+  `.preview` (like the desktop's bundle id), as the iOS bundle id and the Android package, named
+  `Z6 Code`, `Z6 Code Dev` and `Z6 Code Preview`. The widget and share extensions, App Group and
+  keychain group derive from it in `app.config.ts`, so the native modules hold no id of their own.
+  Personal Team builds keep their bundle id from `T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID`, still drop
+  widgets and the share extension, and keep upstream's `com.t3tools.t3code*` keychain group, which
+  their earlier builds stored saved connections under.
+- **Left as they are:** the native modules' Gradle groups, Kotlin and Swift packages and podspec
+  homepages (`com.t3tools.*`, `expo.modules.t3*`), which name code and never an installed app,
+  the Expo `slug` (`t3-code`, which an owner's EAS project must match), and the sample hosts in
+  showcase screenshots. These are names that are never contacted. `pingdotgg/t3code` appears only
+  in test fixtures.
 
 ### License: upstream's MIT, with the fork's changes copyright Jeremiah Jordan (owner, 2026-10-16)
 

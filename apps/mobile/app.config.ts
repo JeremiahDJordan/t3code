@@ -1,10 +1,6 @@
 import type { ExpoConfig } from "expo/config";
 
-import {
-  APP_DEV_SCHEME,
-  APP_PREVIEW_SCHEME,
-  APP_SCHEME,
-} from "../../packages/shared/src/forkIdentity.ts";
+import { APP_PRODUCT_NAME, MOBILE_APP_VARIANTS } from "../../packages/shared/src/forkIdentity.ts";
 import { T3_CONNECT_ENABLED } from "../../packages/shared/src/forkFeatures.ts";
 import { clerkFrontendApiHostnameFromPublishableKey } from "../../packages/shared/src/relayAuth.ts";
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
@@ -93,26 +89,28 @@ const RELEASE_ASSETS = {
   androidNotificationColor: "#FFFFFF",
 } as const;
 
+// Fork: every build is Z6 Code under the fork's own ids (forkIdentity.ts), so it installs beside
+// T3 Code's apps and can have store listings of its own.
 const VARIANT_CONFIG = {
   development: {
-    appName: "T3 Code Dev",
-    scheme: APP_DEV_SCHEME,
-    iosBundleIdentifier: "com.t3tools.t3code.dev",
-    androidPackage: "com.t3tools.t3code.dev",
+    appName: MOBILE_APP_VARIANTS.development.name,
+    scheme: MOBILE_APP_VARIANTS.development.scheme,
+    iosBundleIdentifier: MOBILE_APP_VARIANTS.development.id,
+    androidPackage: MOBILE_APP_VARIANTS.development.id,
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
-    appName: "T3 Code Preview",
-    scheme: APP_PREVIEW_SCHEME,
-    iosBundleIdentifier: "com.t3tools.t3code.preview",
-    androidPackage: "com.t3tools.t3code.preview",
+    appName: MOBILE_APP_VARIANTS.preview.name,
+    scheme: MOBILE_APP_VARIANTS.preview.scheme,
+    iosBundleIdentifier: MOBILE_APP_VARIANTS.preview.id,
+    androidPackage: MOBILE_APP_VARIANTS.preview.id,
     assets: PREVIEW_ASSETS,
   },
   production: {
-    appName: "T3 Code",
-    scheme: APP_SCHEME,
-    iosBundleIdentifier: "com.t3tools.t3code",
-    androidPackage: "com.t3tools.t3code",
+    appName: MOBILE_APP_VARIANTS.production.name,
+    scheme: MOBILE_APP_VARIANTS.production.scheme,
+    iosBundleIdentifier: MOBILE_APP_VARIANTS.production.id,
+    androidPackage: MOBILE_APP_VARIANTS.production.id,
     assets: RELEASE_ASSETS,
   },
 } as const;
@@ -128,23 +126,30 @@ function resolveAppVariant(value: string | undefined): AppVariant {
   }
 }
 
-// This fork's own iPhone builds, signed with the owner's team, are Z6 Code with a burnt-orange icon,
-// so they stand apart from T3's apps on the same phone.
-const variant = isIosPersonalTeamBuild
-  ? {
-      ...VARIANT_CONFIG[APP_VARIANT],
-      appName: "Z6 Code",
-      assets: {
-        ...VARIANT_CONFIG[APP_VARIANT].assets,
-        appIcon: fromRepoRoot("assets/fork/z6-ios-1024.png"),
-        iosIcon: fromRepoRoot("assets/fork/app-icon.icon"),
-        splashIcon: fromRepoRoot("assets/fork/z6-ios-1024.png"),
-      },
-    }
-  : VARIANT_CONFIG[APP_VARIANT];
+// Fork: every variant takes the Z6 icon from assets/fork for iOS, the launcher fallback and the
+// splash. Android's adaptive, monochrome, notification and splash layers are still upstream's.
+const variant = {
+  ...VARIANT_CONFIG[APP_VARIANT],
+  assets: {
+    ...VARIANT_CONFIG[APP_VARIANT].assets,
+    appIcon: fromRepoRoot("assets/fork/z6-ios-1024.png"),
+    iosIcon: fromRepoRoot("assets/fork/app-icon.icon"),
+    splashIcon: fromRepoRoot("assets/fork/z6-ios-1024.png"),
+  },
+};
 const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
   : variant.iosBundleIdentifier;
+// Fork: Personal Team builds were signed with upstream's keychain group before every build took
+// the fork's ids; keeping that group keeps the owner's saved connections readable on their phone.
+const PERSONAL_TEAM_KEYCHAIN_GROUPS = {
+  development: "com.t3tools.t3code.dev",
+  preview: "com.t3tools.t3code.preview",
+  production: "com.t3tools.t3code",
+} as const;
+const keychainAccessGroup = isIosPersonalTeamBuild
+  ? PERSONAL_TEAM_KEYCHAIN_GROUPS[APP_VARIANT]
+  : iosBundleIdentifier;
 
 const dmSansFonts = {
   regular: "@expo-google-fonts/dm-sans/400Regular/DMSans_400Regular.ttf",
@@ -166,7 +171,7 @@ const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
       {
         name: "SubscriptionUsage",
         displayName: "Subscription usage",
-        description: "Subscription quotas from your connected T3 Code environments.",
+        description: `Subscription quotas from your connected ${APP_PRODUCT_NAME} environments.`,
         ios: {
           configuration: {
             title: "Subscription usage",
@@ -217,7 +222,7 @@ const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
       {
         name: "AgentActivity",
         displayName: "Agent Activity",
-        description: "Shows the current state of active T3 Code agents.",
+        description: `Shows the current state of active ${APP_PRODUCT_NAME} agents.`,
         android: null,
         ios: { supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"] },
       },
@@ -297,7 +302,7 @@ const config: ExpoConfig = {
         }
       : {}),
     entitlements: {
-      "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
+      "keychain-access-groups": [`$(AppIdentifierPrefix)${keychainAccessGroup}`],
     },
     infoPlist: {
       UISupportedInterfaceOrientations: [
@@ -308,9 +313,9 @@ const config: ExpoConfig = {
       NSAppTransportSecurity: {
         NSAllowsArbitraryLoads: true,
       },
-      NSLocalNetworkUsageDescription:
-        "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
-      NSPhotoLibraryAddUsageDescription: "Allow T3 Code to save images to your photo library.",
+      // Fork: permission prompts here and in the plugins below name the fork's app.
+      NSLocalNetworkUsageDescription: `Allow ${APP_PRODUCT_NAME} to connect to servers on your local network or tailnet.`,
+      NSPhotoLibraryAddUsageDescription: `Allow ${APP_PRODUCT_NAME} to save images to your photo library.`,
       // "Audio, AirPlay, and Picture in Picture": the browser screen's system
       // picture in picture needs it to start and to stay up outside the app.
       UIBackgroundModes: ["audio"],
@@ -424,7 +429,7 @@ const config: ExpoConfig = {
     [
       "expo-audio",
       {
-        microphonePermission: "Allow T3 Code to use your microphone for voice input.",
+        microphonePermission: `Allow ${APP_PRODUCT_NAME} to use your microphone for voice input.`,
         recordAudioAndroid: false,
         enableBackgroundPlayback: false,
         enableBackgroundRecording: false,
@@ -433,7 +438,7 @@ const config: ExpoConfig = {
     [
       "expo-camera",
       {
-        cameraPermission: "Allow T3 Code to access your camera so you can scan pairing QR codes.",
+        cameraPermission: `Allow ${APP_PRODUCT_NAME} to access your camera so you can scan pairing QR codes.`,
         microphonePermission: false,
         barcodeScannerEnabled: true,
         recordAudioAndroid: false,
