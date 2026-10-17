@@ -1,0 +1,22 @@
+{
+  "name": "t3code-push-gateway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npx wrangler deploy",
+    "mint-credential": "node scripts/mint-credential.ts",
+    "test": "vp test run --config ../../vite.config.ts --dir .",
+    "typecheck": "tsc-rs --noEmit"
+  },
+  "dependencies": {
+    "@noble/curves": "catalog:",
+    "@noble/hashes": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260601.1",
+    "@t3tools/contracts": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

@@ -1,0 +1,26 @@
+// Deploy with `npx wrangler deploy` from this folder; README.md has the setup.
+{
+  "name": "z6-push-gateway",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-06-01",
+  "workers_dev": true,
+  "vars": {
+    // Your app's bundle ids and Android package names, comma-separated.
+    "ALLOWED_BUNDLE_IDS": "",
+    "APNS_TEAM_ID": "",
+    "APNS_KEY_ID": "",
+  },
+  // Secrets, set with `npx wrangler secret put <NAME>`:
+  //   APNS_PRIVATE_KEY          the .p8 key's text
+  //   FCM_SERVICE_ACCOUNT       the Firebase service account's JSON key
+  //   PUSH_GATEWAY_CREDENTIALS  [{"id":"…","sha256":"…"}], from scripts/mint-credential.ts
+  "ratelimits": [
+    {
+      // Per server credential: a busy server sends a few requests a minute.
+      "name": "RATE_LIMITER",
+      "namespace_id": "4207",
+      "simple": { "limit": 120, "period": 60 },
+    },
+  ],
+  "observability": { "enabled": true },
+}

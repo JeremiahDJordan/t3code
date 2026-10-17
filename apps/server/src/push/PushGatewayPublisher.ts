@@ -51,6 +51,12 @@ function isPermanentFailure(
     : !result.ok && result.reason === "UNREGISTERED";
 }
 
+// A refusal APNs, FCM or the gateway would repeat (a bad payload, a topic the gateway does not
+// serve) is dropped; only an unreachable service, a rate limit or a server error is retried.
+function isRetryable(result: { readonly status: number }): boolean {
+  return result.status === 0 || result.status === 429 || result.status >= 500;
+}
+
 function isRetained(state: RelayAgentActivityState, nowMs: number): boolean {
   if (!isTerminalPhase(state)) return !isExpiredAgentActivityState(state, nowMs);
   return nowMs - Date.parse(state.updatedAt) <= TERMINAL_AGENT_ACTIVITY_DISPLAY_TTL_MS;
@@ -118,8 +124,16 @@ export const makeDeliverer = Effect.gen(function* () {
           const result = results[index];
           if (result === undefined || result.ok) return;
           if (!isPermanentFailure(delivery, result)) {
+            const reason = `${result.status}:${result.reason ?? "unknown"}`;
+            if (!isRetryable(result)) {
+              yield* Effect.logWarning("push delivery refused", {
+                deviceId: device.deviceId,
+                reason,
+              });
+              return;
+            }
             retry.add(device.deviceId);
-            reasons.push(`${result.status}:${result.reason ?? "unknown"}`);
+            reasons.push(reason);
             return;
           }
           yield* Effect.logInfo("push token retired after a permanent refusal", {

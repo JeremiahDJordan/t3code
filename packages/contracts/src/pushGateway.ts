@@ -54,7 +54,8 @@ export const PUSH_GATEWAY_ANDROID_USER_ID = "push-gateway";
  * `infra/push-gateway/src/protocol.ts` validates the same shape without Effect.
  */
 
-export const PUSH_GATEWAY_MAX_DELIVERIES = 100;
+/** Each delivery is one Worker subrequest; Cloudflare's free plan allows 50 per request. */
+export const PUSH_GATEWAY_MAX_DELIVERIES = 40;
 
 export const PushGatewayDelivery = Schema.Struct({
   platform: RelayAgentAwarenessPlatform,

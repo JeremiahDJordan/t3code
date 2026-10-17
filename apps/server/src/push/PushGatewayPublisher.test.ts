@@ -136,6 +136,19 @@ describe("PushGatewayPublisher", () => {
     }),
   );
 
+  it.effect("drops a refusal that would repeat instead of retrying it", () =>
+    Effect.gen(function* () {
+      yield* atNow;
+      const h = harness([device()]);
+      h.gateway.answer = () => ({ ok: false, status: 403, reason: "TopicNotAllowed" });
+      const deliverer = yield* h.deliverer;
+      yield* deliverer.publish(THREAD, state("completed"));
+      yield* deliverer.publish(THREAD, state("completed"));
+      assert.lengthOf(h.sent, 1);
+      assert.deepStrictEqual(h.cleared, []);
+    }),
+  );
+
   it.effect("repaints a newly registered Live Activity without an alert", () =>
     Effect.gen(function* () {
       yield* atNow;

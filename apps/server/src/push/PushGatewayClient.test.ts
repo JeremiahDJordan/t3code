@@ -80,7 +80,7 @@ describe("PushGatewayClient", () => {
       assert.lengthOf(results, 150);
       assert.deepStrictEqual(
         requests.map((request) => request.count),
-        [100, 50],
+        [40, 40, 40, 30],
       );
     }),
   );
