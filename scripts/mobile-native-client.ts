@@ -1,6 +1,7 @@
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { MOBILE_APP_VARIANTS, mobileXcodeProjectName } from "@t3tools/shared/forkIdentity";
 import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as Console from "effect/Console";
 import * as Crypto from "effect/Crypto";
@@ -135,7 +136,9 @@ export const hashBundle = Effect.fn("hashBundle")(function* (root: string) {
 });
 type FileSystemError = import("effect/PlatformError").PlatformError;
 
-const bundleId = "com.t3tools.t3code.dev";
+// Fork: the development variant's id and generated Xcode names come from forkIdentity.ts.
+const bundleId = MOBILE_APP_VARIANTS.development.id;
+const xcodeProject = mobileXcodeProjectName("development");
 const roots = Effect.gen(function* () {
   const path = yield* Path.Path;
   const repo = yield* path.fromFileUrl(new URL("../", import.meta.url));
@@ -347,9 +350,9 @@ const main = Command.make(
             [
               "xcodebuild",
               "-workspace",
-              path.join(mobile, "ios/T3CodeDev.xcworkspace"),
+              path.join(mobile, `ios/${xcodeProject}.xcworkspace`),
               "-scheme",
-              "T3CodeDev",
+              xcodeProject,
               "-configuration",
               "Debug",
               "-destination",
@@ -366,7 +369,7 @@ const main = Command.make(
               "simctl",
               "install",
               device,
-              path.join(output, "Build/Products/Debug-iphonesimulator/T3CodeDev.app"),
+              path.join(output, `Build/Products/Debug-iphonesimulator/${xcodeProject}.app`),
             ],
             true,
           );

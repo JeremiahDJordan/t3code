@@ -9,6 +9,7 @@ import * as NodePath from "node:path";
 import * as NodeProcess from "node:process";
 import * as NodeURL from "node:url";
 
+import { MOBILE_APP_VARIANTS, mobileXcodeProjectName } from "@t3tools/shared/forkIdentity";
 import { PNG } from "pngjs";
 
 import showcaseConfig, {
@@ -32,8 +33,10 @@ import {
 
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const MOBILE_ROOT = NodePath.join(REPO_ROOT, "apps/mobile");
-const ANDROID_PACKAGE = "com.t3tools.t3code";
-const APP_SCHEME = "t3code";
+// Fork: the production variant's id, scheme and generated Xcode names come from forkIdentity.ts.
+const ANDROID_PACKAGE = MOBILE_APP_VARIANTS.production.id;
+const APP_SCHEME = MOBILE_APP_VARIANTS.production.scheme;
+const IOS_XCODE_PROJECT = mobileXcodeProjectName("production");
 // expo-dev-launcher reads these off the manifest URL and updates the dev menu
 // preferences before the app loads, keeping captures free of dev chrome.
 const DEV_CLIENT_LAUNCH_FLAGS = "disableOnboarding=1&disableFab=1&disableAutoLaunch=1";
@@ -42,7 +45,7 @@ const SERVER_HOST = "0.0.0.0";
 const IOS_SIMULATOR_ARCH = NodeProcess.arch === "arm64" ? "arm64" : "x86_64";
 const IOS_APP_PATH = NodePath.join(
   MOBILE_ROOT,
-  ".showcase/ios-derived-data/Build/Products/Debug-iphonesimulator/T3Code.app",
+  `.showcase/ios-derived-data/Build/Products/Debug-iphonesimulator/${IOS_XCODE_PROJECT}.app`,
 );
 const ANDROID_APK_PATH = NodePath.join(
   MOBILE_ROOT,
@@ -705,9 +708,9 @@ async function buildIos(): Promise<string> {
     "xcodebuild",
     [
       "-workspace",
-      NodePath.join(MOBILE_ROOT, "ios/T3Code.xcworkspace"),
+      NodePath.join(MOBILE_ROOT, `ios/${IOS_XCODE_PROJECT}.xcworkspace`),
       "-scheme",
-      "T3Code",
+      IOS_XCODE_PROJECT,
       "-configuration",
       "Debug",
       "-sdk",

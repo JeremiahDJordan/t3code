@@ -44,7 +44,8 @@ process.stdout.write(`z6code-dev://connections/new?${query}`);
 NODE
 )"
 
-if ! "$agent_device_command" open com.t3tools.t3code.dev "$deep_link" "$@" \
+# The development variant's id, a copy of MOBILE_APP_VARIANTS in packages/shared/src/forkIdentity.ts.
+if ! "$agent_device_command" open org.zanson.z6code.dev "$deep_link" "$@" \
   >/dev/null 2>&1; then
   echo "AgentDevice could not open the pairing route. Check the Device panel and retry with a fresh credential." >&2
   exit 1
