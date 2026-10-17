@@ -72,11 +72,6 @@ export const agentAwarenessRelayTurnedOff = AgentAwarenessRelay.AgentAwarenessRe
   start: () => Effect.void,
 });
 
-export const layerAgentAwarenessRelay = Layer.succeed(
-  AgentAwarenessRelay.AgentAwarenessRelay,
-  agentAwarenessRelayTurnedOff,
-);
-
 /**
  * Wraps the server environment layer so the descriptor never advertises the relay's agent
  * activity publishing, which a stored link and opt-in would otherwise claim. A configured push

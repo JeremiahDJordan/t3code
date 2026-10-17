@@ -6,6 +6,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -17,7 +18,9 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ProjectId, type OrchestrationV2ThreadShell, ProviderInstanceId } from "@t3tools/contracts";
 
+import { agentAwarenessRelayTurnedOff } from "../cloud/t3ConnectTurnedOff.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PushDevices from "./PushDevices.ts";
@@ -282,5 +285,29 @@ describe("PushGatewayPublisher wiring", () => {
         );
       }).pipe(Effect.provide(layer), Effect.scoped);
     }),
+  );
+});
+
+describe("without a push gateway", () => {
+  it.effect("publishes nothing and contacts no gateway", () =>
+    Effect.gen(function* () {
+      const publisher = yield* AgentAwarenessRelay.AgentAwarenessRelay;
+      assert.strictEqual(publisher, agentAwarenessRelayTurnedOff);
+    }).pipe(
+      Effect.provide(
+        PushGatewayPublisher.layer.pipe(
+          Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({}))),
+          // Nothing below is reached without a gateway.
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.mock(PushDevices.PushDevices)({}),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              Layer.mock(ThreadManagement.ThreadManagementService)({}),
+              Layer.mock(ProjectService.ProjectService)({}),
+            ),
+          ),
+        ),
+      ),
+    ),
   );
 });
