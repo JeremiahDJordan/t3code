@@ -41,7 +41,9 @@ handoff is also a good choice when the old conversation contains conflicting ins
 
 T3 Code does not currently have a whole-thread export command. Before a major server update, stop
 the server and copy its `userdata` directory to a safe location. The default is
-`~/.t3/userdata`; a server started with `--home-dir <path>` uses `<path>/userdata`.
+`~/.z6/userdata`; a server started with `--home-dir <path>` uses `<path>/userdata`, and one the
+desktop app started on an SSH host uses `~/.t3/userdata` there. T3 Code's own `~/.t3/userdata`,
+which Z6 Code copied on its first start, is not where Z6 Code writes.
 
 If a migrated transcript is missing from the app, keep that copy unchanged. You can inspect the
 old transcript without starting a server against it:

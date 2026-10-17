@@ -59,7 +59,7 @@ whole run.
 ## Keeping your own workflows
 
 Workflows you use in every project can live in one place instead of a copy in each repo: the
-`workflows` folder of the T3 home on the machine the environment runs on, `~/.t3/workflows` by
+`workflows` folder of the T3 home on the machine the environment runs on, `~/.z6/workflows` by
 default (`<path>/workflows` for a server started with `--home-dir <path>`). Create the folder,
 save the file there, and ask for it by name: "Run `judged-review.workflow.js` on `main..HEAD`." A
 file in a subfolder goes by its path inside the folder, such as `team/review.workflow.js`. When the
