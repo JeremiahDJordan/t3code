@@ -943,6 +943,7 @@ interface ResolvedBuildOptions {
 
 interface StagePackageJson {
   readonly name: string;
+  readonly updaterCacheDirName: string;
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
@@ -2598,6 +2599,13 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
+/**
+ * Fork: the staged package keeps upstream's name `t3code` for safe storage, and electron-builder
+ * would name the updater's download cache after it, so a Z6 update could clear T3's pending one.
+ * patches/app-builder-lib@26.15.6.patch reads this name from the staged package.json instead.
+ */
+export const FORK_UPDATER_CACHE_DIR_NAME = "z6code-updater";
+
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
   updateChannel: "latest" | "nightly",
 ) {
@@ -2670,9 +2678,11 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
 }
 
 export function resolveDesktopProductName(version: string): string {
+  // Fork: nightly takes the fork's name too, so its .app never lands on upstream's nightly.
+  const productName = desktopPackageJson.productName ?? "T3 Code";
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? `${productName} (Nightly)`
+    : productName;
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -3739,6 +3749,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       : undefined;
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
+    updaterCacheDirName: FORK_UPDATER_CACHE_DIR_NAME,
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,

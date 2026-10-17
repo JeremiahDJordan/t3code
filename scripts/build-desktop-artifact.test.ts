@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
+import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -61,6 +62,7 @@ import {
   resolveWindowsServerAsarIgnoreGlobs,
   resourceMonitorExecutableName,
   resolveGitHubPublishConfig,
+  FORK_UPDATER_CACHE_DIR_NAME,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
   resolvePackageManagerUserAgent,
@@ -94,6 +96,28 @@ import {
   WslRuntimeArchiveMissingError,
   wslRuntimeArchiveStem,
 } from "./build-desktop-artifact.ts";
+
+// electron-builder writes the updater cache name into app-update.yml and the NSIS installer from
+// AppInfo, after and over any publish option, so the staged package.json is what decides it.
+it("keeps Z6's update downloads apart from T3's though both stage the package name t3code", () => {
+  const desktopRequire = NodeModule.createRequire(
+    NodeModule.createRequire(import.meta.url).resolve("../apps/desktop/package.json"),
+  );
+  const { AppInfo } = NodeModule.createRequire(
+    desktopRequire.resolve("electron-builder/package.json"),
+  )("app-builder-lib/out/appInfo") as {
+    AppInfo: new (info: unknown, buildVersion: null) => { updaterCacheDirName: string };
+  };
+  const cacheName = (metadata: Record<string, unknown>) =>
+    new AppInfo({ metadata: { version: "1.0.0", ...metadata }, config: {} }, null)
+      .updaterCacheDirName;
+
+  assert.equal(cacheName({ name: "t3code" }), "t3code-updater");
+  assert.equal(
+    cacheName({ name: "t3code", updaterCacheDirName: FORK_UPDATER_CACHE_DIR_NAME }),
+    "z6code-updater",
+  );
+});
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
@@ -268,8 +292,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.1.0"), "T3 Code (Beta)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.1.0"), "Z6 Code");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Z6 Code (Nightly)");
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -703,7 +727,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Beta) 1.2.3 Installer",
+        title: "Z6 Code 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [

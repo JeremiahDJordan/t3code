@@ -1,0 +1,17 @@
+diff --git a/out/appInfo.js b/out/appInfo.js
+index d159c175639b2fa6755372b364155837511feae3..6cdec907b0b6868d431fc2a730c9d3030f9623a1 100644
+--- a/out/appInfo.js
++++ b/out/appInfo.js
+@@ -124,6 +124,12 @@ class AppInfo {
+         return (0, filename_1.sanitizeFileName)(this.name);
+     }
+     get updaterCacheDirName() {
++        // Patched: a staged package.json can name its own cache, so an app that keeps another
++        // app's package name (for its keychain entry) does not share that app's update downloads.
++        const configured = this.info.metadata.updaterCacheDirName;
++        if (typeof configured === "string" && configured.length > 0) {
++            return configured;
++        }
+         return this.sanitizedName.toLowerCase() + "-updater";
+     }
+     get copyright() {

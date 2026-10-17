@@ -150,3 +150,13 @@ while [ -z "$(app_pids)" ]; do
   waited=$((waited + 1))
 done
 printf 'Started %s.\n' "$target"
+
+# An app renamed by a later build (T3 Code (Alpha), T3 Code (Beta), Z6 Code) keeps the bundle id,
+# so an older copy stays beside it; macOS may then open either one. Say so rather than delete it.
+for other in /Applications/*.app; do
+  [ "$other" = "$target" ] && continue
+  other_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$other/Contents/Info.plist" 2>/dev/null || true)"
+  if [ "$other_id" = "$bundle_id" ]; then
+    printf 'Also installed with the same bundle id: %s. Move it to the Trash to keep one copy.\n' "$other"
+  fi
+done

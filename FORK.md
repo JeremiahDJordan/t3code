@@ -101,8 +101,8 @@ vp i
 ```
 
 **Desktop app (macOS, Apple silicon).** `vp run dist:desktop:dmg:arm64` builds
-`release/T3-Code-<version>-arm64.dmg` in a few minutes. Open it and drag T3 Code
-(Beta) to Applications, or run `scripts/install-desktop-macos.sh` to replace the
+`release/T3-Code-<version>-arm64.dmg` in a few minutes. Open it and drag Z6 Code
+to Applications, or run `scripts/install-desktop-macos.sh` to replace the
 installed app. The app is ad-hoc signed; on the Mac that built it, macOS opens it
 without a prompt, and so does a copy sent by `scp`, which sets no quarantine flag. A copy
 downloaded, AirDropped or mailed to another Mac is quarantined and needs **Open Anyway** in
@@ -810,6 +810,18 @@ publishes `t3` to npm under upstream's name, so the fork cannot reuse it, and a
 pipeline of its own costs a certificate and a package name for a few users. Everyone
 builds from this branch, as [Install from source](#install-from-source) describes.
 Revisit when people outside the owner's team use the fork.
+
+### Name the fork's builds Z6 Code (owner, 2026-10-16)
+
+The desktop app and the owner's own iPhone builds are **Z6 Code**, so they stand apart from T3's
+apps on the same Mac or phone. The desktop's `productName` sets the bundle's name; the bundle id,
+the data folder (`t3code-v2`) and the safe-storage key (`t3code Safe Storage`) stay upstream's, so
+the renamed app keeps its data. It is still the same app to macOS, so an older copy under another
+name should go; `scripts/install-desktop-macos.sh` names any it finds. The in-app name
+(`APP_BASE_NAME` and the window title) stays T3 Code: upstream reworks it often and every change
+would conflict. The iPhone icon is the `.icon` package in `assets/fork`, white Z6 on Ember's accent
+(`#b5552b`), and `z6-ios-1024.png` is its Icon Composer export (`ictool --export-image`), which
+Expo uses for its fallback icon and splash.
 
 ### Pair the phone through Cloudflare Access with a service token (owner, 2026-10-07)
 
