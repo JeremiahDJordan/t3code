@@ -77,6 +77,31 @@ function count(counts: ReturnType<typeof emptyCounts>, status: OrchestrationV2Su
   else if (status === "cancelled" || status === "interrupted") counts.stopped += 1;
 }
 
+const LIVE_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "queued",
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
+/**
+ * Whether a workflow run is still going: its coordinator row is, or a Retry runs the coordinator
+ * thread again after that row settled. Without the coordinator thread's runs only the row counts.
+ */
+export function isWorkflowRunLive(input: {
+  readonly coordinator: Pick<OrchestrationV2Subagent, "status">;
+  readonly coordinatorRuns?: ReadonlyArray<Pick<OrchestrationV2Run, "status" | "ordinal">>;
+}): boolean {
+  const status = input.coordinator.status;
+  if (isOrchestrationV2WorkActive(status) || status === "idle") return true;
+  let latestRun: Pick<OrchestrationV2Run, "status" | "ordinal"> | undefined;
+  for (const run of input.coordinatorRuns ?? []) {
+    if (latestRun === undefined || run.ordinal > latestRun.ordinal) latestRun = run;
+  }
+  return latestRun !== undefined && LIVE_RUN_STATUSES.has(latestRun.status);
+}
+
 export function deriveWorkflowCard(input: {
   /** The coordinator's row in the thread that started the workflow. */
   readonly coordinator: Pick<
@@ -173,28 +198,16 @@ export function deriveWorkflowCard(input: {
     };
   });
 
-  const latestRun =
-    input.coordinatorRuns === undefined
-      ? undefined
-      : [...input.coordinatorRuns].sort((left, right) => right.ordinal - left.ordinal)[0];
-  const runLive =
-    latestRun !== undefined &&
-    (latestRun.status === "queued" ||
-      latestRun.status === "preparing" ||
-      latestRun.status === "starting" ||
-      latestRun.status === "running" ||
-      latestRun.status === "waiting");
   const coordinatorStatus = input.coordinator.status;
-  const state: WorkflowCardState =
-    runLive || isOrchestrationV2WorkActive(coordinatorStatus) || coordinatorStatus === "idle"
-      ? waitingForUser > 0
-        ? "waiting"
-        : "running"
-      : coordinatorStatus === "completed"
-        ? "done"
-        : coordinatorStatus === "failed"
-          ? "failed"
-          : "stopped";
+  const state: WorkflowCardState = isWorkflowRunLive(input)
+    ? waitingForUser > 0
+      ? "waiting"
+      : "running"
+    : coordinatorStatus === "completed"
+      ? "done"
+      : coordinatorStatus === "failed"
+        ? "failed"
+        : "stopped";
 
   return {
     name: workflow.name,

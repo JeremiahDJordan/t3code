@@ -20,7 +20,8 @@ runs those roles on its own model if you tell it to.
 
 While the workflow runs, the thread that started it shows a workflow card and waits. On the phone
 the card opens from the agents button above the composer, or from the **Waiting on** status there,
-rather than sitting in the conversation. The card lists
+rather than sitting in the conversation. The agents button stays after the workflow finishes or
+fails, so its card remains one tap away. The card lists
 the workflow's phases in order. Each phase shows how many agents are working, done, failed or
 stopped, and opens to list its agents with their role, provider and model. Select an agent to open
 its thread. When an agent asks for approval or a question, the card shows **Waiting for you** and

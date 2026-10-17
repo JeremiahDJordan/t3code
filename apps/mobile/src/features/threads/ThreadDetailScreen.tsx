@@ -153,7 +153,11 @@ import {
   workflowCoordinatorSource,
   WorkflowThreadBar,
 } from "./WorkflowCard";
-import { useThreadSubagents, useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import {
+  useCoordinatorRunStatuses,
+  useThreadSubagents,
+  useThreadTurnSubagents,
+} from "./ThreadAgentsSheet";
 import { workflowPillSegment } from "./threadAgentsPresentation";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
@@ -415,9 +419,10 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const queuedCount = useThreadQueuedCount(props.selectedThreadDetailRef);
   const turnSubagents = useThreadTurnSubagents(props.selectedThreadDetailRef);
   const threadSubagents = useThreadSubagents(props.selectedThreadDetailRef);
+  const coordinatorRunStatuses = useCoordinatorRunStatuses(props.environmentId, threadSubagents);
   const agentsSegment =
     resolveSubagentPillSegment(turnSubagents) ??
-    workflowPillSegment(threadSubagents ?? [], turnSubagents?.subagents ?? []);
+    workflowPillSegment(threadSubagents ?? [], coordinatorRunStatuses);
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
   // A workflow's coordinator thread runs its script and takes no messages.

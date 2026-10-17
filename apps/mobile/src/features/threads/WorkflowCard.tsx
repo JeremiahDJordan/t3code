@@ -187,6 +187,61 @@ interface PhaseDisclosure {
   readonly onToggleRow: (rowId: string, anchorKey: string) => void;
 }
 
+const NO_WAITING_THREADS: ReadonlySet<ThreadId> = new Set();
+
+/**
+ * A finished workflow in the agents sheet, from the row the sheet already holds. Its card reads
+ * the whole coordinator thread, so it mounts only when this row is opened.
+ */
+export function FinishedWorkflowRow(props: {
+  readonly coordinator: OrchestrationV2Subagent;
+  readonly onExpand: () => void;
+}) {
+  const card = useMemo(
+    () =>
+      deriveWorkflowCard({
+        coordinator: props.coordinator,
+        agents: [],
+        waitingThreadIds: NO_WAITING_THREADS,
+      }),
+    [props.coordinator],
+  );
+  if (card === null) return null;
+  return (
+    <WorkLogBlock>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Workflow ${card.name}, ${STATE_LABEL[card.state]}`}
+        accessibilityHint="Shows the workflow's phases and actions"
+        onPress={props.onExpand}
+        className="mb-1 flex-row items-center gap-3 rounded-xl border border-border bg-card/30 py-3 pr-4 pl-3 active:bg-subtle"
+      >
+        <View className="h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border bg-card">
+          <SymbolView
+            name="point.3.connected.trianglepath.dotted"
+            size={14}
+            tintColorClassName="accent-icon-subtle"
+          />
+        </View>
+        <View className="min-w-0 flex-1 flex-row items-baseline gap-1.5">
+          <Text numberOfLines={1} className="min-w-0 shrink font-t3-medium text-sm text-foreground">
+            {card.name}
+          </Text>
+          <Text className={cn("shrink-0 text-xs font-t3-medium", STATE_TEXT_CLASS[card.state])}>
+            {STATE_LABEL[card.state]}
+          </Text>
+        </View>
+        <SubagentElapsed
+          agents={[
+            { status: "completed", startedAt: card.startedAt, completedAt: card.completedAt },
+          ]}
+        />
+        <SymbolView name="chevron.down" size={12} tintColorClassName="accent-icon-subtle" />
+      </Pressable>
+    </WorkLogBlock>
+  );
+}
+
 /**
  * A workflow run as one card: its declared phases, each with its agents, and
  * the run's controls. It sits in the starting thread's agents sheet and heads
@@ -201,6 +256,8 @@ export function WorkflowCard(props: {
   readonly inCoordinatorThread?: boolean;
   /** Opens a thread the card links to; a sheet replaces itself rather than pushing. */
   readonly onOpenThread?: (threadId: ThreadId) => void;
+  /** Folds the card back into its `FinishedWorkflowRow`. */
+  readonly onCollapse?: () => void;
 }) {
   const { environmentId, coordinator } = props;
   const navigation = useNavigation();
@@ -455,6 +512,16 @@ export function WorkflowCard(props: {
                 />
               </Pressable>
             </Menu>
+            {props.onCollapse ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Collapse workflow ${card.name}`}
+                onPress={props.onCollapse}
+                className="h-11 w-11 items-center justify-center"
+              >
+                <SymbolView name="chevron.up" size={12} tintColorClassName="accent-icon-subtle" />
+              </Pressable>
+            ) : null}
           </View>
           {card.phases.map((phase) => {
             const key = phaseKey(phase);

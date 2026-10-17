@@ -1,12 +1,14 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
+import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   isOrchestrationV2WorkActive,
+  ThreadId,
   type EnvironmentId,
+  type OrchestrationV2Run,
   type OrchestrationV2Subagent,
-  type ThreadId,
 } from "@t3tools/contracts";
 import { deriveSubagentElapsedMs, formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
@@ -22,13 +24,18 @@ import { AndroidSheetHeader } from "../../components/ui/AndroidScreenHeader";
 import { AppText as Text } from "../../components/ui/AppText";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useThreadShell } from "../../state/entities";
-import { environmentThreadDetails } from "../../state/threads";
+import { environmentThreadDetails, environmentThreadShells } from "../../state/threads";
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { SubagentRow } from "./SubagentRow";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
-import { groupWorkflowAgentsByPhase, sheetWorkflowRuns } from "./threadAgentsPresentation";
-import { WorkflowCard, useWorkflowCoordinatorForThread } from "./WorkflowCard";
+import {
+  groupWorkflowAgentsByPhase,
+  sheetAgentRows,
+  sheetWorkflowRuns,
+  type CoordinatorRunStatuses,
+} from "./threadAgentsPresentation";
+import { FinishedWorkflowRow, WorkflowCard, useWorkflowCoordinatorForThread } from "./WorkflowCard";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -39,6 +46,9 @@ const EMPTY_TURN_SUBAGENTS_ATOM = Atom.make<ThreadTurnSubagents | null>(null).pi
 );
 const EMPTY_THREAD_ATOM = Atom.make<EnvironmentThread | null>(null).pipe(
   Atom.withLabel("mobile-thread-agents-thread:empty"),
+);
+const EMPTY_RUN_STATUSES_ATOM = Atom.make<CoordinatorRunStatuses>(new Map()).pipe(
+  Atom.withLabel("mobile-thread-agents-coordinator-runs:empty"),
 );
 
 /** A thread's subagent rows, every turn's, as the sheet and the agents pill read them. */
@@ -53,6 +63,60 @@ export function useThreadTurnSubagents(target: AgentsTarget | null): ThreadTurnS
     target === null
       ? EMPTY_TURN_SUBAGENTS_ATOM
       : environmentThreadDetails.turnSubagentsAtom(target),
+  );
+}
+
+// Keeps the same map while the statuses stay the same, so readers do not re-derive on
+// unrelated shell updates.
+function coordinatorRunStatusesAtom(
+  environmentId: EnvironmentId,
+  coordinatorThreadIds: ReadonlyArray<ThreadId>,
+) {
+  let previous: CoordinatorRunStatuses = new Map();
+  return Atom.make((get) => {
+    const next = new Map<ThreadId, OrchestrationV2Run["status"]>();
+    for (const threadId of coordinatorThreadIds) {
+      const status = get(
+        environmentThreadShells.threadShellAtom(scopeThreadRef(environmentId, threadId)),
+      )?.latestRun?.status;
+      if (status !== undefined) next.set(threadId, status);
+    }
+    if (
+      next.size !== previous.size ||
+      [...next].some(([threadId, status]) => previous.get(threadId) !== status)
+    ) {
+      previous = next;
+    }
+    return previous;
+  });
+}
+
+/**
+ * The latest run status of each workflow coordinator thread these rows started, from the shells
+ * clients already hold, so a Retry reads as running before its coordinator thread loads.
+ */
+export function useCoordinatorRunStatuses(
+  environmentId: EnvironmentId,
+  threadSubagents: ReadonlyArray<OrchestrationV2Subagent> | undefined,
+): CoordinatorRunStatuses {
+  const idsKey = (threadSubagents ?? [])
+    .flatMap((subagent) =>
+      subagent.t3Workflow?.kind === "run" && subagent.childThreadId !== null
+        ? [subagent.childThreadId]
+        : [],
+    )
+    .join("\n");
+  return useAtomValue(
+    useMemo(
+      () =>
+        idsKey === ""
+          ? EMPTY_RUN_STATUSES_ATOM
+          : coordinatorRunStatusesAtom(
+              environmentId,
+              idsKey.split("\n").map((id) => ThreadId.make(id)),
+            ),
+      [environmentId, idsKey],
+    ),
   );
 }
 
@@ -79,22 +143,36 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
     environmentThreadDetails.threadAtom(scopeThreadRef(target.environmentId, target.threadId)),
     selectThreadSubagents,
   );
+  const coordinatorRunStatuses = useCoordinatorRunStatuses(target.environmentId, threadSubagents);
   const workflowRuns = useMemo(
-    () => sheetWorkflowRuns(threadSubagents ?? [], turn?.subagents ?? []),
-    [threadSubagents, turn?.subagents],
+    () => sheetWorkflowRuns(threadSubagents ?? [], coordinatorRunStatuses),
+    [coordinatorRunStatuses, threadSubagents],
   );
+  // Finished runs show as rows until opened; one seen running stays a card when it finishes.
+  const [openedWorkflowIds, setOpenedWorkflowIds] = useState<ReadonlySet<string>>(new Set());
+  const newlyLive = workflowRuns.filter(({ run, live }) => live && !openedWorkflowIds.has(run.id));
+  if (newlyLive.length > 0) {
+    setOpenedWorkflowIds(new Set([...openedWorkflowIds, ...newlyLive.map(({ run }) => run.id)]));
+  }
+  const setWorkflowOpen = (id: string, open: boolean) =>
+    setOpenedWorkflowIds((current) => {
+      const next = new Set(current);
+      if (open) next.add(id);
+      else next.delete(id);
+      return next;
+    });
   // A workflow run reads as its card above the other agents, not as a row among them.
   const subagents = useMemo(
-    () => (turn?.subagents ?? []).filter((subagent) => subagent.t3Workflow?.kind !== "run"),
-    [turn?.subagents],
+    () => sheetAgentRows(threadSubagents ?? [], turn?.subagents ?? []),
+    [threadSubagents, turn?.subagents],
   );
-  const hasLiveAgent = (turn?.liveCount ?? 0) > 0;
+  const hasLiveAgent = subagents.some((subagent) => isActiveSubagentStatus(subagent.status));
   const shell = useThreadShell(scopeThreadRef(target.environmentId, target.threadId));
   const coordinator = useWorkflowCoordinatorForThread(target.environmentId, shell);
   // A workflow coordinator thread's agents read under their phases, as on its card.
   const phases = useMemo(
-    () => groupWorkflowAgentsByPhase(turn?.subagents ?? [], coordinator),
-    [coordinator, turn?.subagents],
+    () => groupWorkflowAgentsByPhase(subagents, coordinator),
+    [coordinator, subagents],
   );
 
   const openChildThread = (childThreadId: ThreadId) => {
@@ -121,14 +199,23 @@ export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
     >
       {workflowRuns.length > 0 ? (
         <View className="gap-2 pt-4">
-          {workflowRuns.map((run) => (
-            <WorkflowCard
-              key={run.id}
-              environmentId={target.environmentId}
-              coordinator={run}
-              onOpenThread={openChildThread}
-            />
-          ))}
+          {workflowRuns.map(({ run, live }) =>
+            openedWorkflowIds.has(run.id) || live ? (
+              <WorkflowCard
+                key={run.id}
+                environmentId={target.environmentId}
+                coordinator={run}
+                onOpenThread={openChildThread}
+                {...(live ? {} : { onCollapse: () => setWorkflowOpen(run.id, false) })}
+              />
+            ) : (
+              <FinishedWorkflowRow
+                key={run.id}
+                coordinator={run}
+                onExpand={() => setWorkflowOpen(run.id, true)}
+              />
+            ),
+          )}
         </View>
       ) : null}
       {subagents.length === 0 ? (

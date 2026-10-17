@@ -4,8 +4,8 @@ import {
 } from "@t3tools/client-runtime/state/subagent-display";
 import { isActiveSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { SubagentPillSegment } from "@t3tools/client-runtime/state/thread-subagents";
-import { deriveWorkflowCard } from "@t3tools/client-runtime/state/workflowCard";
-import { isOrchestrationV2WorkActive, type OrchestrationV2Subagent } from "@t3tools/contracts";
+import { deriveWorkflowCard, isWorkflowRunLive } from "@t3tools/client-runtime/state/workflowCard";
+import type { OrchestrationV2Run, OrchestrationV2Subagent, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 const PROMPT_TITLE_LIMIT = 80;
@@ -115,45 +115,86 @@ export function resolveSubagentRowPresentation(
   };
 }
 
-const workflowRunIsLive = (subagent: OrchestrationV2Subagent) =>
-  subagent.t3Workflow?.kind === "run" && isOrchestrationV2WorkActive(subagent.status);
+const startOrder = (subagent: OrchestrationV2Subagent) =>
+  DateTime.toEpochMillis(subagent.startedAt ?? subagent.updatedAt);
 
 /**
- * The workflow runs a thread started that its agents sheet shows as cards: every one still
- * running, whichever turn started it, and any in the turn the sheet lists. Live ones first,
- * then newest.
+ * The agents the sheet lists as rows: the turn's, plus any still working from an earlier turn.
+ * The Waiting control opens this sheet for whatever a settled thread still waits on, which can be
+ * an older turn's agent. Workflow runs read as cards instead.
  */
-export function sheetWorkflowRuns(
+export function sheetAgentRows(
   threadSubagents: ReadonlyArray<OrchestrationV2Subagent>,
   turnSubagents: ReadonlyArray<OrchestrationV2Subagent>,
 ): ReadonlyArray<OrchestrationV2Subagent> {
   const inTurn = new Set(turnSubagents.map((subagent) => subagent.id));
+  const earlierLive = threadSubagents.filter(
+    (subagent) => !inTurn.has(subagent.id) && isActiveSubagentStatus(subagent.status),
+  );
+  // `filter` returned a new array; Hermes has no `toSorted`.
+  return [...earlierLive, ...turnSubagents]
+    .filter((subagent) => subagent.t3Workflow?.kind !== "run")
+    .sort((left, right) => startOrder(left) - startOrder(right) || left.id.localeCompare(right.id));
+}
+
+/** Each workflow coordinator thread's latest run status, read from its shell. */
+export type CoordinatorRunStatuses = ReadonlyMap<ThreadId, OrchestrationV2Run["status"]>;
+
+/** A workflow run is live while its row is, or while a Retry runs its coordinator thread. */
+function workflowRunIsLive(
+  subagent: OrchestrationV2Subagent,
+  coordinatorRunStatuses: CoordinatorRunStatuses,
+): boolean {
+  if (subagent.t3Workflow?.kind !== "run") return false;
+  const status =
+    subagent.childThreadId === null
+      ? undefined
+      : coordinatorRunStatuses.get(subagent.childThreadId);
+  return isWorkflowRunLive({
+    coordinator: subagent,
+    ...(status === undefined ? {} : { coordinatorRuns: [{ ordinal: 0, status }] }),
+  });
+}
+
+/**
+ * Every workflow run a thread started, as its agents sheet shows them: live ones first, then
+ * newest. A finished run stays, since its card holds the script and Retry; the sheet shows it as
+ * a row until opened, so a thread's history does not load every coordinator thread.
+ */
+export function sheetWorkflowRuns(
+  threadSubagents: ReadonlyArray<OrchestrationV2Subagent>,
+  coordinatorRunStatuses: CoordinatorRunStatuses,
+): ReadonlyArray<{ readonly run: OrchestrationV2Subagent; readonly live: boolean }> {
   return threadSubagents
-    .filter(
-      (subagent) =>
-        subagent.t3Workflow?.kind === "run" &&
-        (workflowRunIsLive(subagent) || inTurn.has(subagent.id)),
-    )
+    .filter((subagent) => subagent.t3Workflow?.kind === "run")
+    .map((run) => ({ run, live: workflowRunIsLive(run, coordinatorRunStatuses) }))
     .sort(
       (left, right) =>
-        Number(workflowRunIsLive(right)) - Number(workflowRunIsLive(left)) ||
-        DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
+        Number(right.live) - Number(left.live) ||
+        DateTime.toEpochMillis(right.run.updatedAt) - DateTime.toEpochMillis(left.run.updatedAt),
     );
 }
 
 /**
- * The pill's agents segment when the turn's own has none: a workflow still running from an
- * earlier turn keeps the sheet one tap away while the thread does other work.
+ * The pill's agents segment when the turn's own has none. A thread that started workflows keeps
+ * it, running or finished, so their cards stay one tap away after the thread settles.
  */
 export function workflowPillSegment(
   threadSubagents: ReadonlyArray<OrchestrationV2Subagent>,
-  turnSubagents: ReadonlyArray<OrchestrationV2Subagent>,
+  coordinatorRunStatuses: CoordinatorRunStatuses,
 ): SubagentPillSegment | null {
-  const inTurn = new Set(turnSubagents.map((subagent) => subagent.id));
-  const running = threadSubagents.filter(
-    (subagent) => workflowRunIsLive(subagent) && !inTurn.has(subagent.id),
-  ).length;
-  if (running === 0) return null;
-  const noun = running === 1 ? "workflow" : "workflows";
-  return { label: `${running} ${noun}`, accessibilityLabel: `${running} ${noun} running` };
+  const runs = threadSubagents.filter((subagent) => subagent.t3Workflow?.kind === "run");
+  if (runs.length === 0) return null;
+  const noun = (count: number) => (count === 1 ? "workflow" : "workflows");
+  const running = runs.filter((run) => workflowRunIsLive(run, coordinatorRunStatuses)).length;
+  if (running > 0) {
+    return {
+      label: `${running} ${noun(running)}`,
+      accessibilityLabel: `${running} ${noun(running)} running`,
+    };
+  }
+  return {
+    label: `${runs.length} ${noun(runs.length)} done`,
+    accessibilityLabel: `${runs.length} ${noun(runs.length)} done`,
+  };
 }

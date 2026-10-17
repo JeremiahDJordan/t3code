@@ -21,6 +21,7 @@ import {
 export { WORKFLOW_PROVIDER_INSTANCE_ID } from "@t3tools/contracts";
 export {
   deriveWorkflowCard,
+  isWorkflowRunLive,
   latestWorkflowLogLine,
   type WorkflowCard,
   type WorkflowCardAgent,

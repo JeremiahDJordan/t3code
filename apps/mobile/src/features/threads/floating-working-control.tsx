@@ -197,7 +197,7 @@ export function FloatingWorkingControl(props: {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={`Open agents, ${agents.accessibilityLabel}`}
-          accessibilityHint="Opens this turn's subagents"
+          accessibilityHint="Opens this thread's agents and workflows"
           onPress={props.onOpenAgents}
           onLayout={(event) => setAgentsWidth(event.nativeEvent.layout.width)}
           className="h-11 flex-row items-center gap-1.5 px-3 active:opacity-70"
