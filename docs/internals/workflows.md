@@ -52,7 +52,9 @@ Agents an earlier turn left running each hold a concurrency slot, and a writer i
 they end or the rerun reaches them, so a Retry cannot exceed the run's limit or start a second
 writer where one is still editing. A failed or stopped run keeps its worktrees
 for the rerun; the run that finishes removes them without forcing, so git keeps one with
-uncommitted work. The run's invocation lives in the
+uncommitted work. That cleanup, the result and the completed terminal run uninterruptibly, with
+the journals dropped last: a Stop landing there would report a stopped run, offering a Retry after
+the worktrees, their recorded starts and the command results it needs were gone. The run's invocation lives in the
 coordinator's first message and its source in `workflow_sources`, keyed by hash.
 
 A coordinator row that ended unfinished is the one delegated task whose later runs publish their
@@ -82,9 +84,11 @@ script's `cleanup: "always"` deletes commits, and only a finished run settles an
 A read-only workspace is checked, not enforced: agents run on providers with their own sandboxes,
 and a provider in full access can write anywhere, so T3 cannot block every write. Its agents are
 told in their prompt, skip the writer lock, and the engine compares the worktree with its recorded
-start before each agent starts and whenever a result is read, a reused one on Retry included. A
-change makes that result `null` and is never cleaned, so it also fails every later agent there and
-stays as evidence. With agents side by side the writer cannot be told apart, so each one that ends
+start as each attempt starts, once it holds its concurrency slot, and whenever a result is read, a
+reused one on Retry included. A change makes that result `null` and is never cleaned, so it also
+fails every later agent there and stays as evidence. The discarded result is journaled beside the
+commands' (`workflow_discarded_results`): restoring the checkout and retrying starts that agent
+again rather than reuse a result made against the change. With agents side by side the writer cannot be told apart, so each one that ends
 after the change fails. Read-only workspaces at the same `from` do not share a worktree: one per
 name keeps branches, cleanup and the check uniform, and a script that wants sharing passes one
 workspace to several agents.
@@ -150,7 +154,9 @@ for workable builds. Without a sandbox, only Full access runs a command, unsandb
 
 A command is its own process group, killed past its timeout, on Stop, and right after its shell
 exits, so a background job it started does not outlive it. A process that leaves the group keeps
-the pipes open at most two seconds longer. Each stream keeps its last 256 KB: a value entering the
+the pipes open at most two seconds longer. Windows has no process groups, so a timeout or Stop ends
+the shell's process tree with `taskkill /T /F` while the shell runs; once it exited its pid may
+name another process, so what it left running is not killed there. Each stream keeps its last 256 KB: a value entering the
 script is at most 1 MB of JSON, and escaping can grow output six-fold, so the result is cut
 further until it fits. A server that crashes mid-command leaves the command running; nothing in
 the command watches for its parent, as the sandbox process's watchdog does.

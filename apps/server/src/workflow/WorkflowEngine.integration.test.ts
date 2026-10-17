@@ -497,6 +497,46 @@ const layerRefusingAdapters = (
     }),
   ).pipe(Layer.provide(ProviderAdapterRegistry.layerFromAdapters(adapters)));
 
+/**
+ * The registry, with the workflow adapter's turn interruptions running `delivered`
+ * once the interruption reached the turn's fiber, before that fiber has ended.
+ */
+const layerWorkflowInterruptProbe = (delivered: Effect.Effect<void>) =>
+  Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.gen(function* () {
+      const base = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+      return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+        ...base,
+        get: (instanceId) =>
+          instanceId !== WORKFLOW_PROVIDER_INSTANCE_ID
+            ? base.get(instanceId)
+            : base.get(instanceId).pipe(
+                Effect.map((adapter) => ({
+                  ...adapter,
+                  openSession: (sessionInput) =>
+                    adapter.openSession(sessionInput).pipe(
+                      Effect.map((session) => ({
+                        ...session,
+                        interruptTurn: (turnInput) =>
+                          Effect.gen(function* () {
+                            // Started at once, it hands the turn's fiber its interruption
+                            // before it waits for that fiber to end.
+                            const interrupting = yield* Effect.forkChild(
+                              session.interruptTurn(turnInput),
+                              { startImmediately: true },
+                            );
+                            yield* delivered;
+                            return yield* Fiber.join(interrupting);
+                          }),
+                      })),
+                    ),
+                })),
+              ),
+      });
+    }),
+  );
+
 const withHarness = <A, E>(
   options: {
     readonly name: string;
@@ -511,6 +551,10 @@ const withHarness = <A, E>(
     readonly retryWait?: (delay: Duration.Duration) => Effect.Effect<void>;
     /** Stands in for running an exec() command; the journal stays real. */
     readonly execRun?: WorkflowExec.WorkflowExec["Service"]["run"];
+    /** Runs before a workspace's worktree is removed. */
+    readonly beforeRemove?: Effect.Effect<void>;
+    /** Runs once a workflow turn's interruption was delivered, while it is still ending. */
+    readonly onWorkflowInterrupt?: Effect.Effect<void>;
   },
   body: (harness: Harness) => Effect.Effect<A, E>,
 ) =>
@@ -569,7 +613,10 @@ const withHarness = <A, E>(
             ]).pipe(Effect.as({ worktreePath: `${cwd}-worktrees/${branch.replaceAll("/", "-")}` })),
           changes: ({ branch }) =>
             Ref.get(workspaceChanges).pipe(Effect.map((all) => all.get(branch) ?? null)),
-          remove: ({ branch }) => Ref.update(workspaceLog, (all) => [...all, `remove ${branch}`]),
+          remove: ({ branch }) =>
+            (options.beforeRemove ?? Effect.void).pipe(
+              Effect.andThen(Ref.update(workspaceLog, (all) => [...all, `remove ${branch}`])),
+            ),
           // Settles as if every branch had commits of its own: only "always" deletes it.
           settle: ({ branch, cleanup }) =>
             Ref.update(workspaceLog, (all) => [...all, `settle ${branch} ${cleanup}`]).pipe(
@@ -578,11 +625,16 @@ const withHarness = <A, E>(
         }),
       );
       const layerDatabase = SqlitePersistence.layerMemory;
-      const layerRegistry = WorkflowAdapterV2.layerRegistryWithWorkflowAdapter(
+      const layerBaseRegistry = WorkflowAdapterV2.layerRegistryWithWorkflowAdapter(
         options.refused === undefined
           ? ProviderAdapterRegistry.layerFromAdapters(adapters)
           : layerRefusingAdapters(adapters, options.refused),
       ).pipe(Layer.provide(WorkflowAdapterV2.layerEngineHost));
+      const onWorkflowInterrupt = options.onWorkflowInterrupt;
+      const layerRegistry =
+        onWorkflowInterrupt === undefined
+          ? layerBaseRegistry
+          : layerWorkflowInterruptProbe(onWorkflowInterrupt).pipe(Layer.provide(layerBaseRegistry));
       const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
         { name: options.name, runtimePolicyOverride: { cwd } },
         layerRegistry,
@@ -1903,6 +1955,70 @@ return await agent("build", { workspace: ws })`,
     }),
   );
 
+  it.live(
+    "finishes a run that a Stop reaches while it cleans up, as Retry could not rerun it",
+    () =>
+      Effect.gen(function* () {
+        const removing = yield* Deferred.make<void>();
+        const stopDelivered = yield* Deferred.make<void>();
+        let commands = 0;
+        return yield* withHarness(
+          {
+            name: "workflow-stop-in-cleanup",
+            behave: () => Effect.succeed({ text: "noted" }),
+            execRun: () =>
+              Effect.sync(() => {
+                commands += 1;
+                return { exitCode: 0, stdout: "built\n", stderr: "", timedOut: false };
+              }),
+            // Removing the worktree waits until the Stop reached the turn.
+            beforeRemove: Deferred.succeed(removing, undefined).pipe(
+              Effect.andThen(Deferred.await(stopDelivered)),
+            ),
+            onWorkflowInterrupt: Deferred.succeed(stopDelivered, undefined).pipe(Effect.asVoid),
+          },
+          (harness) =>
+            Effect.gen(function* () {
+              yield* harness.startParent;
+              const run = yield* harness.runWorkflow({
+                source: String.raw`export const meta = { t3: 1, name: "stop-in-cleanup" }
+const ws = await workspace("build", { from: "main" })
+const built = await exec("make", { workspace: ws })
+return built.stdout`,
+              });
+              if (run.status !== "started") return yield* Effect.die("not started");
+              yield* Deferred.await(removing);
+              const coordinator = yield* harness.threads.getThreadRecords(run.childThreadId, [
+                "runs",
+              ]);
+              yield* harness.threads.dispatch({
+                type: "run.interrupt",
+                commandId: CommandId.make("command:workflow-stop-in-cleanup:stop"),
+                threadId: run.childThreadId,
+                runId: coordinator.runs[0]!.id,
+                holdQueue: true,
+              });
+              yield* harness.parentWoken;
+              // The cleanup had begun, so the run finished rather than offer a Retry
+              // without the worktree, its recorded start or the command's result.
+              const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+              const row = parent.subagents.find((task) => task.id === run.taskId)!;
+              expect(row.status).toBe("completed");
+              expect(scriptResult(row.result)).toBe("built\n");
+              const runs = yield* harness.threads.getThreadRecords(run.childThreadId, ["runs"]);
+              expect(runs.runs.map((each) => each.status)).toEqual(["completed"]);
+              const branch = WorkflowWorkspaces.workflowWorkspaceBranch(run.childThreadId, "build");
+              expect(yield* Ref.get(harness.workspaceLog)).toEqual([
+                `ensure ${branch} from main`,
+                `remove ${branch}`,
+                `settle ${branch} unchanged`,
+              ]);
+              expect(commands).toBe(1);
+            }),
+        );
+      }),
+  );
+
   it.live("stops every live agent when the workflow is stopped", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
@@ -2152,6 +2268,120 @@ return { reviews, tampered, late, refused }`,
             }),
         );
       }),
+  );
+
+  it.live(
+    "starts a discarded read-only review again on Retry, though the checkout is restored",
+    () =>
+      Effect.gen(function* () {
+        const reviews = yield* Ref.make(0);
+        return yield* withHarness(
+          {
+            name: "workflow-read-only-retry",
+            behave: (turn, harness) =>
+              Effect.gen(function* () {
+                if (!turn.text.startsWith("review")) return { text: "noted" };
+                const count = yield* Ref.updateAndGet(reviews, (n) => n + 1);
+                // The first review edits the workspace it was to leave alone.
+                if (count === 1) {
+                  const shell = yield* harness()
+                    .threads.getThreadShell(turn.threadId)
+                    .pipe(Effect.orDie);
+                  yield* Ref.set(
+                    harness().workspaceChanges,
+                    new Map([[shell!.branch!, "files changed: notes.txt"]]),
+                  );
+                }
+                return { text: `verdict ${count}` };
+              }),
+          },
+          (harness) =>
+            Effect.gen(function* () {
+              yield* harness.startParent;
+              const started = yield* harness.runWorkflow({
+                source: String.raw`export const meta = { t3: 1, name: "read-only-retry" }
+const look = await workspace("look", { readOnly: true })
+const verdict = await agent("review", { workspace: look })
+if (verdict === null) throw new Error("the review was discarded")
+return verdict`,
+              });
+              if (started.status !== "started") return yield* Effect.die("not started");
+              yield* harness.parentWoken;
+              const failed = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+              expect(failed.subagents.find((task) => task.id === started.taskId)?.result).toContain(
+                "the review was discarded",
+              );
+
+              // The user restores the checkout and retries.
+              yield* Ref.set(harness.workspaceChanges, new Map());
+              yield* harness.threads.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make("command:workflow-read-only-retry:retry"),
+                threadId: started.childThreadId,
+                messageId: MessageId.make("message:workflow-read-only-retry:retry"),
+                text: "Retry",
+                attachments: [],
+                modelSelection: {
+                  instanceId: WORKFLOW_PROVIDER_INSTANCE_ID,
+                  model: WorkflowAdapterV2.WORKFLOW_MODEL,
+                },
+                dispatchMode: { type: "start_immediately" },
+              });
+              yield* harness.parentWoken;
+              const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+              const row = parent.subagents.find((task) => task.id === started.taskId)!;
+              expect(row.status).toBe("completed");
+              // A review made against the edit is not taken once the edit is gone.
+              expect(scriptResult(row.result)).toBe("verdict 2");
+              expect(yield* Ref.get(reviews)).toBe(2);
+              const agents = yield* harness.coordinatorChildren(started.childThreadId);
+              expect(
+                agents.map((task) =>
+                  task.t3Workflow?.kind === "agent" ? task.t3Workflow.attempt : 0,
+                ),
+              ).toEqual([1, 2]);
+            }),
+        );
+      }),
+  );
+
+  it.live("checks a read-only workspace when an agent gets its slot, not when it asks", () =>
+    withHarness(
+      {
+        name: "workflow-read-only-slot",
+        behave: (turn, harness) =>
+          Effect.gen(function* () {
+            if (!turn.text.startsWith("review")) return { text: "noted" };
+            // Every review edits the workspace it was to leave alone.
+            const shell = yield* harness().threads.getThreadShell(turn.threadId).pipe(Effect.orDie);
+            yield* Ref.set(
+              harness().workspaceChanges,
+              new Map([[shell!.branch!, "files changed: notes.txt"]]),
+            );
+            return { text: "looked" };
+          }),
+      },
+      (harness) =>
+        Effect.gen(function* () {
+          yield* harness.startParent;
+          const started = yield* harness.runWorkflow({
+            source: String.raw`export const meta = { t3: 1, name: "read-only-slot", limits: { concurrency: 1 } }
+const look = await workspace("look", { readOnly: true })
+return await parallel(["a", "b"].map((n) => () => agent("review " + n, { workspace: look })))`,
+          });
+          if (started.status !== "started") return yield* Effect.die("not started");
+          yield* harness.parentWoken;
+          const parent = yield* harness.threads.getThreadRecords(parentThreadId, ["subagents"]);
+          const row = parent.subagents.find((task) => task.id === started.taskId)!;
+          expect(workflowValue(row.result)).toEqual([null, null]);
+          // The second asked while the workspace was clean, but waited for the slot
+          // until the first had changed it, so it never started.
+          const agents = yield* harness.coordinatorChildren(started.childThreadId);
+          expect(agents).toHaveLength(1);
+        }),
+    ),
   );
 
   it.live(
@@ -2826,6 +3056,112 @@ return 1`,
               delegated.taskId,
             );
             expect(original.structuredResult).toEqual({ ok: true });
+          }),
+      );
+    }),
+  );
+
+  it.live("takes the return of a held follow-up that resumed after a newer one ended", () =>
+    Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>();
+      const returned = yield* Deferred.make<string>();
+      return yield* withHarness(
+        {
+          name: "workflow-delegate-resumed-return",
+          behave: (turn, harness) =>
+            Effect.gen(function* () {
+              if (turn.text.startsWith("Check it.")) {
+                yield* harness()
+                  .orchestratorMcp.returnTaskResult(childScope(turn.threadId, turn.instanceId), {
+                    value: { ok: true },
+                  })
+                  .pipe(Effect.orDie);
+                return { text: "Checked." };
+              }
+              if (turn.text === "Hold.") {
+                yield* Deferred.succeed(firstStarted, undefined);
+                return yield* Effect.never;
+              }
+              if (turn.text === "Older.") {
+                const outcome = yield* harness()
+                  .orchestratorMcp.returnTaskResult(childScope(turn.threadId, turn.instanceId), {
+                    value: { ok: false },
+                  })
+                  .pipe(
+                    Effect.match({
+                      onFailure: (error) => error.message,
+                      onSuccess: (result) => result.taskId,
+                    }),
+                  );
+                yield* Deferred.succeed(returned, outcome);
+                return { text: "Checked late." };
+              }
+              return { text: "noted" };
+            }),
+        },
+        (harness) =>
+          Effect.gen(function* () {
+            yield* harness.startParent;
+            const delegated = yield* harness.orchestratorMcp.delegateTask(parentScope, {
+              task: "Check it.",
+              resultSchema: {
+                type: "object",
+                required: ["ok"],
+                properties: { ok: { type: "boolean" } },
+              },
+              mode: "wait",
+            });
+            yield* harness.waitForChildren(parentThreadId, (rows) =>
+              rows.some((row) => row.id === delegated.taskId && row.result !== null),
+            );
+            const child = delegated.childThreadId;
+            const first = yield* harness.orchestratorMcp.sendToThread(parentScope, {
+              threadId: child,
+              message: "Hold.",
+            });
+            yield* Deferred.await(firstStarted);
+            const older = yield* harness.orchestratorMcp.sendToThread(parentScope, {
+              threadId: child,
+              message: "Older.",
+              mode: "queue",
+            });
+            // Stopping the first follow-up holds the queue behind it.
+            yield* harness.threads.dispatch({
+              type: "run.interrupt",
+              commandId: CommandId.make("command:resumed-return:interrupt"),
+              threadId: child,
+              runId: first.runId,
+              holdQueue: true,
+            });
+            yield* harness.waitForRuns(
+              child,
+              (runs) =>
+                runs.some((run) => run.id === first.runId && run.status === "interrupted") &&
+                runs.some((run) => run.id === older.runId && run.queueHeld === true),
+            );
+            // A follow-up sent meanwhile runs ahead of the held one and ends.
+            const newer = yield* harness.orchestratorMcp.sendToThread(parentScope, {
+              threadId: child,
+              message: "Newer.",
+            });
+            yield* harness.waitForRuns(child, (runs) =>
+              runs.some((run) => run.id === newer.runId && run.status === "completed"),
+            );
+            // The held follow-up resumes, with an ordinal below the newer one's.
+            yield* harness.threads.dispatch({
+              type: "queue.resume",
+              commandId: CommandId.make("command:resumed-return:resume"),
+              threadId: child,
+            });
+            expect(yield* Deferred.await(returned)).toBe(older.taskId);
+            yield* harness.waitForChildren(parentThreadId, (all) =>
+              all.some((row) => row.id === older.taskId && row.result !== null),
+            );
+            const olderStatus = yield* harness.orchestratorMcp.taskStatus(
+              parentScope,
+              older.taskId!,
+            );
+            expect(olderStatus.structuredResult).toEqual({ ok: false });
           }),
       );
     }),

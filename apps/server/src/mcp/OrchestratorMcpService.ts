@@ -2288,7 +2288,10 @@ const make = Effect.gen(function* () {
         // record it, and a follow-up that replaced it must not take its late
         // return. A run that started in the very millisecond the call arrived,
         // while the one before was still live, may be that replacement: the
-        // earlier one is assumed, which refuses the call.
+        // earlier one is assumed, which refuses the call. Runs are ordered by
+        // when they started, not by ordinal: a held queue's older run can start
+        // after a newer one ended (`runRanAfter`). Of two that started in one
+        // millisecond, the one still live, or that ended later, ran last.
         const [latest, previous] = caller.runs
           .flatMap((run) =>
             run.startedAt === null
@@ -2296,7 +2299,13 @@ const make = Effect.gen(function* () {
               : [{ run, startedAt: DateTime.toEpochMillis(run.startedAt) }],
           )
           .filter(({ startedAt }) => startedAt <= receivedAt)
-          .toSorted((left, right) => right.run.ordinal - left.run.ordinal);
+          .toSorted((left, right) =>
+            left.startedAt === right.startedAt
+              ? runRanAfter(left.run, right.run)
+                ? -1
+                : 1
+              : right.startedAt - left.startedAt,
+          );
         const callerRun =
           latest?.startedAt === receivedAt &&
           previous !== undefined &&

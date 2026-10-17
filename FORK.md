@@ -1126,8 +1126,9 @@ included, since commands may not be idempotent; one cut short runs again. Design
   queued follow-up already started, is taken for that follow-up's own return
   (`OrchestratorMcpService.returnTaskResult`): the call carries no run identity, and the
   service's timestamp comes after upstream's `actsAsCaller` read. Carrying a task id would mean
-  injecting it into every follow-up's prompt through every adapter. The sender is chosen by
-  wall-clock times, so a backwards clock step refuses a legitimate return until it catches up.
+  injecting it into every follow-up's prompt through every adapter. The sender is the run that
+  started last before the call arrived, by wall-clock times, so a backwards clock step can refuse
+  a legitimate return until it catches up.
   The orchestrator's ownership check runs under the parent's lock only.
 - Auto's read rule asks for every search in a hidden home folder a read rule opened, such as
   `~/.cargo/registry`, since the shell-history denial may match below it, and for a search of
@@ -1141,7 +1142,9 @@ included, since commands may not be idempotent; one cut short runs again. Design
   so a closed `argsSchema` refuses an extra argument it used to drop, and a Retry that reads a
   finished agent's result from its message again can read it differently after an upgrade.
 - A workflow's `exec()` command keeps running if the server crashes mid-command, and so does a
-  process that leaves the command's process group; Stop and timeouts kill the group only. Retry
+  process that leaves the command's process group; Stop and timeouts kill the group only. Windows
+  has no groups: Stop and timeouts end the shell's process tree, but what a command leaves running
+  once its shell exited keeps running there, as its pid may name another process by then. Retry
   replays a failed command's result too, so a run that failed on one cannot pass it by Retry.
 - A restored steer's text is not re-read by Auto's reviewer, and each queued steer's resources
   are capped on their own, so a prompt that drains several steers carries several caps.

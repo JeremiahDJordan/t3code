@@ -217,9 +217,65 @@ describe("WorkflowExec without a sandbox", () => {
       yield* exec.record(thread, "exec:a:1", result);
       expect(yield* exec.recorded(thread, "exec:a:1")).toEqual(Option.some(result));
       expect(yield* exec.recorded(thread, "exec:a:2")).toEqual(Option.none());
+      yield* exec.discard(thread, "node:a");
+      expect(yield* exec.discarded(thread, "node:a")).toBe(true);
+      expect(yield* exec.discarded(thread, "node:b")).toBe(false);
       yield* exec.forget(thread);
       expect(yield* exec.recorded(thread, "exec:a:1")).toEqual(Option.none());
+      expect(yield* exec.discarded(thread, "node:a")).toBe(false);
     }).pipe(Effect.provide(layer)),
+  );
+});
+
+describe("killTree on Windows", () => {
+  /** A shell that has `exited` or not, and the kills and spawns asked of it. */
+  const fixture = (input: { readonly exited: boolean; readonly killerExit: number | null }) => {
+    const kills: Array<string> = [];
+    const spawned: Array<ReadonlyArray<string>> = [];
+    const child = {
+      pid: 4242,
+      exitCode: input.exited ? 0 : null,
+      signalCode: null,
+      kill: (signal: NodeJS.Signals) => {
+        kills.push(signal);
+        return true;
+      },
+    };
+    const spawn = (command: string, args: ReadonlyArray<string>) => {
+      spawned.push([command, ...args]);
+      return {
+        once: (event: "error" | "exit", listener: (code: number | null) => void) => {
+          if (event === "exit") listener(input.killerExit);
+        },
+      };
+    };
+    return { child, spawn, kills, spawned };
+  };
+
+  it.effect("ends the shell's whole tree with taskkill while the shell runs", () =>
+    Effect.gen(function* () {
+      const { child, spawn, kills, spawned } = fixture({ exited: false, killerExit: 0 });
+      yield* WorkflowExec.killTree(child, "win32", spawn);
+      expect(spawned).toEqual([["taskkill", "/T", "/F", "/PID", "4242"]]);
+      expect(kills).toEqual([]);
+    }),
+  );
+
+  it.effect("kills the shell itself when taskkill fails", () =>
+    Effect.gen(function* () {
+      const { child, spawn, kills } = fixture({ exited: false, killerExit: 1 });
+      yield* WorkflowExec.killTree(child, "win32", spawn);
+      expect(kills).toEqual(["SIGKILL"]);
+    }),
+  );
+
+  it.effect("leaves an exited shell's pid alone, as it may name another process", () =>
+    Effect.gen(function* () {
+      const { child, spawn, kills, spawned } = fixture({ exited: true, killerExit: 0 });
+      yield* WorkflowExec.killTree(child, "win32", spawn);
+      expect(spawned).toEqual([]);
+      expect(kills).toEqual([]);
+    }),
   );
 });
 

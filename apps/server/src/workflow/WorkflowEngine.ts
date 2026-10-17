@@ -1212,7 +1212,7 @@ const make = Effect.gen(function* () {
                     })
                   : undefined;
 
-            // A read-only workspace is checked before an agent starts in it and whenever an
+            // A read-only workspace is checked as each attempt starts in it and whenever an
             // agent's result is read: a change there discards the result and is left in place.
             const readOnlyChange = Effect.gen(function* () {
               if (workspace?.readOnly !== true || cwd === null) return undefined;
@@ -1229,7 +1229,12 @@ const make = Effect.gen(function* () {
               Effect.gen(function* () {
                 if (task.status === "completed") {
                   const changed = yield* readOnlyChange;
-                  if (changed !== undefined) return changed;
+                  if (changed !== undefined) {
+                    // Recorded before the script sees the null, so restoring the
+                    // checkout and retrying cannot revive a result made against the change.
+                    yield* execs.discard(coordinatorThreadId, task.id);
+                    return changed;
+                  }
                 }
                 return yield* resultOf(task, call, label);
               });
@@ -1253,13 +1258,13 @@ const make = Effect.gen(function* () {
                 undefined,
               );
             if (prior?.status === "completed") {
-              reused += 1;
-              return deliver(call, yield* outcomeOf(prior));
-            }
-            // A read-only workspace that changed fails the call before it starts again.
-            if (prior === undefined || isTerminal(prior.status)) {
-              const changed = yield* readOnlyChange;
-              if (changed !== undefined) return deliver(call, changed);
+              if (!(yield* execs.discarded(coordinatorThreadId, prior.id))) {
+                reused += 1;
+                return deliver(call, yield* outcomeOf(prior));
+              }
+              yield* log(
+                `${label}: its earlier result was discarded, as its read-only workspace had changed; it starts again.`,
+              );
             }
             const checkout = workspace?.branch ?? "";
             // Agents in a read-only workspace run side by side whatever their role: none may write.
@@ -1320,7 +1325,8 @@ const make = Effect.gen(function* () {
             /**
              * Runs one attempt of the call to its terminal row: awaits `attached`, a
              * child an earlier turn left running, or starts `firstAttempt`.
-             * Undefined when the agent could not start.
+             * Undefined when the agent could not start, and the call's outcome when
+             * its read-only workspace changed before it could.
              */
             const runAttempt = (
               attached: OrchestrationV2Subagent | undefined,
@@ -1328,6 +1334,10 @@ const make = Effect.gen(function* () {
             ) => {
               const execute = Effect.gen(function* () {
                 if (attached !== undefined) return yield* watch(attached.id);
+                // Checked once the attempt holds its slot, as an agent that ran
+                // while it waited may have changed the workspace.
+                const changed = yield* readOnlyChange;
+                if (changed !== undefined) return changed;
                 // A request refused on an earlier run stays refused under its id,
                 // so a rerun steps to the next attempt.
                 for (let taskAttempt = firstAttempt; ; taskAttempt += 1) {
@@ -1385,6 +1395,7 @@ const make = Effect.gen(function* () {
                 yield* log(`${label} could not start. agent() returned null.`);
                 return deliver(call, yield* miss(label, "failed", "The agent could not start."));
               }
+              if ("ok" in finished) return deliver(call, finished);
               const delay = AGENT_RETRY_DELAYS[retry];
               const failure =
                 finished.status === "failed" && delay !== undefined
@@ -1552,22 +1563,13 @@ const make = Effect.gen(function* () {
         return yield* outcome;
       });
 
-      // A stopped or failed run keeps its worktrees for Retry; the run that
-      // finishes removes them. Exactly one terminal ends the turn, whenever a
-      // Stop lands.
-      yield* Effect.gen(function* () {
-        const exit = yield* body.pipe(Effect.scoped, Effect.exit);
-        if (Exit.isSuccess(exit)) {
+      /**
+       * Ends a run whose script returned `value`: removes its worktrees, reports the
+       * result, sends the completed terminal, then drops its command results.
+       */
+      const complete = (value: unknown) =>
+        Effect.gen(function* () {
           yield* removeWorkspaces;
-          // Only a failed or stopped run is retried, so a finished one's commands are not replayed.
-          yield* execs
-            .forget(coordinatorThreadId)
-            .pipe(
-              Effect.catch((error) =>
-                Effect.logWarning("Could not drop a workflow's command results", { error }),
-              ),
-            );
-          const value = exit.value;
           const result =
             value === null || value === undefined
               ? "The workflow finished without a result."
@@ -1598,18 +1600,35 @@ const make = Effect.gen(function* () {
               ["Time and usage per agent:", ...agents.map(agentUsageLine)].join("\n"),
             );
           }
-          yield* Effect.uninterruptible(
-            out
-              .message(
-                [
-                  result,
-                  ...(spent === undefined ? [] : [spent]),
-                  ...(agents.length === 0 ? [] : [agentUsageSummary(agents)]),
-                  ...(notes.length === 0 ? [] : [notes.join("\n")]),
-                ].join("\n\n"),
-              )
-              .pipe(Effect.andThen(finishTurn({ status: "completed" }))),
+          yield* out.message(
+            [
+              result,
+              ...(spent === undefined ? [] : [spent]),
+              ...(agents.length === 0 ? [] : [agentUsageSummary(agents)]),
+              ...(notes.length === 0 ? [] : [notes.join("\n")]),
+            ].join("\n\n"),
           );
+          yield* finishTurn({ status: "completed" });
+          // Only a failed or stopped run is retried, so a finished one's commands are not replayed.
+          yield* execs
+            .forget(coordinatorThreadId)
+            .pipe(
+              Effect.catch((error) =>
+                Effect.logWarning("Could not drop a workflow's command results", { error }),
+              ),
+            );
+        });
+
+      // A stopped or failed run keeps its worktrees for Retry; the run that
+      // finishes removes them. Exactly one terminal ends the turn, whenever a
+      // Stop lands.
+      yield* Effect.gen(function* () {
+        const exit = yield* body.pipe(Effect.scoped, Effect.exit);
+        if (Exit.isSuccess(exit)) {
+          // Cleanup and the completed terminal are one step a Stop waits for: a
+          // stopped run is offered Retry, which needs the worktrees, their recorded
+          // starts and the command results this removes.
+          yield* Effect.uninterruptible(complete(exit.value));
           return;
         }
         const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail");

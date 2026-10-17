@@ -3,7 +3,8 @@
  * A workflow script's `exec(command, opts)`: one shell command in a checkout,
  * run in the sandbox of Bob's commands where the host has one, bounded in time
  * and output, and journaled per coordinator thread, so a Retry replays a
- * command that finished instead of running it again.
+ * command that finished instead of running it again. The journal also keeps
+ * the agents whose results the engine discarded, which a Retry must not reuse.
  */
 import * as NodeChildProcess from "node:child_process";
 
@@ -225,23 +226,81 @@ export class WorkflowExec extends Context.Service<
       callId: string,
       result: WorkflowExecResult,
     ) => Effect.Effect<void, WorkflowExecJournalError>;
-    /** Drops a run's results once it finished, when no Retry can replay them. */
+    /**
+     * Records that the engine discarded a finished agent's result, as a read-only
+     * workspace that changed does, so a Retry starts the call again rather than reuse it.
+     */
+    readonly discard: (
+      threadId: ThreadId,
+      taskId: string,
+    ) => Effect.Effect<void, WorkflowExecJournalError>;
+    readonly discarded: (
+      threadId: ThreadId,
+      taskId: string,
+    ) => Effect.Effect<boolean, WorkflowExecJournalError>;
+    /** Drops a run's results and discards once it finished, when no Retry can replay them. */
     readonly forget: (threadId: ThreadId) => Effect.Effect<void, WorkflowExecJournalError>;
   }
 >()("t3/workflow/WorkflowExec") {}
 
-/** Kills the process group `pid` leads, or the process alone where there are no groups. */
-const killTree = (child: NodeChildProcess.ChildProcess, platform: NodeJS.Platform) => {
-  if (child.pid === undefined) return;
+/** The command that ends Windows process `pid` with every process under it. */
+const windowsTreeKill = (pid: number) => ({
+  command: "taskkill",
+  args: ["/T", "/F", "/PID", String(pid)],
+});
+
+/**
+ * Kills the process group `child` leads. Windows has no groups, so while the
+ * shell runs, `taskkill /T` ends it and every process under it; once it exited
+ * its pid may name another process, and what it left running is out of reach.
+ */
+export const killTree = (
+  child: {
+    readonly pid?: number | undefined;
+    readonly exitCode: number | null;
+    readonly signalCode: NodeJS.Signals | null;
+    readonly kill: (signal: NodeJS.Signals) => boolean;
+  },
+  platform: NodeJS.Platform,
+  spawn: (
+    command: string,
+    args: ReadonlyArray<string>,
+  ) => {
+    readonly once: (event: "error" | "exit", listener: (code: number | null) => void) => unknown;
+  } = (command, args) =>
+    NodeChildProcess.spawn(command, [...args], { stdio: "ignore", windowsHide: true }),
+): Effect.Effect<void> => {
+  const pid = child.pid;
+  if (pid === undefined) return Effect.void;
   if (platform !== "win32") {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-      return;
-    } catch {
-      // The group is gone already.
-    }
+    return Effect.sync(() => {
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // The group is gone already.
+        child.kill("SIGKILL");
+      }
+    });
   }
-  child.kill("SIGKILL");
+  if (child.exitCode !== null || child.signalCode !== null) return Effect.void;
+  return Effect.callback<void>((resume) => {
+    let settled = false;
+    const settle = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      // Without taskkill the shell alone still ends.
+      if (code !== 0) child.kill("SIGKILL");
+      resume(Effect.void);
+    };
+    const kill = windowsTreeKill(pid);
+    try {
+      const killer = spawn(kill.command, kill.args);
+      killer.once("error", () => settle(null));
+      killer.once("exit", settle);
+    } catch {
+      settle(null);
+    }
+  });
 };
 
 /** Runs a spawned command to its result, killing its group past `timeoutMs` or when interrupted. */
@@ -281,7 +340,7 @@ const runProcess = (
       );
       child.on("exit", (code) => Deferred.doneUnsafe(exited, Effect.succeed(code)));
       child.on("close", () => Deferred.doneUnsafe(closed, Effect.void));
-      const kill = Effect.sync(() => killTree(child, options.platform));
+      const kill = Effect.suspend(() => killTree(child, options.platform));
       return yield* restore(
         Effect.gen(function* () {
           const inTime = yield* Deferred.await(exited).pipe(
@@ -325,6 +384,14 @@ export const layer = Layer.effect(
         result_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
         PRIMARY KEY (thread_id, call_id)
+      )
+    `.pipe(Effect.orDie);
+    yield* sql`
+      CREATE TABLE IF NOT EXISTS workflow_discarded_results (
+        thread_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (thread_id, task_id)
       )
     `.pipe(Effect.orDie);
 
@@ -399,12 +466,46 @@ export const layer = Layer.effect(
       );
     });
 
-    const forget = Effect.fn("WorkflowExec.forget")(function* (threadId: ThreadId) {
-      yield* sql`DELETE FROM workflow_exec_results WHERE thread_id = ${threadId}`.pipe(
-        Effect.mapError((cause) => new WorkflowExecJournalError({ operation: "forget", cause })),
+    const discard = Effect.fn("WorkflowExec.discard")(function* (
+      threadId: ThreadId,
+      taskId: string,
+    ) {
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      yield* sql`
+        INSERT INTO workflow_discarded_results (thread_id, task_id, created_at)
+        VALUES (${threadId}, ${taskId}, ${createdAt})
+        ON CONFLICT(thread_id, task_id) DO NOTHING
+      `.pipe(
+        Effect.mapError((cause) => new WorkflowExecJournalError({ operation: "record", cause })),
       );
     });
 
-    return WorkflowExec.of({ run, recorded, record, forget });
+    const discarded = Effect.fn("WorkflowExec.discarded")(function* (
+      threadId: ThreadId,
+      taskId: string,
+    ) {
+      const rows = yield* sql<{ readonly taskId: string }>`
+        SELECT task_id AS "taskId" FROM workflow_discarded_results
+        WHERE thread_id = ${threadId} AND task_id = ${taskId}
+      `.pipe(
+        Effect.mapError((cause) => new WorkflowExecJournalError({ operation: "read", cause })),
+      );
+      return rows.length > 0;
+    });
+
+    const forget = Effect.fn("WorkflowExec.forget")(function* (threadId: ThreadId) {
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`DELETE FROM workflow_exec_results WHERE thread_id = ${threadId}`;
+            yield* sql`DELETE FROM workflow_discarded_results WHERE thread_id = ${threadId}`;
+          }),
+        )
+        .pipe(
+          Effect.mapError((cause) => new WorkflowExecJournalError({ operation: "forget", cause })),
+        );
+    });
+
+    return WorkflowExec.of({ run, recorded, record, discard, discarded, forget });
   }),
 );
