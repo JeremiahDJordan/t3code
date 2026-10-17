@@ -911,17 +911,21 @@ server explicitly, so it copies itself, first thing in `main.ts`
   (`z6`, at `~/.z6/bin/z6`, with its own marker so it never takes over T3's `t3` link), and the
   background service (`z6code.service`, `org.zanson.z6code.service`). The desktop's backend port
   is scanned from 3773 and `serve` takes the next free one, so ports do not collide.
-- The desktop's scheme is `z6code://` (`z6code-dev://` in development), one constant in
-  `packages/shared/src/forkIdentity.ts`. It is both the page's origin (`z6code://app`, through
-  `ElectronProtocol.ts`'s upstream constants) and every link into the app: the bundle's URL types,
-  the Linux handler, prompt links and Codex sign-in returns. So an address the page hands out
-  always routes back to Z6, and T3's links never open it. Upstream's T3 Connect sign-in callbacks
-  are not supported, as T3 Connect is off. A profile copied from T3 keeps its browser storage
-  under `t3code://app`, so `DesktopLegacyLocalStorage.ts` imports it once into the new origin
-  before the first window (marker `upstream-origin-local-storage-imported`); only cached thread
-  snapshots and favicons, kept elsewhere, start empty. The server's CORS list allows both apps'
-  pages (`httpCors.ts`), so an upstream desktop app can still connect. The dev launcher
-  (`electron-launcher.mjs`) keeps its own copy of the scheme, since plain Node cannot import it.
+- The fork's apps use their own URL schemes, from one place, `packages/shared/src/forkIdentity.ts`:
+  `z6code`, `z6code-dev` and `z6code-preview`. On desktop the scheme is both the page's origin
+  (`z6code://app`, through `ElectronProtocol.ts`'s upstream constants) and every link into the app:
+  the bundle's URL types, the Linux handler, prompt links and Codex sign-in returns, so an address
+  the page hands out always routes back to Z6. Every mobile build variant registers its own
+  (`app.config.ts`), and the app's link prefixes, Android notifications and the Live Activity
+  widget use it, so Z6 and T3 can share a phone. Mobile pairing still accepts upstream's
+  `t3code://` QR wrapper, for codes made outside the fork. Code that cannot import the constant
+  keeps a copy and says so: the desktop's dev launcher, the self-contained widget body and the
+  Android notification module's fallback. Upstream's T3 Connect sign-in callbacks are not
+  supported, as T3 Connect is off. A profile copied from T3 keeps its browser storage under
+  `t3code://app`, so `DesktopLegacyLocalStorage.ts` imports it once into the new origin before the
+  first window (marker `upstream-origin-local-storage-imported`); only cached thread snapshots and
+  favicons, kept elsewhere, start empty. The server's CORS list allows both apps' desktop pages
+  (`httpCors.ts`), so an upstream desktop app can still connect.
 - Left shared, on purpose: Tailscale Serve's default port 443
   (set another in one app's Settings when both serve); the in-app name; Linux's desktop entry and
   WM class (the fork builds no Linux desktop app); and `~/.t3` on SSH and WSL hosts, where the

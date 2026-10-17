@@ -30,6 +30,7 @@ import { GlobalVoiceInputControl } from "./features/voice-input/GlobalVoiceInput
 import { NativeLayoutMetricsProvider } from "./native/native-layout-metrics";
 
 import "../global.css";
+import { APP_DEV_SCHEME, APP_PREVIEW_SCHEME, APP_SCHEME } from "@t3tools/shared/forkIdentity";
 
 if (process.env.EXPO_PUBLIC_SHOWCASE === "1") {
   prepareNativeShowcaseCapture();
@@ -38,7 +39,12 @@ if (process.env.EXPO_PUBLIC_SHOWCASE === "1") {
 void SplashScreen.preventAutoHideAsync().catch(() => {});
 
 const appLinking = {
-  prefixes: [Linking.createURL("/"), "t3code://", "t3code-dev://", "t3code-preview://"],
+  prefixes: [
+    Linking.createURL("/"),
+    `${APP_SCHEME}://`,
+    `${APP_DEV_SCHEME}://`,
+    `${APP_PREVIEW_SCHEME}://`,
+  ],
   config: { initialRouteName: "Home" },
   filter: shouldHandleAppLink,
 };

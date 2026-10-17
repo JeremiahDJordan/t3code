@@ -88,6 +88,11 @@ vi.mock("expo-constants", () => ({
   default: { expoConfig: { extra: {} } },
 }));
 
+// The app runtime loads the secure-channel forwarder, whose native module comes from `expo`.
+vi.mock("expo", () => ({
+  NativeModule: class {},
+  requireOptionalNativeModule: () => null,
+}));
 vi.mock("react-native", () => ({
   Platform: {
     OS: "ios",

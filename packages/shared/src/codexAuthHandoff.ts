@@ -1,4 +1,4 @@
-import { desktopLinkScheme } from "./forkIdentity.ts";
+import { desktopScheme } from "./forkIdentity.ts";
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { providerAuthReturnUrl } from "./providerAuthReturnUrl.ts";
@@ -84,7 +84,7 @@ export function codexCallbackUrl(value: string, redirectUri: string, state: stri
 }
 
 export function codexAuthHandoffUrl(input: CodexAuthHandoff, development = false) {
-  const url = new URL(`${desktopLinkScheme(development)}://auth/codex`);
+  const url = new URL(`${desktopScheme(development)}://auth/codex`);
   url.searchParams.set("request", encodeHandoff(input));
   return url.toString();
 }
@@ -94,7 +94,7 @@ export function readCodexAuthHandoff(value: string, development: boolean) {
     const url = new URL(value);
     if (
       value.length > 32_768 ||
-      url.protocol !== `${desktopLinkScheme(development)}:` ||
+      url.protocol !== `${desktopScheme(development)}:` ||
       url.host !== "auth" ||
       url.pathname !== "/codex" ||
       url.username ||

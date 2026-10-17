@@ -127,7 +127,8 @@ object AgentNotifications {
     val fresh = System.currentTimeMillis() - updatedAt in -MAX_MESSAGE_AGE_MS..MAX_MESSAGE_AGE_MS
     if (registered && fresh && NotificationManagerCompat.from(context).areNotificationsEnabled()) {
       channels(context)
-      val scheme = prefs.getString("scheme", "t3code") ?: "t3code"
+      // A copy of APP_SCHEME in packages/shared/src/forkIdentity.ts, until JS stores the build's.
+      val scheme = prefs.getString("scheme", "z6code") ?: "z6code"
       showAlert(context, prefs, scheme, data)
       updateActivity(context, prefs, scheme, data, updatedAt)
     }

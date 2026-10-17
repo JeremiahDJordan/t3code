@@ -1,5 +1,10 @@
 import type { ExpoConfig } from "expo/config";
 
+import {
+  APP_DEV_SCHEME,
+  APP_PREVIEW_SCHEME,
+  APP_SCHEME,
+} from "../../packages/shared/src/forkIdentity.ts";
 import { BRAND_ASSET_PATHS } from "../../scripts/lib/brand-assets.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 
@@ -72,7 +77,7 @@ const RELEASE_ASSETS = {
 const VARIANT_CONFIG = {
   development: {
     appName: "T3 Code Dev",
-    scheme: "t3code-dev",
+    scheme: APP_DEV_SCHEME,
     iosBundleIdentifier: "com.t3tools.t3code.dev",
     androidPackage: "com.t3tools.t3code.dev",
     relyingParty: "clerk.t3.codes",
@@ -80,7 +85,7 @@ const VARIANT_CONFIG = {
   },
   preview: {
     appName: "T3 Code Preview",
-    scheme: "t3code-preview",
+    scheme: APP_PREVIEW_SCHEME,
     iosBundleIdentifier: "com.t3tools.t3code.preview",
     androidPackage: "com.t3tools.t3code.preview",
     relyingParty: "clerk.t3.codes",
@@ -88,7 +93,7 @@ const VARIANT_CONFIG = {
   },
   production: {
     appName: "T3 Code",
-    scheme: "t3code",
+    scheme: APP_SCHEME,
     iosBundleIdentifier: "com.t3tools.t3code",
     androidPackage: "com.t3tools.t3code",
     relyingParty: "clerk.t3.codes",

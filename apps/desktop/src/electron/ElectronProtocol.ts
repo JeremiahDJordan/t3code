@@ -11,13 +11,13 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import * as Electron from "electron";
-import { DESKTOP_DEV_LINK_SCHEME, DESKTOP_LINK_SCHEME } from "@t3tools/shared/forkIdentity";
+import { APP_DEV_SCHEME, APP_SCHEME } from "@t3tools/shared/forkIdentity";
 
 export const DESKTOP_HOST = "app";
 // Fork: the page's origin is the fork's link scheme, so no address the page hands out can open
 // T3 Code (`packages/shared/src/forkIdentity.ts`).
-const DESKTOP_PRODUCTION_SCHEME = DESKTOP_LINK_SCHEME;
-const DESKTOP_DEVELOPMENT_SCHEME = DESKTOP_DEV_LINK_SCHEME;
+const DESKTOP_PRODUCTION_SCHEME = APP_SCHEME;
+const DESKTOP_DEVELOPMENT_SCHEME = APP_DEV_SCHEME;
 
 export function getDesktopScheme(isDevelopment: boolean): string {
   return isDevelopment ? DESKTOP_DEVELOPMENT_SCHEME : DESKTOP_PRODUCTION_SCHEME;

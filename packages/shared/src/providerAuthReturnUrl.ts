@@ -1,4 +1,4 @@
-import { DESKTOP_DEV_LINK_SCHEME, DESKTOP_LINK_SCHEME } from "./forkIdentity.ts";
+import { APP_DEV_SCHEME, APP_SCHEME } from "./forkIdentity.ts";
 import { isLoopbackHost } from "./preview.ts";
 
 export function providerAuthReturnUrl(value: string | undefined): string | undefined {
@@ -7,8 +7,7 @@ export function providerAuthReturnUrl(value: string | undefined): string | undef
     const url = new URL(value);
     // The fork's desktop page origin (`forkIdentity.ts`).
     const desktop =
-      [`${DESKTOP_LINK_SCHEME}:`, `${DESKTOP_DEV_LINK_SCHEME}:`].includes(url.protocol) &&
-      url.host === "app";
+      [`${APP_SCHEME}:`, `${APP_DEV_SCHEME}:`].includes(url.protocol) && url.host === "app";
     const web =
       ["http:", "https:"].includes(url.protocol) &&
       (isLoopbackHost(url.hostname) || url.origin === "https://app.t3.codes");

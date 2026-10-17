@@ -1,4 +1,4 @@
-import { DESKTOP_LINK_SCHEME } from "./forkIdentity.ts";
+import { APP_SCHEME as FORK_APP_SCHEME } from "./forkIdentity.ts";
 import { DEFAULT_HOSTED_APP_URL } from "./connectAuth.ts";
 
 export const PROMPT_LINK_MAX_PROMPT_LENGTH = 8_000;
@@ -185,7 +185,7 @@ export function buildNewThreadLink(input: {
   return url.toString();
 }
 
-const APP_SCHEME = new RegExp(`^${DESKTOP_LINK_SCHEME}(?:-[a-z]+)?:$`);
+const APP_SCHEME = new RegExp(`^${FORK_APP_SCHEME}(?:-[a-z]+)?:$`);
 const THREAD_PATH = /^\/([^/]+)\/([^/]+)\/?$/;
 
 export function promptLinkAppPath(
@@ -207,7 +207,7 @@ export function promptLinkAppPath(
   return thread ? `/${thread[1]}/${thread[2]}${url.search}` : null;
 }
 
-export function promptLinkDeepLink(appPath: string, scheme = DESKTOP_LINK_SCHEME): string {
+export function promptLinkDeepLink(appPath: string, scheme = FORK_APP_SCHEME): string {
   const url = new URL(appPath, "https://app.invalid");
   const host = url.pathname === "/new" ? "new" : `threads${url.pathname}`;
   return `${scheme}://${host}${url.search}`;

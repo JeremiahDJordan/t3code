@@ -40,7 +40,7 @@ const query = new URLSearchParams({
   pairingUrl: process.env.PAIRING_URL,
   autoConnect: "1",
 });
-process.stdout.write(`t3code-dev://connections/new?${query}`);
+process.stdout.write(`z6code-dev://connections/new?${query}`);
 NODE
 )"
 

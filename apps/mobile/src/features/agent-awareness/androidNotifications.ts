@@ -1,3 +1,4 @@
+import { APP_SCHEME } from "@t3tools/shared/forkIdentity";
 import Constants from "expo-constants";
 import { requireOptionalNativeModule } from "expo";
 import { Linking, Platform } from "react-native";
@@ -21,7 +22,7 @@ export function supportsAndroidAgentNotifications(): boolean {
 
 function appScheme(): string {
   const scheme = Constants.expoConfig?.scheme;
-  return (Array.isArray(scheme) ? scheme[0] : scheme) ?? "t3code";
+  return (Array.isArray(scheme) ? scheme[0] : scheme) ?? APP_SCHEME;
 }
 
 export function configureAndroidAgentNotifications(

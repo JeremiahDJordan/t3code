@@ -1,12 +1,16 @@
 /**
- * The fork's own desktop scheme, so Z6 Code and T3 Code can be installed side by side without the
- * operating system handing one app's links to the other. It is both the scheme links into the
- * app use (Codex sign-in returns, prompt links) and the desktop page's own origin
- * (`z6code://app`), so an address the page hands out always routes back to Z6.
+ * The fork's own URL schemes, so Z6 Code's desktop and mobile apps can be installed beside T3 Code's
+ * without the operating system handing one app's links to the other. On desktop the scheme is both
+ * the page's origin (`z6code://app`) and every link into the app (Codex sign-in returns, prompt
+ * links); on mobile it is each build variant's registered scheme. Code that cannot import this
+ * file keeps a copy and says so: the desktop's dev launcher, the iOS Live Activity widget and the
+ * Android notification module.
  */
-export const DESKTOP_LINK_SCHEME = "z6code";
-export const DESKTOP_DEV_LINK_SCHEME = "z6code-dev";
+export const APP_SCHEME = "z6code";
+export const APP_DEV_SCHEME = "z6code-dev";
+export const APP_PREVIEW_SCHEME = "z6code-preview";
 
-export function desktopLinkScheme(development: boolean): string {
-  return development ? DESKTOP_DEV_LINK_SCHEME : DESKTOP_LINK_SCHEME;
+/** The desktop's scheme: the page origin and its links. */
+export function desktopScheme(development: boolean): string {
+  return development ? APP_DEV_SCHEME : APP_SCHEME;
 }
