@@ -42,6 +42,7 @@ import {
   isMacPermissionGranted,
   requestMacPermission,
 } from "../../permissions/macPermissionStatus.ts";
+import { isPromptableMacPermission } from "../../permissions/MacPermission.ts";
 import { safariPermissionCheck } from "../../preview/BrowserImport/SafariPermission.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
@@ -309,9 +310,10 @@ export const openSystemSettings = DesktopIpc.makeIpcMethod({
     if (environment.platform !== "darwin") return false;
     const owner = Electron.BrowserWindow.getFocusedWindow();
     // Let macOS list the app in the pane before the user lands there.
-    if (pane !== "full-disk-access") yield* Effect.promise(() => requestMacPermission(pane));
+    if (isPromptableMacPermission(pane)) yield* Effect.promise(() => requestMacPermission(pane));
     const opened = yield* shell.openSystemSettings(pane);
-    if (opened && environment.isPackaged) {
+    // Files & Folders lists the app on its own once macOS blocks an access; there is nothing to drag in.
+    if (opened && environment.isPackaged && pane !== "files-and-folders") {
       const permissions = yield* MacPermissions.MacPermissions;
       const isGranted = pane === "full-disk-access" ? yield* safariPermissionCheck : undefined;
       yield* permissions.showHelper(pane, owner, isGranted);
@@ -427,7 +429,8 @@ export const checkSystemPermission = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.window.checkSystemPermission")(function* (pane) {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
     if (environment.platform !== "darwin") return false;
-    if (pane !== "full-disk-access") return isMacPermissionGranted(pane);
+    if (isPromptableMacPermission(pane)) return isMacPermissionGranted(pane);
+    if (pane !== "full-disk-access") return false;
     const check = yield* safariPermissionCheck;
     return yield* Effect.promise(check);
   }),

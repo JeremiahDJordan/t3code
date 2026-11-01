@@ -1,9 +1,9 @@
 import * as Electron from "electron";
 
-import type { MacPermission } from "./MacPermission.ts";
+import type { PromptableMacPermission } from "./MacPermission.ts";
 
 /** TCC status for the panes a renderer can check; Full Disk Access has no API and is probed by callers. */
-export function isMacPermissionGranted(permission: Exclude<MacPermission, "full-disk-access">) {
+export function isMacPermissionGranted(permission: PromptableMacPermission) {
   return permission === "accessibility"
     ? Electron.systemPreferences.isTrustedAccessibilityClient(false)
     : Electron.systemPreferences.getMediaAccessStatus("screen") === "granted";
@@ -13,7 +13,7 @@ export function isMacPermissionGranted(permission: Exclude<MacPermission, "full-
  * Triggers the system prompt that adds T3 Code to the pane's list. Accessibility
  * prompts through the trust check; Screen Recording prompts on first capture.
  */
-export async function requestMacPermission(permission: Exclude<MacPermission, "full-disk-access">) {
+export async function requestMacPermission(permission: PromptableMacPermission) {
   if (permission === "accessibility") {
     Electron.systemPreferences.isTrustedAccessibilityClient(true);
     return;

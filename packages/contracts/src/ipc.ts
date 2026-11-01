@@ -1012,6 +1012,7 @@ export const SystemSettingsPaneSchema = Schema.Literals([
   "full-disk-access",
   "accessibility",
   "screen-recording",
+  "files-and-folders",
 ]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 

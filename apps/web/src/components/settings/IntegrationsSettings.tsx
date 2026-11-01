@@ -1184,7 +1184,7 @@ function ComputerUseControls() {
           </>
         }
       />
-      <BrowserTabsSetting environmentId={environmentId} hostLabel={hostLabel} />
+      <BrowserTabsSetting environmentId={environmentId} hostLabel={hostLabel} localMac={localMac} />
       {setupOpen && canConfigure && environmentId !== null ? (
         <CuaSetupDialog
           enabled={enabled}
@@ -1237,9 +1237,11 @@ function ComputerUseControls() {
 function BrowserTabsSetting({
   environmentId,
   hostLabel,
+  localMac,
 }: {
   readonly environmentId: EnvironmentId | null;
   readonly hostLabel: string;
+  readonly localMac: boolean;
 }) {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
@@ -1255,6 +1257,7 @@ function BrowserTabsSetting({
   );
   const enabled = settings.enableAgentBrowserTabs;
   const browser = readyBrowser(status);
+  const blocked = status?.browsers.some((candidate) => candidate.accessBlocked) ?? false;
   const statusText = !enabled
     ? null
     : status === null
@@ -1263,7 +1266,9 @@ function BrowserTabsSetting({
         ? "Needs setup"
         : browser
           ? `Using ${browser.name}`
-          : "Turn on remote debugging in your browser";
+          : blocked
+            ? "macOS is blocking access to your browser"
+            : "Turn on remote debugging in your browser";
 
   return (
     <>
@@ -1298,6 +1303,12 @@ function BrowserTabsSetting({
           hostLabel={hostLabel}
           status={status}
           onRefresh={refresh}
+          {...(localMac
+            ? {
+                onOpenDataSettings: () =>
+                  void window.desktopBridge?.openSystemSettings("files-and-folders"),
+              }
+            : {})}
           onFinish={async () => {
             const result = await runAction({ environmentId, input: { action: "install-tool" } });
             if (result._tag === "Failure") return false;

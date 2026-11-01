@@ -8,11 +8,15 @@ import {
   type SettingsWindow,
 } from "./MacSettingsWindow.ts";
 
-import { MAC_PERMISSION_TITLES, type MacPermission } from "./MacPermission.ts";
+import {
+  isPromptableMacPermission,
+  MAC_PERMISSION_TITLES,
+  type MacPermission,
+} from "./MacPermission.ts";
 import { isMacPermissionGranted } from "./macPermissionStatus.ts";
 
 const permissionGranted = (permission: MacPermission) =>
-  permission === "full-disk-access" ? false : isMacPermissionGranted(permission);
+  isPromptableMacPermission(permission) ? isMacPermissionGranted(permission) : false;
 
 function macAppBundlePath(executable: string): string | undefined {
   return /^(.+\.app)\/Contents\/MacOS\/[^/]+$/.exec(executable)?.[1];

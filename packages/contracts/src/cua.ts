@@ -99,6 +99,8 @@ export const BrowserTabsBrowser = Schema.Struct({
   inspectUrl: Schema.String,
   /** The browser is running with remote debugging on right now. */
   remoteDebugging: Schema.Boolean,
+  /** The host OS keeps the server from reading the browser's data (macOS app data protection). */
+  accessBlocked: Schema.optional(Schema.Boolean),
 });
 export type BrowserTabsBrowser = typeof BrowserTabsBrowser.Type;
 

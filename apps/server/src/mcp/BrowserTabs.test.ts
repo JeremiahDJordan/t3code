@@ -4,6 +4,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 
 import { detectBrowsers } from "./BrowserTabs.ts";
 
@@ -59,6 +60,49 @@ it.layer(NodeServices.layer)("detectBrowsers", (it) => {
       ]);
       expect(browsers[0]?.userDataDir).toBe(edgeDir);
       expect(browsers[0]?.inspectUrl).toBe("edge://inspect/#remote-debugging");
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("reports a port file the server may not read as blocked, not as debugging off", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-browser-tabs-" });
+      yield* profile(root, "Library/Application Support/Microsoft Edge");
+      const chromeDir = yield* profile(root, "Library/Application Support/Google/Chrome", 9222);
+      const blockedFile = path.join(chromeDir, "DevToolsActivePort");
+      // macOS app data protection fails the read with EPERM, which reaches us as Unknown.
+      const guarded: FileSystem.FileSystem = {
+        ...fs,
+        readFileString: (file, encoding) =>
+          file === blockedFile
+            ? Effect.fail(
+                PlatformError.systemError({
+                  _tag: "Unknown",
+                  module: "FileSystem",
+                  method: "readFile",
+                  description: "EPERM: operation not permitted",
+                }),
+              )
+            : fs.readFileString(file, encoding),
+      };
+
+      const browsers = yield* detectBrowsers().pipe(
+        Effect.provideService(FileSystem.FileSystem, guarded),
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.provideService(HostProcess.Environment, { HOME: root }),
+      );
+
+      expect(
+        browsers.map(({ id, remoteDebugging, accessBlocked }) => ({
+          id,
+          remoteDebugging,
+          accessBlocked,
+        })),
+      ).toEqual([
+        { id: "chrome", remoteDebugging: false, accessBlocked: true },
+        { id: "edge", remoteDebugging: false, accessBlocked: false },
+      ]);
     }).pipe(Effect.scoped),
   );
 });

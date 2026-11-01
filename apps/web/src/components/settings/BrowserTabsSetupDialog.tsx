@@ -29,12 +29,15 @@ export function BrowserTabsSetupDialog({
   hostLabel,
   status,
   onRefresh,
+  onOpenDataSettings,
   onFinish,
   onClose,
 }: {
   hostLabel: string;
   status: BrowserTabsStatus | null;
   onRefresh: () => void;
+  /** Only on the host Mac, which can open its own System Settings. */
+  onOpenDataSettings?: () => void;
   onFinish: () => Promise<boolean>;
   onClose: () => void;
 }) {
@@ -44,6 +47,7 @@ export function BrowserTabsSetupDialog({
   const { copyToClipboard, isCopied } = useCopyToClipboard<string>({ onCopy: setCopiedUrl });
   const browsers = status?.browsers ?? [];
   const ready = readyBrowser(status) !== undefined;
+  const blocked = browsers.filter((browser) => browser.accessBlocked);
   const finish = async () => {
     setInstalling(true);
     setError(null);
@@ -83,7 +87,7 @@ export function BrowserTabsSetupDialog({
                 >
                   <div className="min-w-0 flex-1">
                     <p className="font-medium">{browser.name}</p>
-                    {browser.remoteDebugging ? null : (
+                    {browser.remoteDebugging || browser.accessBlocked ? null : (
                       <p className="truncate font-mono text-xs text-muted-foreground">
                         {browser.inspectUrl}
                       </p>
@@ -93,6 +97,10 @@ export function BrowserTabsSetupDialog({
                     <span role="status" className="flex items-center gap-1 text-xs text-success">
                       <CircleCheckIcon className="size-4" aria-hidden="true" />
                       On
+                    </span>
+                  ) : browser.accessBlocked ? (
+                    <span role="status" className="text-xs text-muted-foreground">
+                      Blocked by macOS
                     </span>
                   ) : (
                     <Button
@@ -107,6 +115,22 @@ export function BrowserTabsSetupDialog({
               ))}
             </div>
           )}
+          {blocked.length > 0 && !ready ? (
+            <div className="mt-3 space-y-2 text-sm text-muted-foreground">
+              <p>
+                macOS keeps T3 Code from checking{" "}
+                {blocked.map((browser) => browser.name).join(" and ")}.{" "}
+                {onOpenDataSettings
+                  ? "In Files & Folders, turn on the browser under T3 Code, then choose Check again."
+                  : `On ${hostLabel}, open System Settings → Privacy & Security → Files & Folders → T3 Code, turn on the browser, then choose Check again.`}
+              </p>
+              {onOpenDataSettings ? (
+                <Button size="xs" variant="outline" onClick={onOpenDataSettings}>
+                  Open Files &amp; Folders
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
           {error ? (
             <p role="alert" className="mt-3 text-sm text-destructive">
               {error}

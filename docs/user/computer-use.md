@@ -63,3 +63,9 @@ it finds on the host. Open the browser's page it shows, such as
 `chrome://inspect/#remote-debugging`, and turn on remote debugging. Choosing
 **Done** installs Chrome DevTools MCP on the host. The browser asks to allow
 each connection, so someone at the host has to approve it.
+
+On a Mac, macOS blocks T3 Code from reading the browser's data, which is where
+the browser records that remote debugging is on, until you allow it. When macOS
+says T3 Code tried to access data from other apps, choose **Manage** and turn on
+the browser under T3 Code, or do the same in **System Settings → Privacy &
+Security → Files & Folders**. Then choose **Check again**.

@@ -123,13 +123,19 @@ export const detectBrowsers = Effect.fn("BrowserTabs.detectBrowsers")(function* 
     const userDataDir = path.join(base, ...relative.split("/"));
     if (!(yield* fs.exists(userDataDir).pipe(Effect.orElseSucceed(() => false)))) continue;
     // Chromium writes this file when remote debugging starts. Its port is never
-    // opened here: connecting is what asks the user to allow access.
+    // opened here: connecting is what asks the user to allow access. Any failure
+    // but a missing file means the OS refused the read (macOS reports EPERM).
     const portFile = path.join(userDataDir, "DevToolsActivePort");
-    const port = yield* fs.readFileString(portFile).pipe(
-      Effect.map((text) => Number.parseInt(text.split("\n")[0] ?? "", 10)),
-      Effect.orElseSucceed(() => Number.NaN),
+    const read = yield* fs.readFileString(portFile).pipe(
+      Effect.map((text) => ({
+        port: Number.parseInt(text.split("\n")[0] ?? "", 10),
+        accessBlocked: false,
+      })),
+      Effect.catch((error) =>
+        Effect.succeed({ port: Number.NaN, accessBlocked: error.reason._tag !== "NotFound" }),
+      ),
     );
-    const remoteDebugging = Number.isInteger(port) && port > 0;
+    const remoteDebugging = Number.isInteger(read.port) && read.port > 0;
     const since = remoteDebugging
       ? yield* fs.stat(portFile).pipe(
           Effect.map((info) => Option.getOrUndefined(info.mtime)?.getTime() ?? 0),
@@ -141,6 +147,7 @@ export const detectBrowsers = Effect.fn("BrowserTabs.detectBrowsers")(function* 
       name: browser.name,
       inspectUrl: `${browser.scheme}://inspect/#remote-debugging`,
       remoteDebugging,
+      accessBlocked: read.accessBlocked,
       userDataDir,
       since,
     });
@@ -183,12 +190,15 @@ const make = Effect.gen(function* () {
 
   const status = Effect.gen(function* () {
     return {
-      browsers: (yield* browsers).map(({ id, name, inspectUrl, remoteDebugging }) => ({
-        id,
-        name,
-        inspectUrl,
-        remoteDebugging,
-      })),
+      browsers: (yield* browsers).map(
+        ({ id, name, inspectUrl, remoteDebugging, accessBlocked }) => ({
+          id,
+          name,
+          inspectUrl,
+          remoteDebugging,
+          ...(accessBlocked ? { accessBlocked } : {}),
+        }),
+      ),
       toolInstalled: (yield* installed) !== null,
     } satisfies BrowserTabsStatus;
   });
