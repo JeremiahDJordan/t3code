@@ -5,6 +5,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { BUNDLED_YARN_ENV } from "@t3tools/shared/nodeRuntime";
 
 import * as ProcessRunner from "../processRunner.ts";
 import {
@@ -41,6 +43,67 @@ it.effect("failed installation cleans staging and exposes only a safe failure me
     expect(error.cause).toBe(result);
     expect(yield* isDeviceHubInstalled(baseDir)).toBe(false);
     expect(yield* fs.readDirectory(path.join(baseDir, "tools", "expo-device-hub"))).toEqual([]);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("without npm, the desktop's bundled yarn installs under the app's own Node", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-device-install-" });
+    const calls: Array<ProcessRunner.ProcessRunInput> = [];
+    const run = (input: ProcessRunner.ProcessRunInput) => {
+      calls.push(input);
+      if (input.command === "npm") {
+        return Effect.fail(
+          new ProcessRunner.ProcessSpawnError({
+            command: "npm",
+            argumentCount: input.args.length,
+            cause: PlatformError.systemError({
+              _tag: "NotFound",
+              module: "ChildProcess",
+              method: "spawn",
+            }),
+          }),
+        );
+      }
+      return Effect.gen(function* () {
+        const shim = path.join(input.env!.PATH!.split(":")[0]!, "node");
+        expect(yield* fs.readFileString(shim)).toContain("exec '/Applications/T3 Code' \"$@\"");
+        const stagingDir = input.args[input.args.indexOf("--cwd") + 1]!;
+        const entry = path.join(stagingDir, "node_modules/expo-device-hub/dist/server/cli.mjs");
+        yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
+        yield* fs.writeFileString(entry, "");
+        return {
+          code: ChildProcessSpawner.ExitCode(0),
+          stdout: "",
+          stderr: "",
+          timedOut: false,
+          stdoutTruncated: false,
+          stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
+        };
+      }).pipe(Effect.orDie);
+    };
+
+    const paths = yield* ensureDeviceHub(baseDir).pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, { run }),
+      Effect.provideService(HostProcess.Platform, "darwin"),
+      Effect.provideService(HostProcess.ExecutablePath, "/Applications/T3 Code"),
+      Effect.provideService(HostProcess.Environment, {
+        PATH: "/usr/bin",
+        [BUNDLED_YARN_ENV]: "/Applications/yarn/bin/yarn.js",
+      }),
+    );
+
+    const yarn = calls[1]!;
+    expect(yarn.command).toBe("/Applications/T3 Code");
+    expect(yarn.args.slice(0, 2)).toEqual(["/Applications/yarn/bin/yarn.js", "add"]);
+    expect(yarn.args.at(-1)).toBe(`expo-device-hub@${DEVICE_HUB_VERSION}`);
+    expect(yarn.env?.ELECTRON_RUN_AS_NODE).toBe("1");
+    expect(yield* isDeviceHubInstalled(baseDir)).toBe(true);
+    expect(yield* fs.exists(path.join(paths.installDir, ".node-shim"))).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

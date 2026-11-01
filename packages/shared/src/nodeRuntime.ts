@@ -47,6 +47,9 @@ export const resolveSelfInvocation = Effect.fn("nodeRuntime.resolveSelfInvocatio
   } satisfies SelfInvocation;
 });
 
+/** The desktop app's bundled yarn CLI, which installs agent tools on hosts without npm. */
+export const BUNDLED_YARN_ENV = "T3CODE_DESKTOP_YARN_PATH";
+
 export const selfInvocationArgs = (
   invocation: SelfInvocation,
   args: ReadonlyArray<string>,

@@ -2,6 +2,7 @@ import * as NodeOS from "node:os";
 
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
 import { currentDesktopBootstrapToken } from "@t3tools/shared/desktopBootstrapToken";
+import { BUNDLED_YARN_ENV } from "@t3tools/shared/nodeRuntime";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -118,6 +119,15 @@ const WSL_SERVER_SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 const nodeBinDirOf = (nodePath: string): string => {
   const lastSlash = nodePath.lastIndexOf("/");
   return lastSlash > 0 ? nodePath.slice(0, lastSlash) : "/usr/bin";
+};
+
+/** Installs agent tools when the host has no npm; absent when the app was built without it. */
+const bundledYarnPath = (): string | undefined => {
+  try {
+    return require.resolve("yarn/bin/yarn.js");
+  } catch {
+    return undefined;
+  }
 };
 
 const backendChildEnvPatch = (): Record<string, string | undefined> =>
@@ -533,6 +543,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
         ...backendChildEnvPatch(),
         ELECTRON_RUN_AS_NODE: "1",
         T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
+        [BUNDLED_YARN_ENV]: bundledYarnPath(),
       },
       extendEnv: true,
       bootstrap,

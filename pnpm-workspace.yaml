@@ -28,6 +28,7 @@ allowBuilds:
   "@tsc-rs/typescript": true
   utf-8-validate: false
   workerd: false
+  yarn: false
 
 catalog:
   "@alchemy.run/axiom": 2.0.0-beta.84

@@ -10,6 +10,8 @@ const DESKTOP_RUNTIME_EXTERNAL_PREFIXES = [
   "@ubjs/",
   // Playwright reads its runtime bundle/driver from disk; inlining cannot replace those files.
   "playwright-core",
+  // Run as a CLI from disk to install agent tools on hosts without npm (DeviceToolchain).
+  "yarn",
 ] as const;
 
 export function isDesktopRuntimeExternalDependency(id: string): boolean {

@@ -8,6 +8,8 @@ import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { BUNDLED_YARN_ENV } from "@t3tools/shared/nodeRuntime";
 
 import * as ProcessRunner from "../processRunner.ts";
 import DEVICE_TOOL_VERSIONS from "./deviceToolVersions.json" with { type: "json" };
@@ -93,6 +95,76 @@ const isInstalled = Effect.fn("DeviceToolchain.isInstalled")(function* (
   return entryExists && Option.isSome(sentinel) && sentinel.value.trim() === version;
 });
 
+/**
+ * Without npm on PATH, the desktop app's bundled yarn installs the tool, run by the app's own
+ * Electron as Node. Install scripts (node-datachannel's prebuild) call `node`, so a shim for it
+ * goes on their PATH. Other hosts keep fetching npm through pnpm.
+ */
+const installWithoutNpm = Effect.fn("DeviceToolchain.installWithoutNpm")(function* (
+  spec: ToolSpec,
+  stagingDir: string,
+  npmArgs: ReadonlyArray<string>,
+) {
+  const runner = yield* ProcessRunner.ProcessRunner;
+  const environment = yield* HostProcess.Environment;
+  const yarn = environment[BUNDLED_YARN_ENV];
+  if (!yarn) {
+    return yield* runner.run({
+      command: "pnpm",
+      args: ["--package=npm@11", "dlx", "npm", ...npmArgs],
+      timeout: INSTALL_TIMEOUT,
+    });
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
+  const node = yield* HostProcess.ExecutablePath;
+  const shimDir = path.join(stagingDir, ".node-shim");
+  yield* fs.makeDirectory(shimDir);
+  if (platform === "win32") {
+    yield* fs.writeFileString(
+      path.join(shimDir, "node.cmd"),
+      `@echo off\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"${node.replaceAll("%", "%%")}" %*\r\n`,
+    );
+  } else {
+    const shim = path.join(shimDir, "node");
+    yield* fs.writeFileString(
+      shim,
+      `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec '${node.replaceAll("'", `'"'"'`)}' "$@"\n`,
+    );
+    yield* fs.chmod(shim, 0o755);
+  }
+  // yarn add needs a project to add into.
+  yield* fs.writeFileString(path.join(stagingDir, "package.json"), '{ "private": true }\n');
+  const pathKey = Object.keys(environment).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+  const searchPath = environment[pathKey];
+  return yield* runner
+    .run({
+      command: node,
+      args: [
+        yarn,
+        "add",
+        "--cwd",
+        stagingDir,
+        "--no-lockfile",
+        "--non-interactive",
+        "--silent",
+        `${spec.name}@${spec.version}`,
+      ],
+      env: {
+        ...environment,
+        ELECTRON_RUN_AS_NODE: "1",
+        [pathKey]: searchPath
+          ? `${shimDir}${platform === "win32" ? ";" : ":"}${searchPath}`
+          : shimDir,
+      },
+      timeout: INSTALL_TIMEOUT,
+    })
+    .pipe(
+      Effect.ensuring(fs.remove(shimDir, { recursive: true, force: true }).pipe(Effect.ignore)),
+    );
+});
+
 const installTool = Effect.fn("DeviceToolchain.installTool")(function* (
   spec: ToolSpec,
   paths: DeviceToolPaths,
@@ -132,11 +204,7 @@ const installTool = Effect.fn("DeviceToolchain.installTool")(function* (
           ProcessSpawnError: (error) =>
             error.cause instanceof PlatformError.PlatformError &&
             error.cause.reason._tag === "NotFound"
-              ? runner.run({
-                  command: "pnpm",
-                  args: ["--package=npm@11", "dlx", "npm", ...installArgs],
-                  timeout: INSTALL_TIMEOUT,
-                })
+              ? installWithoutNpm(spec, stagingDir, installArgs)
               : Effect.fail(error),
         }),
         Effect.mapError(fail("running npm install")),
